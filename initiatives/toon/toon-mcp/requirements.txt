@@ -1,0 +1,4 @@
+toon-py>=1.0.2
+mcp<2
+tiktoken>=0.7.0
+

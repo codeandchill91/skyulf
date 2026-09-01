@@ -1,10 +1,23 @@
 # Skyulf Core — Deep Audit (Opus)
 
-**Date:** 2026-08-31
-**Auditor:** GitHub Copilot CLI (Claude Opus 5), 15 parallel read-only audit agents + direct verification
+**Date:** 2026-08-31 → 2026-09-01
+**Auditor:** GitHub Copilot CLI (Claude Opus 5) — 15 parallel read-only audit agents, then a hands-on verification pass
 **Scope:** `skyulf-core/` (33,735 lines of `skyulf/` source, every file, every line), extended on request to `backend/` (27,564 lines) and `frontend/ml-canvas/src` (71,666 lines)
 **Baseline commit:** `93d7719e` (master)
 **Status of repo at audit time:** `ruff check` clean, `ruff format --check` clean (356 files), `ty check` clean. **No repository files were modified by this audit.**
+
+**Result:** **116 findings** — 5 🔴 Critical, 45 🟠 High, 44 🟡 Medium, 22 ⚪ Low —
+plus one systemic recommendation, [R1](#r1), that retires eight of them as a class.
+
+81 came from the agent phase (`OC-01 … OC-81`); the other 12 from five modules
+the lead auditor [audited directly with no agent
+input](#modules-audited-directly-by-me-with-no-agent-input). **27 of the
+agent-phase findings were then re-verified by execution** — 2 needed correction —
+and one of my *own* findings (OC-100) was retracted as a false positive. See [`00-validation-log.md`](./opus_core_analysis/00-validation-log.md) and
+[Verification status](#verification-status).
+
+Detail for the first five domains is in this file; the rest are in
+[`opus_core_analysis/`](./opus_core_analysis/README.md).
 
 ---
 
@@ -40,8 +53,7 @@ The user-visible symptom is always the same and always invisible: **the canvas
 says one thing, the pipeline does another.**
 
 This is a systemic architectural issue, not eleven independent bugs. See
-[Recommendation R1](#r1-generate-the-frontend-contract-from-node_meta) for the
-structural fix.
+[Recommendation R1](#r1) for the structural fix.
 
 ---
 
@@ -51,12 +63,12 @@ structural fix.
 
 | ID | Sev | Title | Location |
 |---|---|---|---|
-| [OC-01](#oc-01) | 🟠 High | `skyulf.__version__` always reports a stale, wrong version | `skyulf/__init__.py:24-30` |
+| [OC-01](#oc-01) | 🟠 High | ⚠️ **corrected** — `skyulf.__version__` is ambiguous: a stale `0.5.8` dist-info shadows the real `0.8.8` (path-order dependent, *not* "always stale") | `skyulf/__init__.py:24-30` |
 | [OC-02](#oc-02) | 🟠 High | Dev editable install is dangling; `import skyulf` fails outside the repo | venv `skyulf-core` dist-info |
 | [OC-03](#oc-03) | 🟠 High | Systemic `infer_output_schema` int→float misprediction across 22 nodes | `preprocessing/*` + `backend/.../_schema_graph.py:104` |
 | [OC-04](#oc-04) | 🟡 Medium | Cross-engine dtype divergence in 3 nodes (int64 vs int8/uint32) | `encoding/dummy.py`, `bucketing.py` |
 | [OC-05](#oc-05) | 🟡 Medium | `PowerTransformer` triggers a pandas deprecation that will become an error | `transformations/power.py:101` |
-| [OC-06](#oc-06) | 🟡 Medium | 9 registered nodes are unreachable from the UI (incl. all of `geo/`) | `registry.py` vs `frontend/` |
+| [OC-06](#oc-06) | 🟡 Medium | 6 registered nodes are unreachable from the UI (incl. all of `geo/`) | `registry.py` vs `frontend/` |
 | [OC-07](#oc-07) | 🟡 Medium | Node-id naming is split 55 PascalCase / 45 snake_case + redundant aliases | `registry.py` |
 | [OC-08](#oc-08) | 🟡 Medium | Public-API name collision: `DatasetProfile` means two different things | `skyulf/__init__.py:32-46` |
 | [OC-09](#oc-09) | 🟡 Medium | Narrow `ruff select` hides ~500 missing docstrings and 84 unused args | `pyproject.toml:137-226` |
@@ -116,7 +128,7 @@ structural fix.
 | [OC-43](#oc-43) | 🟠 High | Correlation drops valid columns/rows instead of a defined missing-data policy | `profiling/correlations.py:41-44,100-110` |
 | [OC-44](#oc-44) | 🟠 High | Wasserstein drift thresholds a normalized value but reports the raw one | `profiling/drift.py:181-195` |
 | [OC-45](#oc-45) | 🟠 High | Schema drift is computed but never counted or rendered as drift | `profiling/drift.py:76-98` |
-| [OC-46](#oc-46) | 🟠 High | Non-finite floats enter public profile payloads and break strict JSON | `profiling/schemas.py:7-17,263-302` |
+| [OC-46](#oc-46) | 🟡 Medium | ⚠️ **corrected, downgraded** — non-finite floats reach public payloads and are silently coerced to `null` by orjson; only stdlib-json paths emit invalid JSON | `profiling/schemas.py:7-17,263-302` |
 | [OC-47](#oc-47) | 🟡 Medium | Common-column dtype drift can silently disappear | `profiling/drift.py:136-153` |
 | [OC-48](#oc-48) | 🟡 Medium | Expectations pass vacuously on empty frames | `profiling/expect.py:92-209` |
 | [OC-49](#oc-49) | 🟡 Medium | Valid partially-unlabelled PCA payloads crash plotting | `profiling/visualizer.py:716-737` |
@@ -124,7 +136,221 @@ structural fix.
 | [OC-51](#oc-51) | 🟡 Medium | Transform advice can be mathematically invalid and self-contradictory | `profiling/_analyzer/recommendations.py:66-78,129-139` |
 | [OC-52](#oc-52) | ⚪ Low | Categorical colour mapping is process-nondeterministic | `profiling/visualizer.py:710-713` |
 
-<!-- SECTIONS-PENDING: modeling estimators/CV, tuning, core/engines, pipeline, outliers/geo, tests/packaging, backend ×2, frontend ×2 -->
+### Core, engines, data & pipeline → [report 06](./opus_core_analysis/06-core-engines-pipeline.md)
+
+| ID | Sev | Title | Location |
+|---|---|---|---|
+| [OC-62](./opus_core_analysis/06-core-engines-pipeline.md#oc-62) | 🔴 Critical | `fingerprint()` is not reproducible for any artifact holding an object-dtype array | `pipeline/seal.py:57-59` |
+| [OC-63](./opus_core_analysis/06-core-engines-pipeline.md#oc-63) | 🟠 High | `artifact_digest` raises `RecursionError` instead of the documented `TypeError` on cyclic graphs | `pipeline/seal.py` |
+| [OC-64](./opus_core_analysis/06-core-engines-pipeline.md#oc-64) | 🟠 High | **F-14 only partially fixed** — the engine registry global is still an unlocked race | `engines/registry.py:60,86-91` |
+| [OC-65](./opus_core_analysis/06-core-engines-pipeline.md#oc-65) | 🟡 Medium | The polars `to_numpy()` zero-width "parity fix" does not achieve parity | `engines/polars_engine.py` |
+| [OC-74](./opus_core_analysis/06-core-engines-pipeline.md#oc-74) | 🟡 Medium | `NodeRegistry.list_models()` hides all 4 Ensemble models; its `category` arg is dead | `registry.py:101-108` |
+
+### Outliers, casting, binning, time series & geo → [report 07](./opus_core_analysis/07-outliers-timeseries-geo.md)
+
+| ID | Sev | Title | Location |
+|---|---|---|---|
+| [OC-58](./opus_core_analysis/07-outliers-timeseries-geo.md#oc-58) | 🔴 Critical | Numeric→boolean casting silently reinterprets any nonzero value as `True` on polars | `preprocessing/casting.py:143-178` |
+| [OC-59](./opus_core_analysis/07-outliers-timeseries-geo.md#oc-59) | 🟠 High | `DatasetProfile` numeric-column coverage is completely different between engines | `preprocessing/inspection/` |
+| [OC-60](./opus_core_analysis/07-outliers-timeseries-geo.md#oc-60) | 🟠 High | `GeneralBinning`'s `missing_strategy: "label"` is a silent no-op on polars | `preprocessing/bucketing.py` |
+| [OC-61](./opus_core_analysis/07-outliers-timeseries-geo.md#oc-61) | 🟡 Medium | `BinningNode`'s "Precision (Decimals)" UI field is never sent to the backend | `BinningNode.tsx` |
+
+### Modeling: estimators, CV & tuning → [report 08](./opus_core_analysis/08-modeling-tuning.md)
+
+| ID | Sev | Title | Location |
+|---|---|---|---|
+| [OC-66](./opus_core_analysis/08-modeling-tuning.md#oc-66) | 🟠 High | `CalibratedClassifierCV`'s user-selected base estimator is silently discarded during tuning | `modeling/classification.py:206-282` vs `_tuning/engine.py:495-499` |
+| [OC-67](./opus_core_analysis/08-modeling-tuning.md#oc-67) | 🟡 Medium | Tuning metrics `pr_auc`/`pr_auc_weighted`/`g_score` crash the entire search | `modeling/_tuning/metrics.py:19-36,127-146` |
+
+> **Leakage audit: clean.** All 7 fit/apply boundaries in `skyulf-core` were
+> traced; **none leaks**. 389 (model, param, extreme) combinations were executed;
+> **every declared hyperparameter range is valid.** See report 08.
+
+### Backend: execution, API & services → [report 09](./opus_core_analysis/09-backend.md)
+
+| ID | Sev | Title | Location |
+|---|---|---|---|
+| [OC-68](./opus_core_analysis/09-backend.md#oc-68) | 🟠 High | Model alias map is task-unaware — a direct API caller silently trains the wrong estimator family | `_execution/engine/_node_runners.py:1157-1183` |
+| [OC-69](./opus_core_analysis/09-backend.md#oc-69) | 🟠 High | The engine trusts `config.nodes` list order and never verifies it is topologically sorted | `_execution/_schema_graph.py:49-70`, `engine/__init__.py:135-171` |
+| [OC-70](./opus_core_analysis/09-backend.md#oc-70) | 🟡 Medium | The leakage validator checks for *a* splitter globally, not that *this* branch is protected | `_execution/_leakage_validation.py:189-267` |
+| [OC-71](./opus_core_analysis/09-backend.md#oc-71) | 🟠 High | **No authentication or authorization anywhere on the API** | `main.py:373-395`, `database/models.py:151-159` |
+| [OC-72](./opus_core_analysis/09-backend.md#oc-72) | 🟡 Medium | Insecure-by-default config: unset `FASTAPI_ENV` fails *open* to wildcard CORS + credentials | `config/factory.py:26`, `main.py:359-366` |
+| [OC-73](./opus_core_analysis/09-backend.md#oc-73) | ⚪ Low | `DataSource.credentials` documented as encrypted, stored as plaintext JSON | `database/models.py:107` |
+
+> Path traversal, SQLi, SSRF, unsafe deserialization, upload limits, rate
+> limiting and async-blocking were all checked and found **sound**. See the
+> security checklist in report 09.
+
+### Frontend node-config layer → [report 10](./opus_core_analysis/10-frontend.md)
+
+| ID | Sev | Title | Location |
+|---|---|---|---|
+| [OC-53](./opus_core_analysis/10-frontend.md#oc-53) | 🟡 Medium | `select_from_model`'s `max_features` is a Python-only, UI-unreachable param | `feature_selection/` vs `FeatureSelectionNode.tsx` |
+| [OC-54](./opus_core_analysis/10-frontend.md#oc-54) | 🟡 Medium | `DebugNode` is dead code that would silently no-op if ever wired up | `nodes/DebugNode.tsx` |
+| [OC-55](./opus_core_analysis/10-frontend.md#oc-55) | 🟡 Medium | `tsc --noEmit` fails: `mermaid` declared but not installed | `frontend/ml-canvas/package.json` |
+| [OC-56](./opus_core_analysis/10-frontend.md#oc-56) | ⚪ Low | `useSchemaPreview` does not cancel in-flight requests on unmount | `hooks/useSchemaPreview.ts` |
+| [OC-57](./opus_core_analysis/10-frontend.md#oc-57) | ⚪ Low | `any`-typed chart props bypass type safety in EDA components | `modules/eda/` |
+
+> Report 10 also carries the **full ~40-row node parity matrix** (registry id ↔
+> node component ↔ params ↔ verdict) — the raw evidence behind the headline.
+
+### Tests, benchmarks, packaging & CI → [report 11](./opus_core_analysis/11-tests-packaging-ci.md)
+
+| ID | Sev | Title | Location |
+|---|---|---|---|
+| [OC-75](./opus_core_analysis/11-tests-packaging-ci.md#oc-75) | 🔴 Critical | Dev env polars (1.40.1) is below the declared floor (≥1.43.2) — 10 tests, **every notebook** and a benchmark all broken | `setup.py:27`, `uv.lock:1160`, `preprocessing/split.py:283-351` |
+| [OC-76](./opus_core_analysis/11-tests-packaging-ci.md#oc-76) | 🟠 High | Cross-engine parity tests cover 9 of 100 nodes and never compare applied output | `tests/unit/test_engine_parity.py` |
+| [OC-77](./opus_core_analysis/11-tests-packaging-ci.md#oc-77) | 🟠 High | `--maxfail=1` hides the real failure count; `--cov-fail-under=45` vs 98.4% actual | `.github/workflows/skyulf-core-tests.yml:82-87` |
+| [OC-78](./opus_core_analysis/11-tests-packaging-ci.md#oc-78) | 🟡 Medium | `py.typed` declared in packaging metadata but the file does not exist | `setup.py:20-21`, `MANIFEST.in:3` |
+| [OC-79](./opus_core_analysis/11-tests-packaging-ci.md#oc-79) | 🟡 Medium | `joblib` imported at module scope but not in `install_requires` | `core/serialization.py:22`, `setup.py:22-29` |
+| [OC-80](./opus_core_analysis/11-tests-packaging-ci.md#oc-80) | 🟡 Medium | The 3 weakest-covered modules are untested exactly where silence is dangerous | `_sklearn_compat.py`, `value_replacement.py`, `config_validation.py` |
+| [OC-81](./opus_core_analysis/11-tests-packaging-ci.md#oc-81) | ⚪ Low | No `License ::` classifier / SPDX field | `setup.py:81-85` |
+
+> **The test suite itself is excellent**: 3,670 tests, **98.40% coverage**, zero
+> modules under 50%, fully deterministic across repeated runs and
+> `PYTHONHASHSEED` changes. Every problem above is *around* the suite — the
+> environment it runs in, the gates that guard it, the metadata it ships.
+
+---
+
+### Modules audited directly by me, with no agent input
+
+These five areas were in no agent's assigned scope, or were re-done from scratch
+after the verification pass. Every finding below was found *and* reproduced by
+the lead auditor.
+
+| ID | Sev | Title | Location | Report |
+|---|---|---|---|---|
+| [OC-110](./opus_core_analysis/15-profiling-analyzers.md#oc-110) | 🟠 High | Semantic-type inference misclassifies small categorical columns as `Text`, so task type is never inferred | `profiling/_analyzer/column.py`, `analyzer.py:502` | [15](./opus_core_analysis/15-profiling-analyzers.md) |
+| [OC-113](./opus_core_analysis/15-profiling-analyzers.md#oc-113) | 🟠 High | Near-perfect multicollinearity silently reports **VIF = 1.0** (no multicollinearity) — `max(1.0, …)` clamps numerical garbage | `profiling/_analyzer/numeric.py:32-63` | [15](./opus_core_analysis/15-profiling-analyzers.md) |
+| [OC-114](./opus_core_analysis/15-profiling-analyzers.md#oc-114) | 🟡 Medium | An all-null tracked column yields 30 `NaN` autocorrelation lags presented as real analysis (≥1000-row datasets only) | `profiling/_analyzer/temporal.py:167-191` | [15](./opus_core_analysis/15-profiling-analyzers.md) |
+| [OC-120](./opus_core_analysis/16-dtype-coverage.md#oc-120) | 🟠 High | `Decimal` columns silently skipped by every auto-numeric node; crash pandas when selected explicitly | `engines/__init__.py`, `preprocessing/_helpers.py` | [16](./opus_core_analysis/16-dtype-coverage.md) |
+| [OC-91](./opus_core_analysis/13-core-internals.md#oc-91) | 🟡 Medium | Three public `core/` seams (263 lines) have zero call sites; one duplicates a differently-shaped backend class name | `core/deprecation.py`, `core/model_registry.py`, `core/serialization.py` | [13](./opus_core_analysis/13-core-internals.md) |
+| [OC-101](./opus_core_analysis/14-hyperparameters.md#oc-101) | 🟡 Medium | `calibrated_classifier`'s `random_state` field is a no-op for **two** independent reasons: the estimator rejects it, *and* the base-estimator factories hardcode the seed | `hyperparameters/_calibration.py`, `modeling/classification.py:217-226` | [14](./opus_core_analysis/14-hyperparameters.md) |
+| [OC-102](./opus_core_analysis/14-hyperparameters.md#oc-102) | ⚪ Low | Five tunable models return an empty search space from the live `/defaults` endpoint | `hyperparameters/_registry.py` | [14](./opus_core_analysis/14-hyperparameters.md) |
+| [OC-111](./opus_core_analysis/15-profiling-analyzers.md#oc-111) | 🟡 Medium | A profiling recommendation branch is unreachable | `profiling/_analyzer/` | [15](./opus_core_analysis/15-profiling-analyzers.md) |
+| [OC-90](./opus_core_analysis/12-splitters.md#oc-90) | ⚪ Low | Unknown split config keys are silently dropped instead of rejected | `preprocessing/split.py` | [12](./opus_core_analysis/12-splitters.md) |
+| [OC-112](./opus_core_analysis/15-profiling-analyzers.md#oc-112) | ⚪ Low | Comment and code disagree about the applied threshold | `profiling/_analyzer/` | [15](./opus_core_analysis/15-profiling-analyzers.md) |
+| [OC-121](./opus_core_analysis/16-dtype-coverage.md#oc-121) | ⚪ Low | polars `Enum` columns invisible to text auto-detection, diverging from pandas `Categorical` | `preprocessing/_helpers.py:148-157` | [16](./opus_core_analysis/16-dtype-coverage.md) |
+| [OC-122](./opus_core_analysis/16-dtype-coverage.md#oc-122) | ⚪ Low | `TextCleaning` silently ignores an unrecognised operation name | `preprocessing/cleaning/text.py:151-153` | [16](./opus_core_analysis/16-dtype-coverage.md) |
+
+> **[Splitting is the one module I audited and found entirely sound](./opus_core_analysis/12-splitters.md)** —
+> exact cross-engine row-identity parity, zero partition overlap, exact
+> stratification, correct `validation_size/(1-test_size)` renormalisation, clean
+> errors on impossible ratios, and graceful degradation on singleton classes.
+> OC-90 is a hardening nit, not a bug.
+
+> ❌ **OC-100 was retracted.** I filed "the search-space dicts are dead code",
+> and it was **wrong** — the dicts are live via `get_default_search_space()` →
+> a mounted HTTP route → `TrainingSettings.tsx`. My grep searched for the dict
+> *names* in `.py` files, which could never have found a wrapper-function
+> consumer whose caller is TypeScript. Full account, including the broken probe
+> that falsely "confirmed" it, in
+> [the validation log](./opus_core_analysis/00-validation-log.md#oc-100).
+> The one durable part is re-filed as OC-102.
+
+---
+
+### Backend infrastructure (verified directly by me after an agent sweep)
+
+| ID | Sev | Title | Location | Report |
+|---|---|---|---|---|
+| [OC-130](./opus_core_analysis/09-backend.md#oc-130) | 🟠 High | A typo in `FASTAPI_ENV` silently disables the entire production security posture — wildcard CORS **with credentials**, `DEBUG=True`, no `SECRET_KEY` check, no security headers | `config/factory.py:27-32`, `config/base.py:188-189`, `main.py:361-363` | [09](./opus_core_analysis/09-backend.md) |
+| [OC-131](./opus_core_analysis/09-backend.md#oc-131) | ⚪ Low | Diagnostics *fail open* — PSI returns `0.0` ("no drift") on any numeric failure, mirroring OC-113's `VIF = 1.0` | `skyulf/profiling/drift.py:474-476` | [09](./opus_core_analysis/09-backend.md) |
+| [OC-132](./opus_core_analysis/09-backend.md#oc-132) | ⚪ Low | Dead `dropped_features` branch — the key appears exactly once in the whole repo (the read); the live path uses `dropped_columns` from job metrics | `ml_pipeline/_execution/graph_utils.py:534-537` | [09](./opus_core_analysis/09-backend.md) |
+| [OC-145](./opus_core_analysis/09-backend.md#oc-145) | 🟡 Medium | A crashed cross-validation returns the same `{}` sentinel as a *disabled* one, so the job reports success with silently missing `cv_*` metrics | `ml_pipeline/_execution/engine/_node_runners.py:871-907` | [09](./opus_core_analysis/09-backend.md) |
+| [OC-150](./opus_core_analysis/09-backend.md#oc-150) | 🟠 High | S3 error "sanitiser" matches credential *key names*, case-sensitively — S3 403 bodies and **replayable presigned URLs** are logged verbatim; duplicated in two files | `data_ingestion/connectors/s3.py:31-37`, `ml_pipeline/artifacts/s3.py:67-73` | [09](./opus_core_analysis/09-backend.md) |
+| [OC-151](./opus_core_analysis/09-backend.md#oc-151) | 🟡 Medium | Trial-buffer `clear_*` hooks are documented as lifecycle cleanup but **never called** — measured **110.9 MB** retained for the process lifetime | `realtime/trial_buffer.py:56-59,103-106` | [09](./opus_core_analysis/09-backend.md) |
+| [OC-152](./opus_core_analysis/09-backend.md#oc-152) | ⚪ Low | Two raw-SQL executors accept unconstrained query strings and have zero callers — a latent injection sink in a shared manager | `database/async_connection_manager.py:243-268` | [09](./opus_core_analysis/09-backend.md) |
+| [OC-153](./opus_core_analysis/09-backend.md#oc-153) | 🟠 High | Multi-input merge **silently switches from column-wise to row-wise** when a branch changes the row count — a 5-row set merged with its own filtered branch yields **8 rows with 3 duplicates** and **zero UI warnings** | `ml_pipeline/_execution/engine/_merge.py:338-348` | [09](./opus_core_analysis/09-backend.md) |
+| [OC-154](./opus_core_analysis/09-backend.md#oc-154) | 🟠 High | Serving-time feature-order reindex (fix F-02) **fails open** when the column set doesn't match — a numpy-fitted model silently returned **213.00 where truth is 321.00** | `ml_pipeline/deployment/service.py:438-442` | [09](./opus_core_analysis/09-backend.md) |
+| [OC-155](./opus_core_analysis/09-backend.md#oc-155) | 🟠 High | Legacy predict path **zero-fills missing features** and returns the prediction as normal; caller never sees the server-side warning | `ml_pipeline/deployment/service.py:457-462` | [09](./opus_core_analysis/09-backend.md) |
+| [OC-156](./opus_core_analysis/09-backend.md#oc-156) | 🟡 Medium | `roc_auc` threshold-tuning objective scores **hard predictions**, making it bit-identical to `balanced_accuracy` across all trials — two UI options, one metric | `ml_pipeline/_services/threshold_tuning_service.py:77-92` | [09](./opus_core_analysis/09-backend.md) |
+| [OC-157](./opus_core_analysis/09-backend.md#oc-157) | ⚪ Low | `first_wins` merge strategy **reverses output column order** (`['a','b','c','d']` → `['c','d','a','b']`), contradicting its own docstring | `ml_pipeline/_execution/engine/_merge.py:221-236` | [09](./opus_core_analysis/09-backend.md) |
+| [OC-158](./opus_core_analysis/09-backend.md#oc-158) | 🟡 Medium | The sync and async JSON serializers **disagree**: the sync one silently nulls **8 of 15** legitimate strings (`"nan"`, `"NaT"`, `"<NA>"`, `"inf"`…), the async one nulls none. 603-line module is **production-dead but test-covered** | `data_ingestion/serialization.py:369,435-446` | [09](./opus_core_analysis/09-backend.md) |
+| [OC-159](./opus_core_analysis/09-backend.md#oc-159) | ⚪ Low | An empty filter dict compiles to a **WHERE-less `DELETE FROM data_sources`** / `UPDATE` — `_normalize_filter` maps `None`→`{}` with no guard. Dead call path today | `database/data_sources/async_sqlite_queries.py:129-146` | [09](./opus_core_analysis/09-backend.md) |
+
+### Final coverage-gap closure — evaluation, thresholds, clustering, PII
+
+Report [17](./opus_core_analysis/17-file-coverage.md) named 16 files that had
+never been read. Working down that list by its own risk ranking produced four
+more findings — including the **only 🔴 Critical found after the agent phase**.
+The top-ranked file, `modeling/_evaluation/metrics.py`, was flagged there as
+*"metric averaging bugs are severe and silent."* That prediction was correct.
+
+| ID | Sev | Title | Location | Report |
+|---|---|---|---|---|
+| [OC-146](./opus_core_analysis/04-evaluation-explainability.md#oc-146) | 🔴 Critical | Binary `pr_auc` is scored against the wrong class on `{1, n}` labels — reports **0.32** for a model whose true PR-AUC is **0.97**, with no warning; the PR chart beside it is drawn correctly, so the report contradicts itself | `modeling/_evaluation/metrics.py:324-326` | [04](./opus_core_analysis/04-evaluation-explainability.md) |
+| [OC-149](./opus_core_analysis/04-evaluation-explainability.md#oc-149) | 🟠 High | Clustering evaluation **crashes on polars** when a numeric feature is all-null within one cluster; pandas returns `nan` — `mean` is unguarded while `std` one line below guards `None` | `modeling/_evaluation/clustering.py:83-88` | [04](./opus_core_analysis/04-evaluation-explainability.md) |
+| [OC-148](./opus_core_analysis/15-profiling-analyzers.md#oc-148) | 🟡 Medium | PII detector flags ordinary 7+ digit numeric ID columns as "Email/Phone"; the guard comment's stated rationale is false | `profiling/_analyzer/text.py:107-128` | [15](./opus_core_analysis/15-profiling-analyzers.md) |
+| [OC-147](./opus_core_analysis/04-evaluation-explainability.md#oc-147) | ⚪ Low | `optimize_thresholds` returns a dict shape that bypasses its own documented binary rule, flipping `>=` to `>` on exact ties | `modeling/_evaluation/thresholds.py:66-88` | [04](./opus_core_analysis/04-evaluation-explainability.md) |
+
+> ❌ **Not reproduced (my own hypothesis, rejected):** I suspected the
+> unconditional `tracemalloc.start()` in `preprocessing/base.py:165` imposed a
+> large per-step penalty and was blind to polars' Rust-side allocations.
+> Measured overhead was only **1.11x**, and the polars figure I first read as
+> confirmation turned out to match the size of the *numpy input arrays* I had
+> built — a coincidence, not evidence. Neither claim survived, so neither was
+> filed.
+
+> ❌ **Not reproduced:** an agent's claim that `monitoring/router.py` emits bare
+> `NaN`/`Infinity` tokens. Those sites are pydantic `model_dump()`, not stdlib
+> `json`; FastAPI *raises* rather than emitting invalid JSON; and PSI/KS/
+> Wasserstein stay finite on degenerate inputs. [Recorded in report 09](./opus_core_analysis/09-backend.md#not-reproduced)
+> so it is not re-filed.
+
+---
+
+## Totals
+
+| Severity | Count |
+|---|---|
+| 🔴 Critical | **5** — [OC-12](#oc-12), [OC-58](./opus_core_analysis/07-outliers-timeseries-geo.md#oc-58), [OC-62](./opus_core_analysis/06-core-engines-pipeline.md#oc-62), [OC-75](./opus_core_analysis/11-tests-packaging-ci.md#oc-75), [OC-146](./opus_core_analysis/04-evaluation-explainability.md#oc-146) — **all 5 independently re-verified** |
+| 🟠 High | 45 |
+| 🟡 Medium | 44 |
+| ⚪ Low | 22 |
+| **Total** | **116** — `OC-01 … OC-81` (agent phase) + `OC-90/91`, `OC-101/102`, `OC-110…114`, `OC-120…122`, `OC-130…132`, `OC-140…159` (direct). **OC-100 retracted**, not counted. |
+
+### Per-file coverage of core
+
+A mechanical, per-file audit of all 188 `.py` files in `skyulf-core/skyulf/` is
+in [17-file-coverage.md](./opus_core_analysis/17-file-coverage.md): 147 files
+(78%) read or explicitly analysed, 16 covered by behaviour only, and **16 never
+examined** — each listed by name with its risk. Reading 7 previously-unexamined
+files during that pass produced 5 new findings (OC-140…144), three of them
+user-facing correctness bugs, which is why the remaining 16 are flagged as the
+highest-value next step.
+
+| ID | Sev | Issue |
+|---|---|---|
+| [OC-140](./opus_core_analysis/17-file-coverage.md#oc-140) | 🟠 High | `InvalidValueReplacement` diverges across engines on non-numeric columns (pandas silently NaNs, polars raises) |
+| [OC-141](./opus_core_analysis/17-file-coverage.md#oc-141) | ⚪ Low | `invalid_values` param declared in `node_meta` with zero consumers |
+| [OC-142](./opus_core_analysis/17-file-coverage.md#oc-142) | 🟠 High | EDA correlation ratio η exceeds 1.0 with nulls; null-heavy columns rank as strongest association |
+| [OC-143](./opus_core_analysis/17-file-coverage.md#oc-143) | 🟠 High | RFE ignores the UI's `k`, silently selecting half the features |
+| [OC-144](./opus_core_analysis/17-file-coverage.md#oc-144) | ⚪ Low | Geo distance column named `_km` even when unit is miles |
+
+### Verification status
+
+**27 of these findings have been independently re-verified by execution** — see
+[00-validation-log.md](./opus_core_analysis/00-validation-log.md). Of those, 25
+stand (4 are *worse* than filed: [OC-12](#oc-12), [OC-18](#oc-18),
+[OC-40](#oc-40), [OC-42](#oc-42)) and **2 required correction**:
+[OC-01](#oc-01) (claim overstated) and [OC-46](#oc-46) (claim wrong on the real
+ship path — **downgraded 🟠 High → 🟡 Medium**, so the agent-phase split is 33
+High / 35 Medium rather than the 34/34 originally filed; the Totals above then
+add the 10 directly-audited findings on top). The remaining agent-phase findings
+rest on their originating auditor's pasted evidence and should be treated as
+*probable but unconfirmed* until re-run.
+
+Everything in [OC-90 … OC-122](#modules-audited-directly-by-me-with-no-agent-input)
+was found and reproduced by the lead auditor, so it needs no separate
+verification pass.
+
+A further 7 findings surfaced by more than one auditor were **merged into the
+existing entry rather than re-filed** (each carries a
+"*Merged, not re-filed*" note pointing at the owning id), and one — an apparent
+binning out-of-range bug — was **dropped as a false positive** after
+`bucketing.py:41-50` proved the behaviour intentional and documented.
 
 ---
 
@@ -132,6 +358,15 @@ structural fix.
 
 ### OC-01
 ### 🟠 High — `skyulf.__version__` always reports a stale, wrong version
+
+> ⚠️ **Corrected after independent re-verification** — see
+> [00-validation-log.md](./opus_core_analysis/00-validation-log.md#oc-01).
+> The "always" is wrong. There are **two** visible `skyulf-core` distributions
+> (in-repo `egg-info` at `0.8.8`, installed `dist-info` at `0.5.8`), and which
+> wins is purely `sys.path` order — in the normal repo-dev setup it resolves
+> **correctly** to `0.8.8`. The real defect is **stale duplicate-distribution
+> shadowing**, so the fix is to remove the stale `0.5.8` dist-info / reinstall
+> cleanly, *not* to change the version-reading code. Severity stays 🟠 High.
 
 **File:** `skyulf-core/skyulf/__init__.py:24-30`
 
@@ -307,21 +542,28 @@ construction, e.g. `df_out[valid_cols] = pd.DataFrame(X_trans, index=df_out.inde
 ---
 
 ### OC-06
-### 🟡 Medium — 9 registered nodes are unreachable from the UI
+### 🟡 Medium — 6 registered nodes are unreachable from the UI
 
-I diffed all 100 registry ids against every quoted string in
-`frontend/ml-canvas/src`. These 9 registered, implemented, tested nodes have no
-frontend affordance:
+> **Corrected after the frontend audit.** This finding originally listed **9**
+> nodes, derived from a registry-id-vs-quoted-string diff. That method produced
+> three false positives: `SegmentationNode.tsx` builds its dropdown dynamically
+> and *does* offer `birch`, `gaussian_mixture` and `minibatch_kmeans`. The
+> corrected count is **6**. See the parity matrix in
+> [report 10](./opus_core_analysis/10-frontend.md).
+
+These 6 registered, implemented, tested nodes have no frontend affordance:
 
 `CustomBinning`, `DataSnapshot`, `DatasetProfile`, `FeatureGeneration`,
-`GeoDistance`, `H3Index`, `birch`, `gaussian_mixture`, `minibatch_kmeans`
+`GeoDistance`, `H3Index`
 
-Notably:
-- The whole `geo/` package (348 lines + tests, fully implemented) is unreachable.
-  `backend/ml_pipeline/_execution/_leakage_validation.py:27-28` even documents
-  `GeoDistance`/`H3Index` behaviour.
-- `SegmentationNode.tsx` offers only `kmeans`, hiding three implemented
-  clustering algorithms.
+Notably, the whole `geo/` package (348 lines + tests, fully implemented) is
+unreachable. `backend/ml_pipeline/_execution/_leakage_validation.py:27-28` even
+documents `GeoDistance`/`H3Index` behaviour.
+
+A related, opposite-direction gap exists inside the registry itself:
+[OC-74](./opus_core_analysis/06-core-engines-pipeline.md#oc-74) —
+`NodeRegistry.list_models()` hides all 4 Ensemble models from any
+registry-driven consumer.
 
 **Impact:** Dead-but-maintained surface area. Contributors pay the cost of
 keeping these nodes green with zero user benefit.
@@ -438,6 +680,13 @@ byte-identical output**, confirming no reliance on Python's salted `hash()`
 
 ### OC-12
 ### 🔴 Critical — Row-dropping desyncs `X` and `y` on non-unique pandas indexes
+
+> ✅ **Independently re-verified — and it is worse than filed.** Running
+> `_drop_missing_rows_apply_pandas` on a 4-row frame with index `[0,0,1,2]`:
+> `X_out=3 rows, y_out=4 rows`, and `y_out` still contains `20` — **the label of
+> the row that was dropped**. So labels are not merely misaligned, they are
+> wrong. Evidence in
+> [00-validation-log.md](./opus_core_analysis/00-validation-log.md#oc-12).
 
 **Files:** `preprocessing/drop_and_missing/drop_rows.py:60-67`,
 `preprocessing/drop_and_missing/deduplicate.py:44-47`
@@ -1079,6 +1328,14 @@ small/medium datasets, and disagree with what a user computes in pandas.
 ---
 
 ### OC-42
+> ✅ **Independently re-verified — worse than filed.** `SKEWNESS_TRANSFORM_THRESHOLD = 1.5`
+> (`recommendations.py:7`). For `[1,2,3,4,10]` the biased value actually used is
+> **1.1384** (rule does *not* fire) while the correct unbiased value is
+> **1.6971** (rule *should* fire) — so the transform recommendation silently
+> fails on genuinely skewed data. Kurtosis differs even in sign (biased
+> `-0.212` vs unbiased `3.152`). Note also that
+> `backend/ml_pipeline/_internal/_advisor.py:195` applies threshold `1.0` to
+> **pandas unbiased** skew — two different rules for the same concept.
 ### 🟠 High — Skewness/kurtosis use biased estimators, breaking a hardcoded threshold
 
 **Files:** `profiling/analyzer.py:223-224`, `_analyzer/recommendations.py:66-78`
@@ -1179,7 +1436,19 @@ drift events possible — is reported as "all features are stable".
 ---
 
 ### OC-46
-### 🟠 High — Non-finite floats enter public profile payloads and break strict JSON
+### 🟡 Medium — Non-finite floats enter public profile payloads (corrected: they do *not* break the EDA route)
+
+> ⚠️ **Corrected and downgraded 🟠 High → 🟡 Medium after independent
+> re-verification** — see
+> [00-validation-log.md](./opus_core_analysis/00-validation-log.md#oc-46).
+> The EDA profile actually ships through `orjson.dumps`
+> (`backend/eda/router.py:237,251`), and **orjson coerces non-finite to `null`**
+> (`b'{"mean":null,"std":null}'`) — valid JSON. Pydantic's own
+> `model_dump_json()` does the same. The "breaks strict JSON" outcome only
+> applies to stdlib-`json` paths such as the monitoring persistence at
+> `backend/monitoring/router.py:449,569`. The residual real problem is the
+> silent `NaN`→`null` ambiguity (a failed statistic becomes indistinguishable
+> from a missing one), which is why this stays a finding at all.
 
 **File:** `profiling/schemas.py:7-17,263-302`
 
@@ -1308,3 +1577,248 @@ PYTHONHASHSEED=2: {'bronze':0, 'gold':1, 'silver':2}
 ---
 
 <!-- APPEND-POINT: remaining domains -->
+
+## Findings in the remaining six domains
+
+Full detail for OC-53 … OC-81 lives in the per-domain reports, linked from each
+summary row above and indexed in
+[`opus_core_analysis/README.md`](./opus_core_analysis/README.md). They are not
+duplicated here so the two cannot drift.
+
+| Report | Findings |
+|---|---|
+| [06 — Core, engines, data & pipeline](./opus_core_analysis/06-core-engines-pipeline.md) | OC-62 … OC-65, OC-74 |
+| [07 — Outliers, casting, binning, time series, geo](./opus_core_analysis/07-outliers-timeseries-geo.md) | OC-58 … OC-61 |
+| [08 — Modeling: estimators, CV & tuning](./opus_core_analysis/08-modeling-tuning.md) | OC-66, OC-67 |
+| [09 — Backend: execution, API & services](./opus_core_analysis/09-backend.md) | OC-68 … OC-73 |
+| [10 — Frontend node-config layer](./opus_core_analysis/10-frontend.md) | OC-53 … OC-57 |
+| [11 — Tests, benchmarks, packaging & CI](./opus_core_analysis/11-tests-packaging-ci.md) | OC-75 … OC-81 |
+
+---
+
+<a id="r1"></a>
+
+## Recommendation R1 — Generate the frontend contract from `@node_meta`
+
+**This is the single highest-leverage change in this report.** It closes the
+entire bug class described in [The headline](#the-headline), and it retires
+OC-13, OC-14, OC-15, OC-19, OC-20, OC-53, OC-61 and OC-66 *as a category* rather
+than one at a time.
+
+### The problem, stated precisely
+
+There are three layers and **zero** shared schema between them:
+
+```text
+ FeatureGenerationNode.tsx          pipelineConverter.ts            skyulf-core
+ ─────────────────────────          ────────────────────            ───────────
+ hand-typed DATE_METHODS[]  ──────► params = node.data      ──────► ALLOWED_DATETIME_FEATURES
+ hand-typed dropdown values         (byte-for-byte,                 config.get("rule")
+ hand-typed defaults                 no validation,                 if rule == "..."
+ hand-typed tooltips                 no renaming)                   else: silently ignored
+```
+
+Every arrow is a hand-maintained copy. Nothing fails loudly when they disagree —
+a param name Python never reads is simply dropped on the floor, and the run
+proceeds happily with defaults.
+
+The eleven confirmed instances of this in the audit are not eleven bugs. They are
+eleven *samples* from a population whose size is bounded only by how carefully
+each future PR is reviewed.
+
+### Why the obvious fixes don't work
+
+- **"Just add validation in `pipelineConverter.ts`"** — that only moves the
+  hand-maintained copy. The TS allow-list still drifts from the Python one.
+- **"Just write tests"** — a test can only assert the contract someone already
+  wrote down by hand. The contract is the thing that's missing.
+- **"Reject unknown params in the backend"** — necessary (see step 3) but not
+  sufficient: it catches *misspelled* keys, not a key whose **value** is an enum
+  member Python doesn't handle (OC-19's `punctuation`, OC-60's `label`).
+
+### The fix
+
+`@node_meta` already carries the authoritative `params` dict. Make it the source
+of truth and generate everything downstream from it.
+
+**Step 1 — Enrich `@node_meta` so it fully describes each param.**
+
+```python
+@node_meta(
+    node_id="AliasReplacement",
+    category="Cleaning",
+    params={
+        "mode": ParamSpec(
+            type="enum",
+            choices=("exact", "contains", "regex"),   # <- the real, handled set
+            default="exact",
+            label="Match mode",
+            help="How alias keys are matched against cell values.",
+        ),
+        ...
+    },
+)
+```
+
+The `choices` tuple must be the *same object* the implementation branches on —
+not a copy — so a new branch cannot be added without appearing in the contract.
+
+**Step 2 — Emit the contract as a build artifact.** A tiny script walks the
+registry and writes `node-contract.json` + a generated `nodeContract.ts`
+(literal-union types, defaults, choices, labels, help text). Commit the generated
+file; add a CI check that regenerating it produces no diff — the same pattern
+that already guards lockfiles.
+
+**Step 3 — Make drift fail loudly at every layer:**
+
+| Layer | Change | Catches |
+|---|---|---|
+| TypeScript | Node components import their union types from `nodeContract.ts` instead of hand-typing arrays | Drift at **compile time** — `tsc` fails |
+| `pipelineConverter.ts` | Validate `node.data` against the contract before send | Drift at **canvas time**, with a real error |
+| Backend | Reject unknown param keys and out-of-`choices` values instead of ignoring them | Drift from **any** client, including direct API |
+| CI | Assert every registry id is either present in `nodeContract.ts` or on an explicit `INTENTIONALLY_HEADLESS` allow-list | [OC-06](#oc-06)-class gaps |
+
+**Step 4 — Generate the tooltip/help metadata too.** OC-61 and the
+`DATE_METHOD_META` gap are both *metadata* drift, not functional drift; they only
+stay fixed if the help text is generated as well.
+
+### Sequencing
+
+Steps 1–2 are additive and can land without touching any node. Step 3's backend
+strictness should ship behind a warn-only flag for one release (log every
+rejected key) so the real drift surface is measured before it starts failing
+builds — that log is also the fastest way to find the instances this audit
+missed.
+
+---
+
+## Suggested fix order
+
+Ordered by *risk removed per unit of effort*, not by severity alone.
+
+### Now — silent wrongness reaching users
+
+| # | Finding | Why first |
+|---|---|---|
+| 1 | [OC-75](./opus_core_analysis/11-tests-packaging-ci.md#oc-75) 🔴 polars version drift | One-line env/lockfile fix that un-breaks 10 tests, **every example notebook**, and a benchmark. Also a prerequisite for trusting any polars result in this report. |
+| 2 | [OC-12](#oc-12) 🔴 `X`/`y` desync on duplicate pandas indexes | Silently misaligned training labels — the worst possible failure mode. Polars path is already correct, so the fix is well-specified. |
+| 3 | [OC-58](./opus_core_analysis/07-outliers-timeseries-geo.md#oc-58) 🔴 numeric→bool truthiness on polars | Every user hits it; `coerce_on_error` isn't even exposed in the UI. Silent data corruption. |
+| 4 | [OC-62](./opus_core_analysis/06-core-engines-pipeline.md#oc-62) 🔴 non-reproducible `fingerprint()` | Defeats the entire purpose of pipeline sealing for any pipeline containing a string-category encoder. |
+
+### Next — wrong results in realistic configurations
+
+| # | Finding | Note |
+|---|---|---|
+| 5 | [OC-13](#oc-13), [OC-14](#oc-14), [OC-15](#oc-15), [OC-19](#oc-19), [OC-20](#oc-20), [OC-53](./opus_core_analysis/10-frontend.md#oc-53), [OC-61](./opus_core_analysis/07-outliers-timeseries-geo.md#oc-61), [OC-66](./opus_core_analysis/08-modeling-tuning.md#oc-66) | Fix the individual no-ops, then land **[R1](#r1)** so the class cannot recur. Doing R1 *first* is tempting but leaves users on broken behaviour longer. |
+| 6 | [OC-16](#oc-16), [OC-17](#oc-17) 🟠 imputer crashes on all-missing columns | Crash, not corruption — loud, but trivially reachable on real data. |
+| 7 | [OC-69](./opus_core_analysis/09-backend.md#oc-69) 🟠 unsorted `config.nodes` | Reachable from the shipped UI's own BFS ordering. `_kahn_topological_order` already exists — this is a wiring fix. |
+| 8 | [OC-35](#oc-35), [OC-36](#oc-36) 🟠 evaluation edge cases | Wrong numbers on a metrics dashboard are believed. |
+| 9 | [OC-39](#oc-39)–[OC-46](#oc-46) 🟠 profiling correctness cluster | Eight related findings in one subsystem; fix as one workstream, not eight tickets. |
+
+### Then — decide the deployment model, then act
+
+| # | Finding | Note |
+|---|---|---|
+| 10 | [OC-71](./opus_core_analysis/09-backend.md#oc-71) 🟠 no authn/authz | **Confirm intent first.** If Skyulf is single-tenant self-hosted behind a trusted network, this is a documentation task. If it is multi-tenant — or ever will be — it is the highest-priority item in this entire report. The scaffolded `User` model and dead `AUTH_FALLBACK_*` settings suggest the latter was intended. |
+| 11 | [OC-72](./opus_core_analysis/09-backend.md#oc-72), [OC-73](./opus_core_analysis/09-backend.md#oc-73) | Fix alongside 10; both are cheap and both become severe the moment auth exists. |
+
+### Ongoing — remove the conditions that let these hide
+
+| # | Finding | Note |
+|---|---|---|
+| 12 | [OC-76](./opus_core_analysis/11-tests-packaging-ci.md#oc-76) 🟠 parity tests cover 9/100 nodes, never compare output | **Directly caused OC-04, OC-23, OC-24 and OC-58 to go unnoticed.** My ad-hoc harness is a working proof this is cheap. |
+| 13 | [OC-77](./opus_core_analysis/11-tests-packaging-ci.md#oc-77) 🟠 `--maxfail=1` + a 45% gate on a 98.4% suite | Two flag changes. Makes every future red run legible. |
+| 14 | [OC-01](#oc-01), [OC-02](#oc-02), [OC-78](./opus_core_analysis/11-tests-packaging-ci.md#oc-78), [OC-79](./opus_core_analysis/11-tests-packaging-ci.md#oc-79), [OC-81](./opus_core_analysis/11-tests-packaging-ci.md#oc-81) | The packaging-integrity cluster — small, mechanical, and collectively the difference between "a script in a repo" and "a library". |
+| 15 | [OC-03](#oc-03) 🟠 systemic schema misprediction across 22 nodes | Large but mechanical; best done as one sweep with a parametrized test asserting predicted schema == actual schema for every node. |
+| 16 | [OC-09](#oc-09) 🟡 narrow `ruff select` | Widening the rule set will surface real debt — do it after the above, not before, or it will bury the signal. |
+
+---
+
+## What I checked and found sound
+
+An audit that only reports defects misrepresents the codebase. These are the
+things I deliberately went looking for and did **not** find.
+
+### Verified by execution
+
+| Area | Result |
+|---|---|
+| **Data leakage in `skyulf-core`** | **Clean.** All 7 fit/apply boundaries traced — per-fold preprocessing, holdout tuning, threshold tuning, final refit, nested CV. Every one re-fits on train only. See [report 08](./opus_core_analysis/08-modeling-tuning.md#leakage-audit-table--all-clean). |
+| **Hyperparameter ranges** | **All valid.** 389 (model, param, extreme) combinations constructed and fitted across 30 calculators. Zero invalid declared ranges. |
+| **Cross-engine parity** | 34 nodes exercised on both engines: **26 MATCH / 3 DIVERGE / 0 ERROR / 5 no-op.** The 3 divergences are [OC-04](#oc-04), [OC-23](#oc-23), [OC-24](#oc-24). |
+| **Determinism** | **34/34 nodes byte-identical** across `PYTHONHASHSEED=0` and `=1`. The only nondeterminism found in the whole audit is cosmetic ([OC-52](#oc-52)). |
+| **Test suite determinism** | 3,670 tests, byte-identical pass/fail across repeated runs and under `PYTHONHASHSEED=1`. No flaky, network-dependent or dict-ordering-dependent tests. |
+| **Coverage** | **98.40%**, 188 files, **zero** modules below 50%. |
+| **Packaging** | sdist and wheel both build cleanly, install standalone into a fresh venv, and import correctly. No `.DS_Store` leakage, no committed `.egg-info`. |
+| **Static analysis baseline** | `ruff check`, `ruff format --check` (356 files) and `ty check` all clean at `93d7719e`. |
+
+### Verified by reading and tracing
+
+- **Security (backend)** — path traversal, SQL injection, SSRF, unsafe
+  deserialization, upload limits, rate limiting and async-blocking were each
+  specifically hunted and each came back clean. The S3 connector's
+  `_apply_trusted_endpoint` in particular is a deliberate, correct
+  metadata-endpoint SSRF defence. Full checklist in
+  [report 09](./opus_core_analysis/09-backend.md#security-checklist).
+- **`validate_no_cycles`** — a correct Kahn's-algorithm implementation that
+  precisely names loop members and prunes merely-downstream nodes. (Its
+  limitation, OC-69, is that it validates *only* acyclicity — not that it is
+  wrong at what it does.)
+- **`ModelRegistryService.get_next_version`** — atomic `UPDATE … RETURNING` with
+  retry-on-`IntegrityError`; the classic read-then-write version race is
+  genuinely closed.
+- **Artifact path containment** — every local path construction goes through a
+  `realpath` + containment check; artifact names are sanitized against `.`/`..`.
+- **Optional heavy dependencies** — `shap`, `sentence-transformers`,
+  `imbalanced-learn`, `xgboost`, `lightgbm` and `optuna` are all lazily imported
+  with clean, actionable error messages, correctly gated behind extras.
+- **`infer_output_schema` returning `None`** — explicitly means "unknown /
+  data-dependent" (`preprocessing/base.py:97-113`). It is a documented contract,
+  not a stub. I checked before flagging.
+- **Binning out-of-range behaviour** — investigated as a suspected bug,
+  confirmed **intentional and documented** at `bucketing.py:41-50`, and
+  **dropped as a false positive**.
+- **The 161-file "no dedicated test" list** — a naming artefact, not a coverage
+  gap. Spot-checked files show 96–100% coverage via integration tests.
+
+### Prior findings re-verified as genuinely fixed
+
+`F-02` (tuning ignores `random_state`), `F-04` (no class-imbalance handling),
+`F-06` (all-folds-failed still returns a model), `F-13` (threshold tuning never
+wired), `F-15` (per-fold preprocessing) — all confirmed fixed by execution, not
+by reading the changelog.
+
+One prior finding is **reopened**:
+[`F-14` → OC-64](./opus_core_analysis/06-core-engines-pipeline.md#oc-64) — the
+engine-registry global race was only partially closed.
+
+---
+
+## Method & limitations
+
+**Method.** 15 read-only audit agents partitioned so that no two reviewed the
+same files, each required to produce *executed* output for every claim — not
+inferred behaviour. On top of that: my own import-graph analysis,
+registry-vs-frontend coverage diff, lint-debt survey, packaging/version integrity
+check, an all-node cross-engine parity harness, and a determinism harness.
+Findings raised by more than one auditor were merged into a single id.
+
+**Limitations, stated plainly.**
+
+1. **The polars results carry an asterisk.** Everything ran in a venv with polars
+   1.40.1, below the package's declared floor of 1.43.2
+   ([OC-75](./opus_core_analysis/11-tests-packaging-ci.md#oc-75)). Preprocessing
+   parity results stand — splitters were out of their scope — but **any polars
+   splitter behaviour in this report should be re-verified on ≥ 1.43.2.**
+2. **Coverage of `frontend/` is by sampling, not exhaustive.** 71,666 lines were
+   reviewed for the node-config contract specifically. Application-level React
+   concerns (state management, rendering performance, accessibility) were not
+   systematically audited.
+3. **Confidence scores are honest, not decorative.** Anything at 6–7/10 is a
+   judgement call worth a second opinion before acting — particularly
+   [OC-71](./opus_core_analysis/09-backend.md#oc-71), where the *facts* are
+   certain (9/10) but the *intent* is not.
+4. **This audit changed nothing.** No repository file was created, modified or
+   deleted; every repro script lived in `/tmp` and was removed. The only
+   artefacts are this report and its per-domain files.
+
