@@ -85,6 +85,75 @@ def test_downstream_notebook_uses_saved_reference_without_editable_config(monkey
     execute.assert_called_once()
 
 
+@pytest.mark.parametrize("phase", ["compare_decide", "complete"])
+def test_first_candidate_notebook_renders_null_champion_metrics(monkeypatch, phase, caplog):
+    """First-model reports must show quality and operator actions instead of JSON fallback."""
+    from skyulf.integrations.databricks import job_runtime, lifecycle_tasks
+
+    candidate = {
+        "model_name": "workspace.test.model",
+        "model_version": "1",
+        "comparison": {
+            "metric": "heldout_rmse",
+            "eligible": False,
+            "reason": "no_champion",
+            "candidate_metrics": {"heldout_rmse": 2.7785},
+            "champion_metrics": None,
+        },
+    }
+    payload = (
+        {
+            "action": "train",
+            "result": candidate,
+            "score_requested": False,
+            "next_actions": {
+                action: {
+                    "lifecycle_action": action,
+                    "candidate_version": "1",
+                    "expected_champion_version": "none",
+                }
+                for action in ("approve", "reject")
+            },
+        }
+        if phase == "complete"
+        else {"candidate": candidate, "alias_change": None, "promotion_policy": "manual_approval"}
+    )
+    monkeypatch.setattr(
+        lifecycle_tasks,
+        "run_lifecycle_phase",
+        Mock(return_value=SimpleNamespace(reference={"phase": phase}, output=payload)),
+    )
+    values = {
+        "job_id": "10",
+        "job_run_id": "20",
+        "repair_count": "0",
+        "execution_count": "1",
+        "workflow_contract": "2",
+        "reference_json": '{"phase": "prepare"}',
+        "tracking_uri": "databricks",
+        "training_result_state": "success",
+        "operator_result_state": "excluded",
+    }
+    reports = []
+    dbutils = SimpleNamespace(
+        widgets=SimpleNamespace(getAll=lambda: values),
+        jobs=SimpleNamespace(taskValues=Mock()),
+    )
+    output = job_runtime.run_lifecycle_notebook(
+        None, dbutils, phase=phase, display_html=reports.append, exit_notebook=False
+    )
+    assert json.loads(output) == payload
+    assert len(reports) == 1
+    visible = reports[0].split("<details>")[0]
+    assert "heldout_rmse" in visible and "2.7785" in visible and "No champion" in visible
+    if phase == "complete":
+        assert "Available action: approve" in visible and "Available action: reject" in visible
+        assert "If rollback is needed" not in visible
+    else:
+        assert "Awaiting manual review" in visible and "finalize_and_report" in visible
+    assert "Readable output unavailable" not in caplog.text
+
+
 @pytest.mark.parametrize("fails", [False, True])
 def test_completion_publishes_score_request_only_after_verified_result(monkeypatch, fails):
     """The ALL_DONE join must never emit a score request when finalization fails."""

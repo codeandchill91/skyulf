@@ -116,3 +116,40 @@ tokens. Inspect current state and choose fresh resource/token names before any
 future rerun. Generated projects, the previous deployment backup, complete raw
 CLI evidence, logs and wheel remain local; the compact receipt and scripts are
 selected explicitly for Git. No credentials are included.
+
+## Readable-output follow-up, 2026-09-27
+
+The user found `Readable output unavailable` in the successful Polars training
+run. The live acceptance above checked task states and machine results, not HTML
+display. Its first-candidate comparison has `champion_metrics: null`; the report
+renderer attempted `.get()` on that null value and fell back to JSON.
+
+The local fix treats absent champion metrics as an empty comparison panel.
+Two notebook-adapter regressions reproduced the failure in `compare_decide`
+and `complete`, then passed; all 83 notebook/runtime/output tests, scoped Ruff
+and full ty passed. The exact saved live payloads now render in
+`polars-readable-output-fixed.html` (local artifact). The accompanying runtime
+refactor extracts typed saved-reference validation into `_saved_notebook_request`
+and preserves branch-state guards.
+
+The user requested one Databricks test followed by a commit. Single serverless
+run [6136609106178](https://dbc-45604623-c18b.cloud.databricks.com/?o=7474646244882000#job/289042341942425/run/6136609106178)
+passed: the two exact saved Polars payloads rendered through the actual
+Databricks `displayHTML` callback, and an illustrative v2-to-v1 rollback panel
+rendered correctly. The test verified installed runtime/output module hashes,
+preserved output JSON and performed no model mutations. It did not retrain or
+execute a rollback. See [test notebook](../sm34b_readable/readable_report.py)
+and [acceptance receipt](../sm34b_readable/acceptance-summary.json).
+
+Tested wheel SHA-256:
+`76b591946e1d3cdd34602e51c22e9c2cb39c9c907544248f29675159804a93d0`.
+Automatic approval initially required workspace ownership and payload-origin
+verification; read-only current-user and original-run checks proved both, and
+the single test was approved. A later attempt to update the two persistent
+jobs was rejected as outside the requested test/commit scope. That command
+did not execute: their deployed wheel and PAUSED schedules remain unchanged.
+
+Rollback instructions appear in `finalize_and_report` only for a committed
+promotion that replaces an existing champion. A manual candidate awaiting
+approval exposes approve/reject instead; initial champion creation has no prior
+version to restore. Completed historical notebook output is not rewritten.

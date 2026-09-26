@@ -304,6 +304,20 @@ def _prepared_notebook_request(
     }
 
 
+def _saved_notebook_request(values: dict[str, str]) -> dict[str, Any]:
+    """Validate the frozen predecessor reference and prepared tracking URI."""
+    try:
+        reference = json.loads(values["reference_json"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Lifecycle task needs its saved predecessor reference.") from exc
+    if not isinstance(reference, dict):
+        raise ValueError("Lifecycle predecessor reference must be a JSON object.")
+    tracking_uri = values.get("tracking_uri")
+    if not isinstance(tracking_uri, str) or not tracking_uri or "{{" in tracking_uri:
+        raise ValueError("Lifecycle task needs the prepared tracking URI.")
+    return {"reference": reference, "tracking_uri": tracking_uri}
+
+
 def run_lifecycle_notebook(
     spark: Any,
     dbutils: Any,
@@ -326,25 +340,19 @@ def run_lifecycle_notebook(
         run_lifecycle_phase,
     )
 
-    task_states = None
-    if phase == "prepare":
-        options: dict[str, Any] = _prepared_notebook_request(values, preprocessing_path)
-    else:
-        try:
-            reference = json.loads(values["reference_json"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("Lifecycle task needs its saved predecessor reference.") from exc
-        if not isinstance(reference, dict):
-            raise ValueError("Lifecycle predecessor reference must be a JSON object.")
-        tracking_uri = values.get("tracking_uri")
-        if not isinstance(tracking_uri, str) or not tracking_uri or "{{" in tracking_uri:
-            raise ValueError("Lifecycle task needs the prepared tracking URI.")
-        options = {"reference": reference, "tracking_uri": tracking_uri}
-        if phase == "complete":
-            task_states = {
-                "training": values.get("training_result_state"),
-                "operator": values.get("operator_result_state"),
-            }
+    options = (
+        _prepared_notebook_request(values, preprocessing_path)
+        if phase == "prepare"
+        else _saved_notebook_request(values)
+    )
+    task_states = (
+        {
+            "training": values.get("training_result_state"),
+            "operator": values.get("operator_result_state"),
+        }
+        if phase == "complete"
+        else None
+    )
     outcome = run_lifecycle_phase(
         spark,
         phase=phase,

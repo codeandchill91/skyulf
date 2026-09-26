@@ -40,7 +40,7 @@ def _comparison_summary(candidate: dict[str, Any]) -> list[str]:
     if not comparison:
         return []
     challenger = comparison.get("candidate_metrics", {})
-    champion = comparison.get("champion_metrics", {})
+    champion = comparison.get("champion_metrics") or {}
     return [
         f"<p><strong>Decision metric:</strong> {_text(comparison['metric'])}<br>"
         f"<strong>Eligible:</strong> {_text(comparison['eligible'])}<br>"
