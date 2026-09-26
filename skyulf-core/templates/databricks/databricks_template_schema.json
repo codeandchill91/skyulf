@@ -215,7 +215,7 @@
     "monthly_lookback_months": {
       "type": "string",
       "default": "4",
-      "description": "1. Data | Number of complete past months to read per scheduled training run. Temporal split uses the last month for testing; enter at least 2",
+      "description": "1. Data | Total complete past months to read, including the final holdout. Example: 4 months with a 2-month holdout leaves 2 months for training",
       "pattern": "^[1-9][0-9]*$",
       "skip_prompt_if": {
         "anyOf": [
@@ -255,8 +255,36 @@
       },
       "order": 19
     },
+    "holdout_months": {
+      "type": "string",
+      "default": "1",
+      "description": "1. Data | How many final complete months to hold out for testing? Enter 1 to total lookback minus 1; example: 2",
+      "pattern": "^[1-9][0-9]*$",
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "split_strategy": {
+                "const": "random"
+              }
+            }
+          },
+          {
+            "properties": {
+              "training_window_mode": {
+                "enum": [
+                  "full_snapshot",
+                  "fixed_window"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "order": 20
+    },
     "event_column": {
-      "order": 20,
+      "order": 21,
       "type": "string",
       "default": "",
       "description": "1. Data | Column containing when each record was observed, e.g. observation_date; used to select older/newer data",
@@ -292,7 +320,7 @@
       }
     },
     "event_time_kind": {
-      "order": 21,
+      "order": 22,
       "type": "string",
       "default": "timestamp",
       "description": "1. Data | How is this column stored? timestamp = database timestamp representing an instant; local_timestamp = database date/time without timezone; date = day only; text = a string. Choose yourself; setup does not inspect the table",
@@ -333,7 +361,7 @@
       }
     },
     "event_text_kind": {
-      "order": 22,
+      "order": 23,
       "type": "string",
       "default": "local_datetime",
       "description": "1. Data | What does the date text contain? offset_datetime = date/time with Z or +02:00; local_datetime = date/time without an offset; date = only a day, e.g. 2026-08-10",
@@ -436,7 +464,7 @@
           }
         ]
       },
-      "order": 23
+      "order": 24
     },
     "event_time_timezone": {
       "type": "string",
@@ -515,7 +543,7 @@
           }
         ]
       },
-      "order": 24
+      "order": 25
     },
     "event_date_only": {
       "type": "string",
@@ -595,10 +623,10 @@
           }
         ]
       },
-      "order": 25
+      "order": 26
     },
     "start": {
-      "order": 26,
+      "order": 27,
       "type": "string",
       "default": "",
       "description": "1. Data | Earliest observation to include, e.g. 2026-06-01T00:00:00+02:00. Blank = configure later; rolling scheduled runs calculate it",
@@ -634,7 +662,7 @@
       }
     },
     "holdout_start": {
-      "order": 27,
+      "order": 28,
       "type": "string",
       "default": "",
       "description": "1. Data | Observations from this time onward are test rows, e.g. 2026-08-01T00:00:00+02:00. Older selected rows train the model; rolling runs calculate it",
@@ -648,7 +676,7 @@
       }
     },
     "cutoff": {
-      "order": 28,
+      "order": 29,
       "type": "string",
       "default": "",
       "description": "1. Data | Stop before this observation time, e.g. 2026-09-01T00:00:00+02:00. This is a data boundary, not the job date; rolling runs calculate it",
@@ -691,10 +719,24 @@
         "false",
         "true"
       ],
-      "order": 29
+      "order": 30
+    },
+    "result_availability_lag_hours": {
+      "type": "string",
+      "default": "0",
+      "description": "1. Data | How many hours should results mature before automatic training? Enter 0 to 87600; example: 48 excludes results available in the last two days. Manual training uses your result cutoff",
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "skip_prompt_if": {
+        "properties": {
+          "filter_unavailable_results": {
+            "const": "false"
+          }
+        }
+      },
+      "order": 31
     },
     "result_available_at_column": {
-      "order": 30,
+      "order": 32,
       "type": "string",
       "default": "",
       "description": "1. Data | Column recording when each answer became known, e.g. claim_confirmed_at. This is a column name, not a date you enter",
@@ -708,7 +750,7 @@
       }
     },
     "result_time_kind": {
-      "order": 31,
+      "order": 33,
       "type": "string",
       "default": "timestamp",
       "description": "1. Data | How is this column stored? timestamp = database timestamp representing an instant; local_timestamp = database date/time without timezone; date = day only; text = a string. Choose yourself; setup does not inspect the table",
@@ -727,7 +769,7 @@
       }
     },
     "result_text_kind": {
-      "order": 32,
+      "order": 34,
       "type": "string",
       "default": "local_datetime",
       "description": "1. Data | What does the date text contain? offset_datetime = date/time with Z or +02:00; local_datetime = date/time without an offset; date = only a day, e.g. 2026-08-10",
@@ -786,7 +828,7 @@
           }
         ]
       },
-      "order": 33
+      "order": 35
     },
     "result_time_timezone": {
       "type": "string",
@@ -843,7 +885,7 @@
           }
         ]
       },
-      "order": 34
+      "order": 36
     },
     "result_date_only": {
       "type": "string",
@@ -901,7 +943,7 @@
           }
         ]
       },
-      "order": 35
+      "order": 37
     },
     "result_cutoff": {
       "type": "string",
@@ -915,17 +957,17 @@
           }
         }
       },
-      "order": 36
+      "order": 38
     },
     "max_rows": {
-      "order": 37,
+      "order": 39,
       "type": "string",
       "default": "10000",
       "description": "1. Data | Maximum rows transferred into Python memory per read; exceeding this stops the run. This does not randomly sample rows",
       "pattern": "^[1-9][0-9]*$"
     },
     "max_input_mb": {
-      "order": 38,
+      "order": 40,
       "type": "string",
       "default": "64",
       "description": "1. Data | Maximum input data size transferred into Python memory, in MiB (64 = 64 MiB). Model training can use more RAM",
@@ -936,7 +978,7 @@
       "default": "null",
       "description": "1. Data | Optional sample: enter 10000 to select up to 10000 eligible rows BEFORE train/test splitting. null = no sampling. Prediction rows are never sampled",
       "pattern": "^(?:null|[1-9][0-9]*)$",
-      "order": 39
+      "order": 41
     },
     "training_sample_seed": {
       "type": "string",
@@ -950,10 +992,10 @@
           }
         }
       },
-      "order": 40
+      "order": 42
     },
     "regression_model": {
-      "order": 41,
+      "order": 43,
       "type": "string",
       "default": "linear_regression",
       "description": "2. Model | Choose a regression model. It starts with its default settings; README explains how to change them",
@@ -984,7 +1026,7 @@
       }
     },
     "classification_model": {
-      "order": 42,
+      "order": 44,
       "type": "string",
       "default": "logistic_regression",
       "description": "2. Model | Choose a classification model. It starts with its default settings; README explains how to change them",
@@ -1024,7 +1066,7 @@
         "false",
         "true"
       ],
-      "order": 43
+      "order": 45
     },
     "cv_folds": {
       "type": "string",
@@ -1038,7 +1080,7 @@
           }
         }
       },
-      "order": 44
+      "order": 46
     },
     "cv_type": {
       "type": "string",
@@ -1057,7 +1099,7 @@
           }
         }
       },
-      "order": 45
+      "order": 47
     },
     "cv_shuffle": {
       "type": "string",
@@ -1074,7 +1116,7 @@
           }
         }
       },
-      "order": 46
+      "order": 48
     },
     "cv_random_state": {
       "type": "string",
@@ -1088,10 +1130,10 @@
           }
         }
       },
-      "order": 47
+      "order": 49
     },
     "retraining_mode": {
-      "order": 48,
+      "order": 50,
       "type": "string",
       "default": "manual",
       "description": "4. Lifecycle | Start training yourself, or enable automatic training on your cron schedule after deployment",
@@ -1101,7 +1143,7 @@
       ]
     },
     "retraining_cron_expression": {
-      "order": 49,
+      "order": 51,
       "type": "string",
       "default": "0 0 3 3 * ?",
       "description": "4. Lifecycle | When to train (Quartz cron)? 0 0 3 3 * ? = monthly on day 3 at 03:00; 0 0 3 1 1,7 ? = Jan 1 and Jul 1 at 03:00. Does not set the data window",
@@ -1115,7 +1157,7 @@
       }
     },
     "retraining_timezone_id": {
-      "order": 50,
+      "order": 52,
       "type": "string",
       "default": "UTC",
       "description": "4. Lifecycle | Timezone for the job clock: Europe/Copenhagen means 03:00 Copenhagen time. UTC means 03:00 UTC. This does not change dates in your data",
@@ -1128,8 +1170,80 @@
         }
       }
     },
+    "retraining_pause_status": {
+      "type": "string",
+      "default": "UNPAUSED",
+      "enum": [
+        "UNPAUSED",
+        "PAUSED"
+      ],
+      "description": "4. Lifecycle | Enable the training clock after deployment (UNPAUSED), or keep it paused (PAUSED)?",
+      "skip_prompt_if": {
+        "properties": {
+          "retraining_mode": {
+            "const": "manual"
+          }
+        }
+      },
+      "order": 53
+    },
+    "scoring_mode": {
+      "type": "string",
+      "default": "manual",
+      "enum": [
+        "manual",
+        "scheduled"
+      ],
+      "description": "4. Lifecycle | Start scoring yourself, or schedule it independently of training?",
+      "order": 54
+    },
+    "scoring_cron_expression": {
+      "type": "string",
+      "default": "0 0 * * * ?",
+      "description": "4. Lifecycle | When to score (Quartz cron)? 0 0 * * * ? runs hourly. This does not change the training window",
+      "pattern": "^[A-Za-z0-9*?/,# +\\-]+$",
+      "skip_prompt_if": {
+        "properties": {
+          "scoring_mode": {
+            "const": "manual"
+          }
+        }
+      },
+      "order": 55
+    },
+    "scoring_timezone_id": {
+      "type": "string",
+      "default": "UTC",
+      "description": "4. Lifecycle | Timezone for the scoring clock, e.g. UTC or Europe/Copenhagen. Independent of the training clock and source dates",
+      "pattern": "^[A-Za-z_]+(?:/[A-Za-z0-9_+.-]+)*$",
+      "skip_prompt_if": {
+        "properties": {
+          "scoring_mode": {
+            "const": "manual"
+          }
+        }
+      },
+      "order": 56
+    },
+    "scoring_pause_status": {
+      "type": "string",
+      "default": "UNPAUSED",
+      "enum": [
+        "UNPAUSED",
+        "PAUSED"
+      ],
+      "description": "4. Lifecycle | Enable the scoring clock after deployment (UNPAUSED), or keep it paused (PAUSED)?",
+      "skip_prompt_if": {
+        "properties": {
+          "scoring_mode": {
+            "const": "manual"
+          }
+        }
+      },
+      "order": 57
+    },
     "model_change_mode": {
-      "order": 51,
+      "order": 58,
       "type": "string",
       "default": "incremental_append",
       "description": "4. Lifecycle | Keep old predictions and append new rows, or rebuild all rows into a new model-version generation",
@@ -1139,7 +1253,7 @@
       ]
     },
     "score_model_selection": {
-      "order": 52,
+      "order": 59,
       "type": "string",
       "default": "pinned_version",
       "description": "4. Lifecycle | Score with one pinned version or resolve the controlled champion on each run",
@@ -1149,7 +1263,7 @@
       ]
     },
     "promotion_policy": {
-      "order": 53,
+      "order": 60,
       "type": "string",
       "default": "manual_approval",
       "description": "4. Lifecycle | Require operator approval or promote automatically after quality gates pass",
@@ -1159,7 +1273,7 @@
       ]
     },
     "score_handoff": {
-      "order": 54,
+      "order": 61,
       "type": "string",
       "default": "disabled",
       "description": "4. Lifecycle | Optionally run the existing score job after champion initialization, promotion or rollback; score keeps its selected model policy",
@@ -1169,7 +1283,7 @@
       ]
     },
     "regression_metric": {
-      "order": 55,
+      "order": 62,
       "type": "string",
       "default": "heldout_rmse",
       "description": "4. Lifecycle | Metric for comparing regression models on separate test data (heldout). Lower error is better; higher R2 or explained variance is better",
@@ -1190,7 +1304,7 @@
       }
     },
     "classification_metric": {
-      "order": 56,
+      "order": 63,
       "type": "string",
       "default": "heldout_accuracy",
       "description": "4. Lifecycle | Metric for comparing classification models on separate test data (heldout). Some metrics need probabilities or specific class counts",
@@ -1224,28 +1338,28 @@
       }
     },
     "min_improvement": {
-      "order": 57,
+      "order": 64,
       "type": "number",
       "default": 0.0,
       "minimum": 0,
       "description": "4. Lifecycle | Minimum metric improvement required for manual or automatic promotion; ties never pass"
     },
     "quality_threshold": {
-      "order": 58,
+      "order": 65,
       "type": "string",
       "default": "null",
       "description": "4. Lifecycle | Absolute quality gate; numeric required for automatic promotion or manual first-champion approval. Choose for your metric and task.",
       "pattern": "^(null|-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)$"
     },
     "risk_category": {
-      "order": 59,
+      "order": 66,
       "type": "string",
       "default": "",
       "description": "4. Lifecycle | Optional business risk label (e.g. Low, Medium, High); leave blank when unused. This label does not change promotion gates.",
       "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9 ._-]{0,63})?$"
     },
     "compute_mode": {
-      "order": 60,
+      "order": 67,
       "type": "string",
       "default": "serverless",
       "description": "5. Compute | Job compute mode for this project",
@@ -1255,7 +1369,7 @@
       ]
     },
     "cluster_policy_name": {
-      "order": 61,
+      "order": 68,
       "type": "string",
       "default": "REPLACE_WITH_APPROVED_POLICY",
       "description": "5. Compute | Approved job-cluster policy name",
@@ -1268,7 +1382,7 @@
       }
     },
     "spark_version": {
-      "order": 62,
+      "order": 69,
       "type": "string",
       "default": "17.3.x-cpu-ml-scala2.13",
       "description": "5. Compute | Approved Databricks ML Runtime for the job cluster",
@@ -1281,7 +1395,7 @@
       }
     },
     "node_type_id": {
-      "order": 63,
+      "order": 70,
       "type": "string",
       "default": "REPLACE_WITH_NODE_TYPE",
       "description": "5. Compute | Approved job-cluster node type",
@@ -1294,7 +1408,7 @@
       }
     },
     "cost_tag_key": {
-      "order": 64,
+      "order": 71,
       "type": "string",
       "default": "CostCenter",
       "description": "5. Compute | Approved cluster cost tag key, for example CostCenter or PayingRegNo",
@@ -1308,7 +1422,7 @@
       }
     },
     "cost_tag_value": {
-      "order": 65,
+      "order": 72,
       "type": "string",
       "default": "REPLACE_WITH_COST_TAG",
       "description": "5. Compute | Approved cluster cost tag value; for PayingRegNo, enter your paying registration number",

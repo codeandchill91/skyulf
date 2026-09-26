@@ -47,6 +47,57 @@ training excluded. Shared prediction eligibility needs a separate opt-in rule.
 Model/node listings come from the Core registry.
 See [guided setup](databricks_bundle.md#guided-setup-and-offline-preview).
 
+### Inspect failures and replay a pinned training input
+
+The MLflow training run begins after argument validation and saves its inputs
+before source read, split, CV, fit or heldout evaluation. `training_snapshot.json`
+records the concrete Delta table/version, input/target/key columns, ISO window
+and result cutoffs, parsing rules, split/sample/filter settings, budgets and
+engine. `training_pipeline_config.json` saves the original pipeline input with
+the existing self-contained `project_python_source`; `skyulf_pipeline_config.json`
+saves the effective config after fixed preprocessing is projected into it.
+CV settings are recorded as run parameters.
+
+A runtime failure leaves this evidence on a FAILED run without model publication
+or challenger nomination. Successful training additionally saves
+`candidate_training_spec.json`, membership/filter evidence and comparison for
+approval. The early snapshot intentionally has no newly computed membership
+digests, so it is not an approval receipt.
+
+For manual replay through the generated project:
+
+1. Download the snapshot and **original** `training_pipeline_config.json`.
+   Restore its `project_python_source` to `src/preprocessing.py` with the exact
+   saved contents. Restore its pipeline modeling/settings in workflow JSON with
+   `pipeline.preprocessing=[]` and top-level `pre_split_steps=[]`; the project
+   loader rebuilds both hooks from the saved source. The effective
+   `skyulf_pipeline_config.json` already contains
+   projected fixed steps and must not be supplied as the original input.
+2. Set `training_table` and `training_version` from snapshot `table` and `version`.
+   Copy the saved input/target/key columns, engine, split/sample settings,
+   `event_column`, `result_available_at_column`, `filter_unavailable_results`,
+   parsing rules, `start`, `holdout_start`, `cutoff`, `result_cutoff` and `max_rows`,
+   preserving null inactive fields. Convert snapshot `max_bytes` to
+   `max_input_mb` by dividing by 1048576 (a whole integer for generated projects).
+   Use `fixed_window` with an active event column, otherwise `full_snapshot`;
+   set `monthly_lookback_months`, `holdout_months` and `window_timezone` to null.
+   Set `result_availability_lag_hours` to null when result filtering is disabled,
+   otherwise 0; manual replay uses the saved `result_cutoff` rather than this lag.
+   Manual `train` uses the saved boundaries, independently of current rolling
+   policy. Restore the recorded CV parameters and reviewed comparison/promotion
+   settings.
+3. Invoke the serialized train job with action `train`. A new `train_monthly`
+   call deliberately selects fresh source history and resolves dates again,
+   even if the cron or invocation occurs soon after the failed attempt.
+
+A direct Core replay instead reconstructs `LocalTrainingSpec` from the snapshot
+using aware datetime objects, `TrainingDateSpec` parsing objects and tuple
+key/input/pre-split fields. Pass its separately extracted engine and the original
+`training_pipeline_config.json` to `train_local_candidate`; restore trusted
+project source registration if custom nodes require it. Retain the referenced
+Delta history and compatible code/dependencies. Pinning the inputs does not
+guarantee identical floating-point results across future environments.
+
 ## Choose the preprocessing phase
 
 Both hooks live in `src/preprocessing.py`; leave either list empty when unneeded.
@@ -605,10 +656,79 @@ receipt tags or move controlled aliases directly through Catalog UI.
   evidence before retrying. Do not force a competing alias update.
 - If promotion succeeds and the child score fails, fix scoring and run the
   score job again. Do not retrain to repair a prediction failure.
-- Optional scheduled training starts enabled after deployment. Its cron/timezone are Bundle
-  settings; choosing handoff does not itself create a scoring schedule.
+- Training and scoring have independent optional schedules, enabled by default
+  when selected. Their cron, timezone and pause settings are Bundle variables;
+  choosing handoff does not itself create a scoring schedule.
 - Full-rebuild rollback can revisit an earlier generation. It follows that
   generation's committed progress; it does not erase previously written data.
 
 Platform references: [job parameters](https://docs.databricks.com/aws/en/jobs/parameters)
 and [Run Job tasks](https://docs.databricks.com/aws/en/jobs/tasks/run-job).
+
+### Configure independent clocks and training data
+
+At initialization, choose `manual` or `scheduled` separately for
+`retraining_mode` and `scoring_mode`. Manual omits the schedule; scheduled starts
+`UNPAUSED` after deployment, including the development target. Set
+`retraining_pause_status` or `scoring_pause_status` to `PAUSED` to stop that clock.
+Cron/timezone/pause remain target-overridable Bundle variables:
+
+| Job | Cron variable and default | Timezone | Pause variable |
+| --- | --- | --- | --- |
+| train | `retraining_cron_expression`: `0 0 3 3 * ?` | `retraining_timezone_id`: UTC | `retraining_pause_status` |
+| score | `scoring_cron_expression`: `0 0 * * * ?` | `scoring_timezone_id`: UTC | `scoring_pause_status` |
+
+For hourly score-only operation, choose `retraining_mode=manual` and
+`scoring_mode=scheduled`, with an existing pinned model or champion. Both jobs
+still permit one active run and queue overlapping requests. Scheduled scoring,
+manual scoring and lifecycle handoff use the same score job. `PAUSED` suppresses
+clock triggers, not already queued or manual runs. A no-op means scoring ran
+successfully but had no new rows; a queued run is waiting for its turn.
+There are still exactly two jobs, no control tables and no automatic mutation
+retries.
+
+The `train_monthly` name is retained: it pins the latest Delta snapshot at each
+invocation and applies your configured selection. Any supported cron frequency
+can invoke it; the cron never determines the data window. Date-free
+`full_snapshot` training remains available. Source parsing timezone, the
+`window_timezone` defining month boundaries, and each job clock timezone are
+separate settings.
+
+In workflow JSON, `monthly_lookback_months` includes the held-out months.
+For rolling temporal selection, set integer `holdout_months` from 1 through
+lookback minus 1 (default 1). Random rolling selection uses `test_size` and null
+holdout months; fixed temporal selection retains explicit start/holdout/cutoff
+boundaries and null holdout months. Default temporal selection still uses four
+completed months in UTC and holds out the final month.
+
+With `filter_unavailable_results=true`, integer
+`result_availability_lag_hours` is 0 to 87600 (default 0). Automatic training uses
+invocation UTC minus that many elapsed hours, even across DST; manual `train`
+uses the explicit `result_cutoff`. The lag is null when filtering is disabled.
+Availability filtering also works without an event column. Results exactly at
+the availability cutoff are included; observation windows are half-open
+`[start, cutoff)`.
+
+For example, these data policy fields select a two-month final holdout and allow
+two days for result availability:
+
+```json
+{
+  "training_window_mode": "rolling_calendar",
+  "split_strategy": "temporal",
+  "window_timezone": "UTC",
+  "monthly_lookback_months": 4,
+  "holdout_months": 2,
+  "filter_unavailable_results": true,
+  "result_availability_lag_hours": 48
+}
+```
+
+Add these fields to your complete workflow and map the real event and result
+availability columns. At September 3, 00:00 UTC, automatic training selects May
+through August, trains on May/June, holds out July/August, and includes results
+available by September 1, 00:00 UTC. Run
+`python src/preview.py --action train_monthly` to inspect this policy offline.
+Preview does not resolve Bundle clocks; inspect `bundle validate -t dev
+--strict --output json` for the resolved schedule. CLI validation is not proof
+of a live scheduled trigger or contention run.

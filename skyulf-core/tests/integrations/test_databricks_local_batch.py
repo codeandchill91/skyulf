@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -109,6 +110,26 @@ def _spec(**changes):
     }
     values.update(changes)
     return LocalSourceSpec(**values)
+
+
+def test_source_period_accepts_forward_dst_fold() -> None:
+    """Repeated wall-clock hours must preserve a forward UTC scoring interval."""
+    zone = ZoneInfo("America/New_York")
+    spec = _spec(
+        period_start=datetime(2026, 11, 1, 1, 50, tzinfo=zone, fold=0),
+        period_end=datetime(2026, 11, 1, 1, 10, tzinfo=zone, fold=1),
+    )
+    assert spec.period_start.astimezone(UTC) < spec.period_end.astimezone(UTC)
+
+
+@pytest.mark.parametrize("equal", [False, True])
+def test_source_period_rejects_nonforward_utc_instants(equal: bool) -> None:
+    """A reversed fold or equal instant cannot silently yield an empty source read."""
+    zone = ZoneInfo("America/New_York")
+    start = datetime(2026, 11, 1, 1, 10, tzinfo=zone, fold=1)
+    end = start.astimezone(UTC) if equal else datetime(2026, 11, 1, 1, 50, tzinfo=zone)
+    with pytest.raises(ValueError, match="period_start must precede"):
+        _spec(period_start=start, period_end=end)
 
 
 def test_reader_pins_filters_and_limits_before_local_iteration() -> None:

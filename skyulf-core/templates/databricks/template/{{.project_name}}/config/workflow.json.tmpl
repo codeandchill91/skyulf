@@ -9,6 +9,8 @@
   "split_strategy": "{{.split_strategy}}",
   "training_window_mode": "{{$window}}",
   "window_timezone": {{if eq $window "rolling_calendar"}}"{{.window_timezone}}"{{else}}null{{end}},
+  "holdout_months": {{if and (eq $window "rolling_calendar") (eq .split_strategy "temporal")}}{{.holdout_months}}{{else}}null{{end}},
+  "result_availability_lag_hours": {{if eq .filter_unavailable_results "true"}}{{.result_availability_lag_hours}}{{else}}null{{end}},
   "test_size": {{.test_size}},
   "random_state": {{.random_state}},
   "stratify": {{.stratify}},

@@ -499,6 +499,129 @@ def _key_digest(frame: pd.DataFrame, keys: tuple[str, ...]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _validate_pre_split_inputs(
+    native: pd.DataFrame | pl.DataFrame, step: dict[str, Any], target_column: str
+) -> list[str]:
+    """Check declared columns, bounds dtypes and deduplication label consistency."""
+    step_type = step["transformer"]
+    if step_type in FIXED_TYPES:
+        columns = fixed_columns(step)
+    elif step_type in ("DropMissingRows", "Deduplicate"):
+        columns = step["params"]["subset"]
+    elif step_type == "ManualBounds":
+        columns = step["params"]["bounds"]
+    else:
+        columns = custom_filter_columns(step)
+    if any(column not in native.columns for column in columns):
+        missing = sorted(set(columns) - set(native.columns))
+        raise ValueError(f"pre_split_steps {step['name']} missing source columns: {missing}.")
+    if step["transformer"] == "ManualBounds":
+        for column in columns:
+            if isinstance(native, pl.DataFrame):
+                numeric = native.schema[column].is_numeric()
+            else:
+                dtype = native[column].dtype
+                numeric = pd.api.types.is_numeric_dtype(dtype) and not pd.api.types.is_bool_dtype(
+                    dtype
+                )
+            if not numeric:
+                raise ValueError(f"pre_split_steps ManualBounds requires numeric column {column}.")
+    if step_type == "Deduplicate":
+        working = native.to_pandas() if isinstance(native, pl.DataFrame) else native
+        for _, group in working.groupby(list(columns), dropna=False, sort=False):
+            labels = group[target_column]
+            if labels.nunique(dropna=True) > 1 or (labels.isna().any() and labels.notna().any()):
+                raise ValueError(
+                    "pre_split_steps Deduplicate found conflicting target values "
+                    "within one subset group."
+                )
+    return list(columns)
+
+
+def _validate_pre_split_survivors(
+    filtered: pd.DataFrame | pl.DataFrame,
+    keys: list[str],
+    before_keys: list[tuple[Any, ...]],
+    before_columns: dict[str, list[Any]],
+    *,
+    target_column: str,
+    allowed_edits: set[str],
+) -> None:
+    """Keep surviving identities ordered and undeclared source values paired."""
+    after_keys = (
+        list(filtered.select(keys).iter_rows())
+        if isinstance(filtered, pl.DataFrame)
+        else list(filtered[keys].itertuples(index=False, name=None))
+    )
+    positions = {key: index for index, key in enumerate(before_keys)}
+    if any(key not in positions for key in after_keys) or [
+        positions[key] for key in after_keys
+    ] != sorted({positions[key] for key in after_keys}):
+        raise ValueError("pre_split_steps must preserve row identities and order.")
+    for column in filtered.columns:
+        if column in allowed_edits:
+            continue
+        after_values = filtered[column].to_list()
+        for key, value in zip(after_keys, after_values, strict=True):
+            expected = before_columns[column][positions[key]]
+            expected_missing = bool(pd.isna(expected))
+            value_missing = bool(pd.isna(value))
+            if expected_missing != value_missing or (not expected_missing and expected != value):
+                if column == target_column:
+                    raise ValueError("pre_split_steps must preserve target pairing.")
+                raise ValueError(f"pre_split_steps changed undeclared column {column}.")
+
+
+def _apply_pre_split_steps(
+    selected: pd.DataFrame, spec: LocalTrainingSpec, engine: str
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    """Apply each ordered eligibility step once and record its survivor counts."""
+    filter_counts = []
+    native = pl.from_pandas(selected) if spec.pre_split_steps and engine == "polars" else selected
+    for step in spec.pre_split_steps:
+        columns = _validate_pre_split_inputs(native, step, spec.target_column)
+        step_type = step["transformer"]
+        keys = list(spec.record_key_columns)
+        original_columns = list(native.columns)
+        original_dtypes = list(native.dtypes)
+        before_keys = (
+            list(native.select(keys).iter_rows())
+            if isinstance(native, pl.DataFrame)
+            else list(native[keys].itertuples(index=False, name=None))
+        )
+        before_columns = {column: native[column].to_list() for column in native.columns}
+        artifact = NodeRegistry.get_calculator(step["transformer"])().fit(native, step["params"])
+        filtered = NodeRegistry.get_applier(step["transformer"])().apply(native, artifact)
+        if not isinstance(filtered, type(native)):
+            raise ValueError("pre_split_steps filter did not return a frame.")
+        if list(filtered.columns) != original_columns:
+            raise ValueError("pre_split_steps must preserve all source columns.")
+        if is_registered_project_step(step_type) and list(filtered.dtypes) != original_dtypes:
+            raise ValueError("pre_split_steps custom filter must preserve source dtypes.")
+        _validate_pre_split_survivors(
+            filtered,
+            keys,
+            before_keys,
+            before_columns,
+            target_column=spec.target_column,
+            allowed_edits=set(columns) if step_type in FIXED_TYPES else set(),
+        )
+        filter_counts.append(
+            {
+                "name": step["name"],
+                "transformer": step["transformer"],
+                "input_rows": len(before_keys),
+                "excluded_rows": len(before_keys) - len(filtered),
+                "output_rows": len(filtered),
+            }
+        )
+        native = filtered
+    if spec.pre_split_steps:
+        selected = native.to_pandas() if isinstance(native, pl.DataFrame) else native
+        selected = selected.reset_index(drop=True)
+    return selected, filter_counts
+
+
 def split_labeled_snapshot(
     frame: pd.DataFrame,
     spec: LocalTrainingSpec,
@@ -569,100 +692,7 @@ def split_labeled_snapshot(
         if spec.sample_key_sha256 is not None and sample_digest != spec.sample_key_sha256:
             raise ValueError("Training sample membership differs from saved evidence.")
     pre_filter_digest = _key_digest(selected, spec.record_key_columns)
-    filter_counts = []
-    native = pl.from_pandas(selected) if spec.pre_split_steps and engine == "polars" else selected
-    for step in spec.pre_split_steps:
-        step_type = step["transformer"]
-        if step_type in FIXED_TYPES:
-            columns = fixed_columns(step)
-        elif step_type in ("DropMissingRows", "Deduplicate"):
-            columns = step["params"]["subset"]
-        elif step_type == "ManualBounds":
-            columns = step["params"]["bounds"]
-        else:
-            columns = custom_filter_columns(step)
-        if any(column not in native.columns for column in columns):
-            missing = sorted(set(columns) - set(native.columns))
-            raise ValueError(f"pre_split_steps {step['name']} missing source columns: {missing}.")
-        if step["transformer"] == "ManualBounds":
-            for column in columns:
-                if isinstance(native, pl.DataFrame):
-                    numeric = native.schema[column].is_numeric()
-                else:
-                    dtype = native[column].dtype
-                    numeric = pd.api.types.is_numeric_dtype(
-                        dtype
-                    ) and not pd.api.types.is_bool_dtype(dtype)
-                if not numeric:
-                    raise ValueError(
-                        f"pre_split_steps ManualBounds requires numeric column {column}."
-                    )
-        if step_type == "Deduplicate":
-            working = native.to_pandas() if isinstance(native, pl.DataFrame) else native
-            for _, group in working.groupby(list(columns), dropna=False, sort=False):
-                labels = group[spec.target_column]
-                if labels.nunique(dropna=True) > 1 or (
-                    labels.isna().any() and labels.notna().any()
-                ):
-                    raise ValueError(
-                        "pre_split_steps Deduplicate found conflicting target values "
-                        "within one subset group."
-                    )
-        keys = list(spec.record_key_columns)
-        original_columns = list(native.columns)
-        original_dtypes = list(native.dtypes)
-        before_keys = (
-            list(native.select(keys).iter_rows())
-            if isinstance(native, pl.DataFrame)
-            else list(native[keys].itertuples(index=False, name=None))
-        )
-        before_columns = {column: native[column].to_list() for column in native.columns}
-        artifact = NodeRegistry.get_calculator(step["transformer"])().fit(native, step["params"])
-        filtered = NodeRegistry.get_applier(step["transformer"])().apply(native, artifact)
-        if not isinstance(filtered, type(native)):
-            raise ValueError("pre_split_steps filter did not return a frame.")
-        if list(filtered.columns) != original_columns:
-            raise ValueError("pre_split_steps must preserve all source columns.")
-        if is_registered_project_step(step_type) and list(filtered.dtypes) != original_dtypes:
-            raise ValueError("pre_split_steps custom filter must preserve source dtypes.")
-        after_keys = (
-            list(filtered.select(keys).iter_rows())
-            if isinstance(filtered, pl.DataFrame)
-            else list(filtered[keys].itertuples(index=False, name=None))
-        )
-        positions = {key: index for index, key in enumerate(before_keys)}
-        if any(key not in positions for key in after_keys) or [
-            positions[key] for key in after_keys
-        ] != sorted({positions[key] for key in after_keys}):
-            raise ValueError("pre_split_steps must preserve row identities and order.")
-        allowed_edits = set(columns) if step["transformer"] in FIXED_TYPES else set()
-        for column in filtered.columns:
-            if column in allowed_edits:
-                continue
-            after_values = filtered[column].to_list()
-            for key, value in zip(after_keys, after_values, strict=True):
-                expected = before_columns[column][positions[key]]
-                expected_missing = bool(pd.isna(expected))
-                value_missing = bool(pd.isna(value))
-                if expected_missing != value_missing or (
-                    not expected_missing and expected != value
-                ):
-                    if column == spec.target_column:
-                        raise ValueError("pre_split_steps must preserve target pairing.")
-                    raise ValueError(f"pre_split_steps changed undeclared column {column}.")
-        filter_counts.append(
-            {
-                "name": step["name"],
-                "transformer": step["transformer"],
-                "input_rows": len(before_keys),
-                "excluded_rows": len(before_keys) - len(filtered),
-                "output_rows": len(filtered),
-            }
-        )
-        native = filtered
-    if spec.pre_split_steps:
-        selected = native.to_pandas() if isinstance(native, pl.DataFrame) else native
-        selected = selected.reset_index(drop=True)
+    selected, filter_counts = _apply_pre_split_steps(selected, spec, engine)
     survivor_digest = _key_digest(selected, spec.record_key_columns)
     if spec.survivor_key_sha256 is not None and survivor_digest != spec.survivor_key_sha256:
         raise ValueError("Survivor membership differs from saved training evidence.")
@@ -754,6 +784,15 @@ def _log_local_model(artifact_path: str | Path, *, run_id: str, tracking_uri: st
     )
 
 
+def _training_spec_payload(spec: LocalTrainingSpec, engine: str) -> dict[str, Any]:
+    """Serialize concrete selection settings before and after membership enrichment."""
+    payload = asdict(spec)
+    for field in ("start", "holdout_start", "cutoff", "result_cutoff"):
+        value = getattr(spec, field)
+        payload[field] = None if value is None else value.isoformat()
+    return {**payload, "engine": engine}
+
+
 def train_local_candidate(
     spark: Any,
     spec: LocalTrainingSpec,
@@ -836,51 +875,6 @@ def train_local_candidate(
         if champion_version is not None
         else None
     )
-    frame = read_training_snapshot(spark, spec)
-    temporal_cv = cv.enabled and cv.method == "time_series_split"
-    train_frame, holdout, unavailable = split_labeled_snapshot(
-        frame, spec, keep_training_event=temporal_cv, engine=engine
-    )
-    spec = replace(
-        spec,
-        holdout_key_sha256=holdout.attrs["holdout_key_sha256"],
-        sample_key_sha256=holdout.attrs["sample_key_sha256"],
-    )
-    native_train = pl.from_pandas(train_frame) if engine == "polars" else train_frame
-    native_holdout = pl.from_pandas(holdout) if engine == "polars" else holdout
-    cv_results = evaluate_training_cv(
-        native_train,
-        pipeline_config,
-        cv,
-        target_column=spec.target_column,
-        event_column=spec.event_column if temporal_cv else None,
-    )
-    if temporal_cv:
-        model_columns = [*spec.input_columns, spec.target_column]
-        native_train = (
-            native_train.select(model_columns)
-            if isinstance(native_train, pl.DataFrame)
-            else native_train.loc[:, model_columns]
-        )
-    artifact = fit_local_workflow(
-        pipeline_config,
-        SplitDataset(train=native_train, test=native_train.head(0)),
-        target_column=spec.target_column,
-        artifact_path=artifact_path,
-        max_rows=spec.max_rows,
-        max_bytes=spec.max_bytes,
-    )
-    evidence = build_training_evidence(
-        spec, holdout, project_source_sha256=artifact.manifest.project_source_sha256
-    )
-    spec = replace(
-        spec,
-        survivor_key_sha256=holdout.attrs["survivor_key_sha256"],
-        training_evidence_sha256=evidence_digest(evidence),
-    )
-    metrics = evaluate_local_holdout(artifact, native_holdout, target_column=spec.target_column)
-    if metric not in metrics or not math.isfinite(metrics[metric]):
-        raise ValueError("Selected metric is unavailable or non-finite on the holdout.")
     tracking = TrackingConfig(
         enabled=True,
         tracking_uri=tracking_uri,
@@ -891,7 +885,56 @@ def train_local_candidate(
         if run.run_id is None:
             raise RuntimeError("MLflow did not provide a run ID.")
         run.log_config(pipeline_config, artifact_file="skyulf_pipeline_config.json")
+        run.client.log_dict(run.run_id, config, "training_pipeline_config.json")
         run.log_params({key: getattr(cv, field) for key, field in CV_FIELDS.items()})
+        run.client.log_dict(
+            run.run_id, _training_spec_payload(spec, engine), "training_snapshot.json"
+        )
+        frame = read_training_snapshot(spark, spec)
+        temporal_cv = cv.enabled and cv.method == "time_series_split"
+        train_frame, holdout, unavailable = split_labeled_snapshot(
+            frame, spec, keep_training_event=temporal_cv, engine=engine
+        )
+        spec = replace(
+            spec,
+            holdout_key_sha256=holdout.attrs["holdout_key_sha256"],
+            sample_key_sha256=holdout.attrs["sample_key_sha256"],
+        )
+        native_train = pl.from_pandas(train_frame) if engine == "polars" else train_frame
+        native_holdout = pl.from_pandas(holdout) if engine == "polars" else holdout
+        cv_results = evaluate_training_cv(
+            native_train,
+            pipeline_config,
+            cv,
+            target_column=spec.target_column,
+            event_column=spec.event_column if temporal_cv else None,
+        )
+        if temporal_cv:
+            model_columns = [*spec.input_columns, spec.target_column]
+            native_train = (
+                native_train.select(model_columns)
+                if isinstance(native_train, pl.DataFrame)
+                else native_train.loc[:, model_columns]
+            )
+        artifact = fit_local_workflow(
+            pipeline_config,
+            SplitDataset(train=native_train, test=native_train.head(0)),
+            target_column=spec.target_column,
+            artifact_path=artifact_path,
+            max_rows=spec.max_rows,
+            max_bytes=spec.max_bytes,
+        )
+        evidence = build_training_evidence(
+            spec, holdout, project_source_sha256=artifact.manifest.project_source_sha256
+        )
+        spec = replace(
+            spec,
+            survivor_key_sha256=holdout.attrs["survivor_key_sha256"],
+            training_evidence_sha256=evidence_digest(evidence),
+        )
+        metrics = evaluate_local_holdout(artifact, native_holdout, target_column=spec.target_column)
+        if metric not in metrics or not math.isfinite(metrics[metric]):
+            raise ValueError("Selected metric is unavailable or non-finite on the holdout.")
         if cv_results is not None:
             cv_results.update(
                 dataset_id=spec.dataset_id, training_rows=len(train_frame), engine=engine
@@ -957,7 +1000,6 @@ def train_local_candidate(
             "pre_split_filters.json",
         )
         run.client.log_dict(run.run_id, evidence, "training_filter_evidence.json")
-        saved_spec = asdict(spec)
         if spec.training_sample_rows is not None:
             run.client.log_dict(
                 run.run_id,
@@ -968,9 +1010,6 @@ def train_local_candidate(
                 },
                 "training_selection.json",
             )
-        for field in ("start", "holdout_start", "cutoff", "result_cutoff"):
-            value = getattr(spec, field)
-            saved_spec[field] = None if value is None else value.isoformat()
         run.client.log_dict(
             run.run_id,
             {
@@ -982,7 +1021,7 @@ def train_local_candidate(
             "holdout_membership.json",
         )
         run.client.log_dict(
-            run.run_id, {**saved_spec, "engine": engine}, "candidate_training_spec.json"
+            run.run_id, _training_spec_payload(spec, engine), "candidate_training_spec.json"
         )
         run.log_metrics(metrics)
         model_uri = _log_local_model(artifact_path, run_id=run.run_id, tracking_uri=tracking_uri)

@@ -58,6 +58,8 @@ _FIELDS = {
     "holdout_start",
     "cutoff",
     "monthly_lookback_months",
+    "holdout_months",
+    "result_availability_lag_hours",
     "max_rows",
     "max_input_mb",
     "metric",
@@ -272,9 +274,17 @@ def preview_workflow_config(config: dict[str, Any], *, action: str = "score") ->
         if window == "rolling_calendar":
             observation_window = "completed calendar months at invocation"
             if checked.get("split_strategy") == "temporal":
-                holdout_start = "last completed calendar month"
+                months = checked.get("holdout_months", 1)
+                holdout_start = (
+                    "last completed calendar month"
+                    if months == 1
+                    else f"last {months} completed calendar months"
+                )
         if checked.get("filter_unavailable_results"):
-            result_cutoff = "invocation time"
+            result_cutoff = (
+                f"invocation time UTC minus {checked.get('result_availability_lag_hours', 0)} "
+                "elapsed hours (inclusive)"
+            )
     lines = [
         "Skyulf workflow preview",
         "No data read, training, registry mutation or deployment.",
@@ -286,6 +296,11 @@ def preview_workflow_config(config: dict[str, Any], *, action: str = "score") ->
         f"Window: {observation_window}",
         f"Calendar: {checked.get('monthly_lookback_months')} months, "
         f"timezone={checked.get('window_timezone')}",
+        "Job clocks and pause settings live in Bundle variables, independently of data selection. "
+        "train_monthly pins fresh data at invocation and accepts any cron frequency.",
+        "PAUSED stops clock triggers; an unchanged score can finish as a no-op. "
+        "Overlapping runs queue behind the same job's single active run; "
+        "scheduled scoring and lifecycle handoff share that score job.",
         f"Result availability: {checked.get('result_available_at_column')} | "
         f"filter={checked.get('filter_unavailable_results', False)} | "
         f"cutoff={result_cutoff}",

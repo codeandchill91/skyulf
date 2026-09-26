@@ -56,7 +56,7 @@ class LocalSourceSpec:
                 tzinfo=None
             ):
                 raise ValueError(f"{name} is not a valid local instant.")
-        if self.period_start >= self.period_end:
+        if self.period_start.astimezone(UTC) >= self.period_end.astimezone(UTC):
             raise ValueError("period_start must precede period_end.")
         for name in (*self.record_key_columns, *self.input_columns, self.period_column):
             column_name(name)

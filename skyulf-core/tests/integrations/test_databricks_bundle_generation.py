@@ -93,6 +93,81 @@ def _read_validated_config(project):
     return config
 
 
+@pytest.mark.parametrize("train_mode", ["manual", "scheduled"])
+@pytest.mark.parametrize("score_mode", ["manual", "scheduled"])
+def test_cli_independent_schedules_preserve_shared_two_job_graph(tmp_path, train_mode, score_mode):
+    """Each clock is optional and target-overridable without duplicating score handoff."""
+    project = _generate_project(
+        tmp_path,
+        retraining_mode=train_mode,
+        scoring_mode=score_mode,
+        retraining_cron_expression="0 0 3 1 1,7 ?",
+        scoring_cron_expression="0 15 * * * ?",
+        retraining_timezone_id="Europe/Vilnius",
+        scoring_timezone_id="America/New_York",
+        retraining_pause_status="PAUSED",
+        scoring_pause_status="UNPAUSED",
+    )
+    variables = yaml.safe_load((project / "databricks.yml").read_text())["variables"]
+    jobs = yaml.safe_load((project / "resources/workflow.jobs.yml").read_text())["resources"][
+        "jobs"
+    ]
+    config = _read_validated_config(project)
+    assert set(jobs) == {"train", "score"}
+    for job, mode, prefix, cron, zone, pause in (
+        ("train", train_mode, "retraining", "0 0 3 1 1,7 ?", "Europe/Vilnius", "PAUSED"),
+        ("score", score_mode, "scoring", "0 15 * * * ?", "America/New_York", "UNPAUSED"),
+    ):
+        assert jobs[job]["max_concurrent_runs"] == 1
+        assert jobs[job]["queue"]["enabled"] is True
+        if mode == "manual":
+            assert "schedule" not in jobs[job]
+            assert f"{prefix}_pause_status" not in variables
+        else:
+            assert jobs[job]["schedule"] == {
+                "quartz_cron_expression": "${var." + prefix + "_cron_expression}",
+                "timezone_id": "${var." + prefix + "_timezone_id}",
+                "pause_status": "${var." + prefix + "_pause_status}",
+            }
+            for suffix, expected in (
+                ("cron_expression", cron),
+                ("timezone_id", zone),
+                ("pause_status", pause),
+            ):
+                assert variables[f"{prefix}_{suffix}"]["default"] == expected
+                assert f"{prefix}_{suffix}" not in config
+    tasks = {task["task_key"]: task for task in jobs["train"]["tasks"]}
+    assert tasks["score_after_lifecycle"]["run_job_task"]["job_id"] == "${resources.jobs.score.id}"
+    assert tasks["train"]["max_retries"] == jobs["score"]["tasks"][0]["max_retries"] == 0
+
+
+@pytest.mark.parametrize("strategy,holdout", [("random", None), ("temporal", 2)])
+def test_cli_emits_integer_window_controls_only_when_active(tmp_path, strategy, holdout):
+    """Initializer numeric text must render as integer policy values or inactive nulls."""
+    project = _generate_project(
+        tmp_path,
+        training_window_mode="rolling_calendar",
+        split_strategy=strategy,
+        event_column="observed_at",
+        holdout_months="2",
+        monthly_lookback_months="4",
+        filter_unavailable_results="true",
+        result_available_at_column="confirmed_at",
+        result_availability_lag_hours="48",
+    )
+    config = _read_validated_config(project)
+    assert config["holdout_months"] == holdout
+    assert config["result_availability_lag_hours"] == 48
+    assert type(config["result_availability_lag_hours"]) is int
+
+
+def test_cli_default_window_controls_are_inactive(tmp_path):
+    """Date-free default projects must not activate irrelevant holdout or maturity policies."""
+    config = _read_validated_config(_generate_project(tmp_path))
+    assert config["holdout_months"] is None
+    assert config["result_availability_lag_hours"] is None
+
+
 def test_cli_plain_column_lists_preserve_order_and_empty_preprocessing(tmp_path):
     """Operators can enter comma-separated names without inserting JSON syntax."""
     project = _generate_project(
@@ -159,7 +234,7 @@ def test_cli_six_month_schedule_keeps_data_window_independent(tmp_path):
     ]
     assert bundle["variables"]["retraining_cron_expression"]["default"] == "0 0 3 1 1,7 ?"
     assert bundle["variables"]["retraining_timezone_id"]["default"] == "Europe/Copenhagen"
-    assert jobs["train"]["schedule"]["pause_status"] == "UNPAUSED"
+    assert jobs["train"]["schedule"]["pause_status"] == "${var.retraining_pause_status}"
     assert _read_validated_config(project)["training_window_mode"] == "full_snapshot"
 
 
@@ -437,7 +512,7 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
     assert config["quality_threshold"] == 100.0  # Manual gates must not be erased.
     assert "model_selection_mode" not in config
     if monthly:
-        assert jobs["train"]["schedule"]["pause_status"] == "UNPAUSED"
+        assert jobs["train"]["schedule"]["pause_status"] == "${var.retraining_pause_status}"
     else:
         assert "schedule" not in jobs["train"]
     if compute == "serverless":

@@ -6,7 +6,7 @@ this module creates no Spark session, registry connection or cloud resource.
 
 import warnings
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -248,6 +248,12 @@ def _training_window_mode(config: dict[str, Any]) -> str:
         minimum = 2 if config.get("split_strategy") == "temporal" else 1
         if type(months) is not int or not minimum <= months <= 120:
             raise ValueError(f"monthly_lookback_months must be an integer from {minimum} to 120.")
+        if config.get("split_strategy") == "temporal":
+            holdout = config.get("holdout_months", 1)
+            if type(holdout) is not int or not 1 <= holdout < months:
+                raise ValueError(
+                    "holdout_months must be an integer from 1 to monthly_lookback_months - 1."
+                )
         zone = config.get("window_timezone")
         if not isinstance(zone, str) or not zone:
             raise ValueError("Rolling-calendar selection requires window_timezone.")
@@ -262,6 +268,16 @@ def _training_window_mode(config: dict[str, Any]) -> str:
         raise ValueError(
             "Non-rolling selection requires null monthly_lookback_months and window_timezone."
         )
+    if (mode != "rolling_calendar" or config.get("split_strategy") != "temporal") and config.get(
+        "holdout_months"
+    ) is not None:
+        raise ValueError("holdout_months must be null outside rolling temporal selection.")
+    if config.get("filter_unavailable_results") is True:
+        lag = config.get("result_availability_lag_hours", 0)
+        if type(lag) is not int or not 0 <= lag <= 87600:
+            raise ValueError("result_availability_lag_hours must be an integer from 0 to 87600.")
+    elif config.get("result_availability_lag_hours") is not None:
+        raise ValueError("Inactive result filtering requires null result_availability_lag_hours.")
     return mode
 
 
@@ -286,12 +302,16 @@ def _monthly_training_spec(spark: Any, config: dict[str, Any], now: datetime) ->
         settings.update(
             start=months_before(lookback).isoformat(),
             holdout_start=(
-                months_before(1).isoformat() if config.get("split_strategy") == "temporal" else None
+                months_before(config.get("holdout_months", 1)).isoformat()
+                if config.get("split_strategy") == "temporal"
+                else None
             ),
             cutoff=cutoff.isoformat(),
         )
     if config.get("filter_unavailable_results", False):
-        settings["result_cutoff"] = now.astimezone(UTC).isoformat()
+        settings["result_cutoff"] = (
+            now.astimezone(UTC) - timedelta(hours=config.get("result_availability_lag_hours", 0))
+        ).isoformat()
     # Validate all selection policies before contacting the source history.
     settings["training_version"] = 0
     spec = _training_spec(settings)

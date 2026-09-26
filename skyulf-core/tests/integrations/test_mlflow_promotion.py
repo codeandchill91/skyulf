@@ -3,7 +3,9 @@
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import Mock
 
 import numpy as np
 import pandas as pd
@@ -38,6 +40,79 @@ from skyulf.integrations.mlflow.validation import (
 from skyulf.pipeline import SkyulfPipeline
 
 mlflow = pytest.importorskip("mlflow")
+
+
+@pytest.fixture
+def champion_reader_client(monkeypatch):
+    """Isolate receipt reads from registry transport without bypassing reader checks."""
+    from skyulf.integrations.mlflow import promotion
+
+    client = Mock()
+    client.get_registered_model.return_value = SimpleNamespace(
+        tags={"champion_current_event": json.dumps({"event_id": "event", "version": "2"})}
+    )
+
+    def read_alias(name, alias):
+        """Expose only the controlled champion alias in this registry."""
+        if alias == "champion":
+            return SimpleNamespace(version="2")
+        error = mlflow.exceptions.MlflowException("missing")
+        error.error_code = "RESOURCE_DOES_NOT_EXIST"
+        raise error
+
+    client.get_model_version_by_alias.side_effect = read_alias
+    monkeypatch.setattr(promotion, "_make_client", lambda *args: client)
+    return client
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        "{",
+        "[]",
+        "null",
+        "{}",
+        '{"k":"promotion","s":"prepared"}',
+        '{"k":"challenger","s":"committed"}',
+        '{"k":"rejection","s":"committed"}',
+        '{"action":"promotion","state":"committed","unexpected":true}',
+    ],
+)
+def test_controlled_champion_rejects_uncommitted_event(champion_reader_client, raw) -> None:
+    """A current marker alone cannot establish a committed champion transition."""
+    from skyulf.integrations.mlflow.promotion import controlled_champion_version
+
+    tags = {} if raw is None else {"promotion_event": raw}
+    champion_reader_client.get_model_version.return_value = SimpleNamespace(tags=tags)
+    with pytest.raises(AliasConflictError, match="receipt"):
+        controlled_champion_version("model")
+
+
+@pytest.mark.parametrize("kind", ["initial", "promotion", "rollback"])
+@pytest.mark.parametrize("readable", [False, True])
+def test_controlled_champion_accepts_committed_event(
+    champion_reader_client, kind, readable
+) -> None:
+    """Both historical compact and readable champion lifecycle receipts remain valid."""
+    from skyulf.integrations.mlflow.promotion import controlled_champion_version
+
+    payload = {"action": kind, "state": "committed"} if readable else {"k": kind, "s": "committed"}
+    champion_reader_client.get_model_version.return_value = SimpleNamespace(
+        tags={"promotion_event": json.dumps(payload)}
+    )
+    assert controlled_champion_version("model") == "2"
+
+
+def test_controlled_champion_receipt_transport_failure_is_typed(champion_reader_client) -> None:
+    """Receipt verification must preserve actionable registry permission failures."""
+    from skyulf.integrations.mlflow.promotion import controlled_champion_version
+
+    error = mlflow.exceptions.MlflowException("denied")
+    error.error_code = "PERMISSION_DENIED"
+    champion_reader_client.get_model_version.side_effect = error
+    with pytest.raises(RegistryAccessError):
+        controlled_champion_version("model")
 
 
 @pytest.fixture

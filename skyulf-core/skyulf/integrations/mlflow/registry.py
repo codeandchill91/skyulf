@@ -338,11 +338,12 @@ def _validate_reference(
     if alias is not None and (type(alias) is not str or not alias.strip()):
         raise ValueError("alias must be a non-empty string.")
     if version is not None and (
-        isinstance(version, bool) or type(version) not in (str, int) or not str(version).strip()
+        type(version) not in (str, int)
+        or not str(version).isascii()
+        or not str(version).isdigit()
+        or int(version) <= 0
     ):
-        raise ValueError("version must be a non-empty string or positive integer.")
-    if version is not None and str(version).isdigit() and int(version) <= 0:
-        raise ValueError("version must be a positive integer.")
+        raise ValueError("version must be a positive integer or positive ASCII decimal string.")
 
 
 def _validate_registry_options(
@@ -354,11 +355,11 @@ def _validate_registry_options(
     parts = name.split(".")
     if any(not part for part in parts) or len(parts) not in (1, 3):
         raise ValueError("name must be model or catalog.schema.model.")
-    if _is_unity_catalog(registry_uri) and len(parts) != 3:
-        raise ValueError("Unity Catalog names must use catalog.schema.model.")
     for value, label in ((tracking_uri, "tracking_uri"), (registry_uri, "registry_uri")):
         if value is not None and (type(value) is not str or not value.strip()):
             raise ValueError(f"{label} must be a non-empty string or None.")
+    if _is_unity_catalog(registry_uri) and len(parts) != 3:
+        raise ValueError("Unity Catalog names must use catalog.schema.model.")
 
 
 def _is_unity_catalog(registry_uri: str | None) -> bool:

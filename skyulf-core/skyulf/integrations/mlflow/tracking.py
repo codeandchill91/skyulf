@@ -165,7 +165,19 @@ def _get_or_create_experiment(client: Any, experiment_name: str | None) -> str:
     existing = client.get_experiment_by_name(experiment_name)
     if existing is not None:
         return existing.experiment_id
-    return client.create_experiment(experiment_name)
+    from mlflow.exceptions import (  # noqa: PLC0415 - optional dependency loaded on enabled tracking  # ty: ignore[unresolved-import]
+        MlflowException,  # ty: ignore[unresolved-import]
+    )
+
+    try:
+        return client.create_experiment(experiment_name)
+    except MlflowException as exc:
+        if exc.error_code != "RESOURCE_ALREADY_EXISTS":
+            raise
+        existing = client.get_experiment_by_name(experiment_name)
+        if existing is None:
+            raise
+        return existing.experiment_id
 
 
 def _items(values: Mapping[str, Any], label: str) -> list[tuple[str, Any]]:

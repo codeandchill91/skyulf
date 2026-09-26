@@ -4,11 +4,78 @@ from __future__ import annotations
 
 import importlib.util
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from skyulf.integrations.mlflow import tracking
+
+
+def test_experiment_creation_recovers_forced_race() -> None:
+    """Both first-use workers must track in the experiment created by the winner."""
+    mlflow = pytest.importorskip("mlflow")
+    barrier = threading.Barrier(2)
+    lock = threading.Lock()
+    experiment = None
+
+    def lookup(name):
+        """Force both initial reads to observe the missing experiment."""
+        existing = experiment
+        if existing is None:
+            barrier.wait(timeout=10)
+        return existing
+
+    def create(name):
+        """Allow one create and return MLflow's race error to the loser."""
+        nonlocal experiment
+        with lock:
+            if experiment is not None:
+                error = mlflow.exceptions.MlflowException("already exists")
+                error.error_code = "RESOURCE_ALREADY_EXISTS"
+                raise error
+            experiment = SimpleNamespace(experiment_id="7")
+            return "7"
+
+    client = SimpleNamespace(get_experiment_by_name=lookup, create_experiment=create)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(tracking._get_or_create_experiment, client, "shared") for _ in range(2)
+        ]
+        assert [future.result(timeout=15) for future in futures] == ["7", "7"]
+
+
+@pytest.mark.parametrize("code", ["PERMISSION_DENIED", "INTERNAL_ERROR", "RESOURCE_ALREADY_EXISTS"])
+def test_experiment_creation_does_not_hide_failure(code) -> None:
+    """Only an existing experiment after a create race may replace a creation failure."""
+    mlflow = pytest.importorskip("mlflow")
+    error = mlflow.exceptions.MlflowException("failed")
+    error.error_code = code
+    client = Mock()
+    client.get_experiment_by_name.return_value = None
+    client.create_experiment.side_effect = error
+    with pytest.raises(mlflow.exceptions.MlflowException) as caught:
+        tracking._get_or_create_experiment(client, "shared")
+    assert caught.value is error
+    assert client.get_experiment_by_name.call_count == (
+        2 if code == "RESOURCE_ALREADY_EXISTS" else 1
+    )
+
+
+@pytest.mark.parametrize("failure_type", [ConnectionError, TimeoutError])
+def test_experiment_creation_propagates_transport_failure(failure_type) -> None:
+    """Network failures must propagate without attempting a speculative lookup."""
+    pytest.importorskip("mlflow")
+    error = failure_type("unavailable")
+    client = Mock()
+    client.get_experiment_by_name.return_value = None
+    client.create_experiment.side_effect = error
+    with pytest.raises(failure_type) as caught:
+        tracking._get_or_create_experiment(client, "shared")
+    assert caught.value is error
+    client.get_experiment_by_name.assert_called_once_with("shared")
 
 
 def test_disabled_tracking_never_constructs_client(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,4 +1,25 @@
-# Current handoff: SM-33H3 DONE; SM-34 READY
+# Current handoff: SM-34 LOCAL DONE; SM-35 READY
+
+Current checkpoint: prior H2/H3 work and fixed-column refactor were committed
+as `d5d2398d` with DCO after 289 passing tests, strict docs and applicable hooks.
+No push. Subsequent integration quality fixes are included in this checkpoint: 428 affected
+tests passed, one optional Spark test skipped, full ty and scoped lint passed.
+Independent review approved; see report64. SM-34 local implementation is complete;
+see report65 for independent schedules and early training pins. Historical verification and
+wheel digests below describe their named checkpoints, not the newer source.
+
+SM-34 Task1 is implemented and independently approved: 231 focused tests,
+63 installed-CLI generation tests and full ty/lint passed. Strict dev Bundle
+validation confirmed independent pause/clock overrides and both schedules
+enabled by default. Task2 now saves snapshot and original pipeline input before
+read/split/CV/fit; failed runs retain evidence without publishing models.
+Final combined suite: 647 passed, one optional Spark skip, seven existing warnings.
+Independent final review, full ty/lint and strict docs passed. These changes
+are included in this checkpoint and have not been deployed or run live.
+Before SM-35, the user approved exposing meaningful training, evaluation and
+lifecycle phases in the Bundle task graph. That refactor is not implemented
+in this checkpoint. SM-34 live cron/queue acceptance remains explicitly unrun.
+Reports64/65 are included alongside the code, tests and documentation.
 
 Post-acceptance refactor: `local_pre_split.fixed_columns` delegates to per-node
 validators; `FIXED_TYPES` derives from the same admission rule table. This is
@@ -11,7 +32,8 @@ Full ty, scoped Ruff/format and diff checks passed. Ruff McCabe complexity for
 `fixed_columns` fell from 49 to 4; its length fell from 214 to 18 lines.
 
 Updated 2026-09-26. Requested prior work was committed as `55b31ca9` with DCO,
-227 passing tests and applicable hooks; no push. New H2 changes are uncommitted.
+227 passing tests and applicable hooks; no push. H2/H3 were later committed in
+the current checkpoint above.
 
 H2 saves versioned `training_filter_evidence.json`, bound to the saved comparison:
 recipe/source identity, ordered pre-filter/survivor/train/holdout membership and

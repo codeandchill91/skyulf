@@ -302,8 +302,23 @@ def controlled_champion_version(
         if tags.get(_ACTIVE_TAG):
             raise AliasConflictError("Champion receipt exists without its alias.")
         return None
-    if _active_marker(client, model_name, current) is None:
+    event_id = _active_marker(client, model_name, current)
+    if event_id is None:
         raise AliasConflictError("Champion alias lacks a controlled committed receipt.")
+    try:
+        version_tags = client.get_model_version(model_name, current).tags or {}
+    except Exception as exc:  # noqa: BLE001 - registry transport boundary
+        raise _translate_error(exc, name=model_name, version=current) from exc
+    try:
+        event = _read_event(version_tags.get(_event_tag(event_id)))
+    except (TypeError, ValueError) as exc:
+        raise AliasConflictError("Champion receipt is malformed.") from exc
+    if (
+        not isinstance(event, dict)
+        or event.get("s") != "committed"
+        or event.get("k") not in ("initial", "promotion", "rollback")
+    ):
+        raise AliasConflictError("Champion lacks a committed lifecycle receipt.")
     return current
 
 

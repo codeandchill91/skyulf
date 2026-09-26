@@ -20,7 +20,7 @@ resources:
       schedule:
         quartz_cron_expression: ${var.retraining_cron_expression}
         timezone_id: ${var.retraining_timezone_id}
-        pause_status: UNPAUSED
+        pause_status: ${var.retraining_pause_status}
 {{end}}
       tasks:
         - task_key: train
@@ -97,6 +97,12 @@ resources:
       parameters:
         - name: score_model_version
           default: ""
+{{if eq .scoring_mode "scheduled"}}
+      schedule:
+        quartz_cron_expression: ${var.scoring_cron_expression}
+        timezone_id: ${var.scoring_timezone_id}
+        pause_status: ${var.scoring_pause_status}
+{{end}}
       tasks:
         - task_key: score
           max_retries: 0

@@ -46,6 +46,17 @@ def test_monthly_preview_describes_runtime_selection_instead_of_manual_pins(work
     assert workflow_config["start"] not in report
 
 
+def test_preview_explains_holdout_lag_and_independent_job_clocks(workflow_config):
+    """Preview must distinguish selected rows from scheduled triggers and queued work."""
+    workflow_config.update(holdout_months=2, result_availability_lag_hours=48)
+    report = preview_workflow_config(workflow_config, action="train_monthly")
+    assert "last 2 completed calendar months" in report
+    assert "UTC minus 48 elapsed hours (inclusive)" in report
+    assert "Bundle variables" in report
+    assert "any cron frequency" in report
+    assert "PAUSED" in report and "no-op" in report and "queue" in report
+
+
 @pytest.mark.parametrize(
     "task,model", [("classification", "linear_regression"), ("regression", "logistic_regression")]
 )

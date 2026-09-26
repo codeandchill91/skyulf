@@ -1,11 +1,88 @@
 """Reusable Databricks workflow services preserve selection and publication behavior."""
 
+import json
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
+
+
+@pytest.mark.parametrize("engine", ["pandas", "polars"])
+@pytest.mark.parametrize("policy", ["manual_approval", "automatic"])
+def test_monthly_failure_retains_once_selected_version_and_window(
+    monkeypatch, tmp_path, engine, policy
+):
+    """Later clock and history changes cannot replace an invocation's persisted pin."""
+    import mlflow
+
+    from skyulf.integrations.databricks import local_retraining
+
+    workflow = _workflow()
+    config = _config()
+    store = f"sqlite:///{(tmp_path / 'registry.db').as_posix()}"
+    config.update(
+        engine=engine,
+        training_window_mode="rolling_calendar",
+        monthly_lookback_months=4,
+        holdout_months=2,
+        window_timezone="UTC",
+        result_availability_lag_hours=48,
+        tracking_uri=store,
+        registry_uri=store,
+        champion_version=None,
+        score_model_selection="champion",
+        promotion_policy=policy,
+        quality_threshold=1.0,
+    )
+    client = mlflow.MlflowClient(tracking_uri=store, registry_uri=store)
+    experiment = client.create_experiment(
+        "monthly_failure", artifact_location=(tmp_path / "runs").as_uri()
+    )
+    spark = Mock()
+    history = spark.sql.return_value.select.return_value.orderBy.return_value.first
+    history.return_value = {"version": 7}
+    monkeypatch.setattr(workflow, "controlled_champion_version", lambda *args, **kwargs: None)
+    failure = RuntimeError("source read failed")
+    selected = []
+
+    def fail_read(spark, spec):
+        """Advance the table and clock only after the workflow resolved its input."""
+        selected.append(spec)
+        history.return_value = {"version": 99}
+        later_clock = Mock()
+        later_clock.now.return_value = datetime(2028, 5, 20, tzinfo=UTC)
+        monkeypatch.setattr(workflow, "datetime", later_clock)
+        raise failure
+
+    monkeypatch.setattr(local_retraining, "read_training_snapshot", fail_read)
+    with pytest.raises(RuntimeError) as caught:
+        workflow.run_action(
+            spark,
+            config,
+            "train_monthly",
+            experiment_name="monthly_failure",
+            artifact_path=tmp_path / "model",
+            now=datetime(2027, 1, 3, tzinfo=UTC),
+        )
+    assert caught.value is failure
+    history.assert_called_once()
+    assert len(selected) == 1 and selected[0].version == 7
+    runs = client.search_runs([experiment])
+    assert len(runs) == 1 and runs[0].info.status == "FAILED"
+    snapshot = json.loads(
+        Path(client.download_artifacts(runs[0].info.run_id, "training_snapshot.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert snapshot["version"] == 7
+    assert snapshot["start"] == "2026-09-01T00:00:00+00:00"
+    assert snapshot["holdout_start"] == "2026-11-01T00:00:00+00:00"
+    assert snapshot["cutoff"] == snapshot["result_cutoff"] == "2027-01-01T00:00:00+00:00"
+    assert snapshot["engine"] == engine
+    assert not client.search_registered_models()
 
 
 def _workflow():

@@ -194,7 +194,7 @@ size samples eligible source records before splitting; it includes the holdout.
 | Feature columns | Enter `income, age`; these are inputs the model learns from. |
 | Training version | Delta snapshot number from the source table's History, such as 12. It pins data, not a model version. `null` means configure it before manual training; scheduled runs select latest. |
 | Source window | All rows (`full_snapshot`), fixed observation dates (`fixed_window`), or recent complete months (`rolling_calendar`). `auto` picks all rows for random splitting and rolling months for temporal splitting. |
-| Result availability | A column such as `claim_confirmed_at` tells when each answer became known. Availability filtering excludes answers known after `result_cutoff`; scheduled runs use their invocation time. |
+| Result availability | A column such as `claim_confirmed_at` tells when each answer became known. Availability filtering excludes answers known after `result_cutoff`; automatic runs use invocation UTC minus `result_availability_lag_hours` (default 0 elapsed hours). |
 | Text date format | `10/08/2026 14:30` uses `%d/%m/%Y %H:%M`; `2026-08-10` uses `%Y-%m-%d`. Database timestamp/date columns need no text format. |
 | Source timezone | For a clock value with no offset, enter its location, e.g. `Europe/Copenhagen`. A value ending in `+02:00` already identifies its offset. |
 | Date only | `reject` stops; `midnight` treats a date with no clock time as 00:00 in the declared source timezone. |
@@ -215,17 +215,30 @@ common workflow changes belong in the Skyulf wheel.
 
 `bundle deploy` uploads the wheel, notebook and configuration, and creates
 two jobs. It creates **no** Unity Catalog table or registered model.
-The initialization choice `retraining_mode=scheduled` adds an enabled
-schedule to the existing `train` job; the default `manual` choice adds none.
-`pause_status: UNPAUSED` keeps the selected schedule active even in dev mode.
-It starts at the next matching cron time after deployment; initialization only
-creates local files.
+Initialize with `retraining_mode=scheduled`, `scoring_mode=scheduled`, both, or
+neither. Each defaults to `manual`, which omits that job's schedule. Scheduled
+jobs default to `UNPAUSED`, including in dev mode, and start at the next matching
+cron time after deployment. Initialization only creates local files.
+Each clock has independent, target-overridable Bundle variables:
+`retraining_cron_expression`, `retraining_timezone_id`, `retraining_pause_status`
+and `scoring_cron_expression`, `scoring_timezone_id`, `scoring_pause_status`.
+Choose `PAUSED` explicitly to keep a clock inactive. These are Bundle settings,
+not fields in `config/workflow.json`.
 Your Quartz cron controls frequency. For example, `0 0 3 1 1,7 ?` runs at 03:00
 on January 1 and July 1 in the chosen schedule timezone. There is no additional
 monthly timer overriding it. The runtime action is still named `train_monthly`;
 it selects the latest snapshot and derives configured data windows at invocation.
 The data window is independent: running every six months does not automatically
-read six months of data. Independent score scheduling remains later work.
+read six months of data.
+
+For score-only scheduling, choose `retraining_mode=manual` and
+`scoring_mode=scheduled`. The default scoring cron `0 0 * * * ?` runs hourly in
+UTC; edit the cron and timezone for your chosen cadence. Scoring still needs an
+existing selected model. Independent scoring and lifecycle handoff use the same
+`score` job, its queue and its single active run. No additional jobs or control
+tables are created. A paused clock stops scheduled triggers; it does not cancel
+queued or manual runs. A successful no-op is an executed score run with no new
+rows to write. A queued run is waiting for the active run, not paused or a no-op.
 
 | Job | Run it when | UC effect |
 | --- | --- | --- |
@@ -251,6 +264,56 @@ For policy compute, select `PayingRegNo` as the cost tag key when required by
 your company and provide the approved number as the cost tag value.
 The complete dataset identity is in the run's training_data.json artifact.
 Technical promotion event tags contain recovery receipts; do not edit them.
+
+### Training evidence and manual replay
+
+After argument validation, the training run saves these artifacts before reading
+the source, splitting, cross-validation, fitting or heldout evaluation:
+
+- `training_snapshot.json`: the concrete source table/version, input/target/key
+  columns, resolved ISO date boundaries, parsing rules, split/sample/filter
+  settings, memory limits and engine. Membership digests are filled only in the
+  separate successful candidate evidence.
+- `training_pipeline_config.json`: the original pipeline input, including the
+  self-contained `project_python_source` captured from `src/preprocessing.py`.
+- `skyulf_pipeline_config.json`: the effective pipeline with fixed preprocessing
+  projected into it. This is inspection evidence; feeding it back as the input
+  would prepend fixed steps a second time. CV settings are saved as run parameters.
+
+If source reading, splitting, CV, fitting or evaluation fails, the run is FAILED
+and retains these inputs. It does not publish a model or nominate a challenger.
+`candidate_training_spec.json`, filter/membership evidence and comparison remain
+successful-training artifacts used by approval.
+
+To replay manually, download the failed run's snapshot and original input config.
+Restore the saved `project_python_source` to `src/preprocessing.py`, preserving its
+contents. In `config/workflow.json`, restore the saved pipeline modeling/settings
+with `pipeline.preprocessing=[]` and top-level `pre_split_steps=[]`: the project
+loader rebuilds both hooks from the restored source. Map snapshot `table` to
+`training_table`, `version` to
+`training_version`, and `max_bytes` to `max_input_mb` by dividing by 1048576.
+Generated projects use whole MiB budgets; keep this value an integer.
+Restore the snapshot's keys, inputs, target, `max_rows`, engine, split/sample
+settings, `event_column`, `result_available_at_column`,
+`filter_unavailable_results`, date parsing rules, `start`, `holdout_start`,
+`cutoff` and `result_cutoff`, including null inactive fields. Use `fixed_window`
+when an event column is active, otherwise `full_snapshot`; set
+`monthly_lookback_months`, `holdout_months` and `window_timezone` to null.
+Set `result_availability_lag_hours` to null when result filtering is disabled,
+otherwise 0; manual replay uses the saved `result_cutoff` rather than this lag.
+Manual `train` uses these saved boundaries rather than current rolling policy.
+Restore the recorded CV parameters and reviewed
+comparison/promotion settings. Run the serialized train job with action `train`.
+Do not use `train_monthly` for replay: it selects a fresh source version and
+resolves the window and result cutoff again.
+
+For a direct Core replay, reconstruct `LocalTrainingSpec` from the snapshot
+(ISO strings to aware datetimes, parsing objects to `TrainingDateSpec`, and
+key/input/pre-split lists to tuples), remove its `engine` field and pass that
+engine plus `training_pipeline_config.json` to `train_local_candidate`.
+Reuse the saved trusted project source registration when custom nodes require it.
+Retained Delta history and compatible code/dependencies are required. These pins
+identify the inputs; they do not promise identical future floating-point results.
 
 ## Model selection and operator actions
 
@@ -320,17 +383,33 @@ becomes champion/challenger again. Model versions and evidence remain available.
 
 In scheduled mode, the schedule starts enabled. Its Quartz cron and IANA timezone
 are selected at initialization and remain editable as
-`retraining_cron_expression` and `retraining_timezone_id` Bundle variables.
+`retraining_cron_expression`, `retraining_timezone_id` and
+`retraining_pause_status` Bundle variables.
 The default is 03:00 UTC on the third day of each month; choose any supported
 Quartz cron cadence. Each run captures the latest concrete Delta source
 version. `training_window_mode` independently selects `full_snapshot`,
 `fixed_window` or `rolling_calendar`. Rolling selection uses the explicit
 `window_timezone` and `monthly_lookback_months` (initial temporal project:
-UTC and four months). With a temporal split the last completed month is the
-holdout, included in that count. Random splitting divides the selected data by
-`test_size`; a fixed window never advances with the schedule. If result
-availability filtering is enabled, its separate cutoff is the job invocation
-instant. The captured Delta version is pinned at run start; it is not a
+UTC and four months). A temporal split uses `holdout_months` (default 1),
+included in that total. Set an integer from 1 through total lookback minus 1.
+Random splitting uses `test_size` and null `holdout_months`; fixed temporal
+selection keeps explicit boundaries and null `holdout_months`. A fixed window
+never advances with the schedule. If result availability filtering is enabled,
+its cutoff is invocation UTC minus `result_availability_lag_hours` (default 0;
+integer from 0 to 87600 elapsed hours). This subtraction follows UTC across DST.
+Inactive availability filtering requires null lag. Manual `train` keeps your
+explicit `result_cutoff`, regardless of lag. Result timestamps exactly at that
+cutoff are included; observation selection remains `[start, cutoff)`.
+
+For example, use four lookback months, `holdout_months=2`, and
+`result_availability_lag_hours=48` with availability filtering enabled. A
+`train_monthly` invocation on September 3 at 00:00 UTC, using a UTC window,
+selects May through August: May/June train, July/August hold out. Only results
+available by September 1 at 00:00 UTC participate. Availability can also be used
+with a full snapshot and no event column. Job timezone, source parsing timezone,
+and data-window timezone are independent.
+
+ The captured Delta version is pinned at run start; it is not a
 historical snapshot as of the observation cutoff. If the source has too few
 labeled rows in either partition, training fails without publishing a model.
 The run compares against the concrete version behind `@champion` if present;

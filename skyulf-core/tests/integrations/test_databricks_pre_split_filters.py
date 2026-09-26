@@ -15,6 +15,17 @@ import pytest
 from skyulf.integrations.databricks import local_retraining as training
 
 
+@pytest.fixture
+def local_tracking_store(tmp_path):
+    """Keep early tracking evidence isolated while tests stop before publication."""
+    mlflow = pytest.importorskip("mlflow")
+
+    store = f"sqlite:///{(tmp_path / 'registry.db').as_posix()}"
+    client = mlflow.MlflowClient(tracking_uri=store, registry_uri=store)
+    client.create_experiment("test", artifact_location=(tmp_path / "mlruns").as_uri())
+    return store
+
+
 def _spec(*, steps=(), **changes):
     """Keep source roles explicit so extra filter columns stay out of the model."""
     values: dict[str, Any] = {
@@ -45,7 +56,9 @@ def _frame():
 
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
-def test_candidate_training_filters_before_split_and_model_fit(monkeypatch, tmp_path, engine):
+def test_candidate_training_filters_before_split_and_model_fit(
+    monkeypatch, tmp_path, engine, local_tracking_store
+):
     """Rejected rows and filter-only columns cannot enter model fit or evaluation."""
     steps = (
         {
@@ -71,7 +84,7 @@ def test_candidate_training_filters_before_split_and_model_fit(monkeypatch, tmp_
         )
 
     def capture_holdout(artifact, frame, **kwargs):
-        """Stop before MLflow after checking the real split and Core filters."""
+        """Stop before model publication after checking the real split and Core filters."""
         observed["holdout"] = frame
         raise RuntimeError("captured filtered holdout")
 
@@ -83,8 +96,8 @@ def test_candidate_training_filters_before_split_and_model_fit(monkeypatch, tmp_
             spec,
             {"preprocessing": [], "modeling": {"type": "linear_regression"}},
             model_name="workspace.test.model",
-            tracking_uri="unused",
-            registry_uri="unused",
+            tracking_uri=local_tracking_store,
+            registry_uri=local_tracking_store,
             experiment_name="test",
             run_name="test",
             artifact_path=tmp_path,
@@ -788,7 +801,7 @@ def test_pair_recipe_survives_project_source_and_json_roundtrip(tmp_path):
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
 def test_cv_receives_raw_values_with_fixed_prefix_before_learned_suffix(
-    monkeypatch, tmp_path, engine
+    monkeypatch, tmp_path, engine, local_tracking_store
 ):
     """Each CV fold fits fixed replay before its own learned scaler on raw rows."""
     from skyulf.integrations.databricks.local_cv import LocalCVSpec
@@ -833,7 +846,7 @@ def test_cv_receives_raw_values_with_fixed_prefix_before_learned_suffix(
         return original_cv(native, pipeline_config, settings, **kwargs)
 
     def stop_at_scoring(artifact, heldout, **kwargs):
-        """Stop before remote tracking after the real fit and CV have succeeded."""
+        """Stop before model publication after the real fit and CV have succeeded."""
         raise RuntimeError("scoring reached")
 
     monkeypatch.setattr(training, "evaluate_training_cv", capture_cv)
@@ -844,8 +857,8 @@ def test_cv_receives_raw_values_with_fixed_prefix_before_learned_suffix(
             spec,
             config,
             model_name="workspace.test.model",
-            tracking_uri="unused",
-            registry_uri="unused",
+            tracking_uri=local_tracking_store,
+            registry_uri=local_tracking_store,
             experiment_name="test",
             run_name="test",
             artifact_path=tmp_path / "artifact",
@@ -934,7 +947,9 @@ def test_replacement_pairs_reject_colliding_old_values(old_values):
 
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
-def test_saved_pipeline_replays_fixed_features_once_from_raw_values(monkeypatch, tmp_path, engine):
+def test_saved_pipeline_replays_fixed_features_once_from_raw_values(
+    monkeypatch, tmp_path, engine, local_tracking_store
+):
     """A fitted local artifact scores raw input through its one saved fixed prefix."""
     from skyulf.inference.local_pipeline import load_local_pipeline, predict_local_pipeline
 
@@ -978,7 +993,7 @@ def test_saved_pipeline_replays_fixed_features_once_from_raw_values(monkeypatch,
     captured = {}
 
     def stop_at_scoring(artifact, heldout, **kwargs):
-        """Inspect the real fitted artifact before any remote tracking call."""
+        """Inspect the real fitted artifact before model publication."""
         captured["artifact"] = artifact
         captured["heldout"] = heldout
         raise RuntimeError("scoring reached")
@@ -990,8 +1005,8 @@ def test_saved_pipeline_replays_fixed_features_once_from_raw_values(monkeypatch,
             spec,
             config,
             model_name="workspace.test.model",
-            tracking_uri="unused",
-            registry_uri="unused",
+            tracking_uri=local_tracking_store,
+            registry_uri=local_tracking_store,
             experiment_name="test",
             run_name="test",
             artifact_path=tmp_path / "artifact",

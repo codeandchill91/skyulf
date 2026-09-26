@@ -5,6 +5,20 @@ from copy import deepcopy
 import pytest
 
 
+@pytest.mark.parametrize("action", ["train", "train_monthly", "score"])
+def test_config_accepts_exact_window_controls_and_rejects_schedule_fields(workflow_config, action):
+    """Data policy belongs in workflow JSON while job clock settings stay in the Bundle."""
+    from skyulf.integrations.databricks.workflow_config import validate_workflow_config
+
+    settings = {**workflow_config, "holdout_months": 2, "result_availability_lag_hours": 48}
+    assert validate_workflow_config(settings, action=action) == settings
+    for field in ("holdout_months", "result_availability_lag_hours"):
+        with pytest.raises(ValueError, match=field):
+            validate_workflow_config({**settings, field: True}, action=action)
+    with pytest.raises(ValueError, match="Unknown workflow settings"):
+        validate_workflow_config({**settings, "scoring_mode": "scheduled"}, action=action)
+
+
 @pytest.mark.parametrize("action", ["train", "train_monthly", "score", "approve"])
 def test_random_workflow_allows_null_inactive_dates_and_explicit_snapshot(workflow_config, action):
     """Regenerated ordinary-table projects require no time columns or calendar windows."""

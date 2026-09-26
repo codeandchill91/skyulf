@@ -123,6 +123,51 @@ def test_optional_setup_sections_hide_their_details_until_selected(enabled):
         assert hidden is not enabled
 
 
+@pytest.mark.parametrize("train_mode", ["manual", "scheduled"])
+@pytest.mark.parametrize("score_mode", ["manual", "scheduled"])
+def test_schedule_questions_follow_each_independent_mode(train_mode, score_mode):
+    """Selecting a scoring clock must not expose or enable an unrelated training clock."""
+    from jsonschema import Draft7Validator
+
+    properties = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())[
+        "properties"
+    ]
+    values = {key: spec["default"] for key, spec in properties.items()}
+    values.update(retraining_mode=train_mode, scoring_mode=score_mode)
+    for prefix, mode in (("retraining", train_mode), ("scoring", score_mode)):
+        assert properties[f"{prefix}_pause_status"]["default"] == "UNPAUSED"
+        for suffix in ("cron_expression", "timezone_id", "pause_status"):
+            assert Draft7Validator(properties[f"{prefix}_{suffix}"]["skip_prompt_if"]).is_valid(
+                values
+            ) == (mode == "manual")
+
+
+@pytest.mark.parametrize("window", ["auto", "full_snapshot", "fixed_window", "rolling_calendar"])
+@pytest.mark.parametrize("strategy", ["random", "temporal"])
+@pytest.mark.parametrize("availability", ["false", "true"])
+def test_window_control_questions_follow_active_data_policies(window, strategy, availability):
+    """Holdout and result maturity prompts apply only to the policies that use them."""
+    from jsonschema import Draft7Validator
+
+    properties = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())[
+        "properties"
+    ]
+    values = {key: spec["default"] for key, spec in properties.items()}
+    values.update(
+        training_window_mode=window,
+        split_strategy=strategy,
+        filter_unavailable_results=availability,
+    )
+    holdout_hidden = Draft7Validator(properties["holdout_months"]["skip_prompt_if"]).is_valid(
+        values
+    )
+    lag_hidden = Draft7Validator(
+        properties["result_availability_lag_hours"]["skip_prompt_if"]
+    ).is_valid(values)
+    assert holdout_hidden == (strategy != "temporal" or window not in ("auto", "rolling_calendar"))
+    assert lag_hidden == (availability == "false")
+
+
 def _output():
     """Inspect output publication independently of notebook widgets."""
     from skyulf.integrations.databricks import prediction_output
@@ -144,6 +189,15 @@ def _render_default_config(record_key="entity_id", risk_category=""):
     )
     content = template.read_text(encoding="utf-8")
     content = content[content.index("{\n") :].replace("{{$window}}", "full_snapshot")
+    content = content.replace(
+        '{{if and (eq $window "rolling_calendar") (eq .split_strategy "temporal")}}'
+        "{{.holdout_months}}{{else}}null{{end}}",
+        "null",
+    ).replace(
+        '{{if eq .filter_unavailable_results "true"}}'
+        "{{.result_availability_lag_hours}}{{else}}null{{end}}",
+        "null",
+    )
     content = content.replace(
         "{{if .prediction_table_name}}{{.prediction_table_name}}{{else}}{{.project_name}}_predictions{{end}}",
         "{{.project_name}}_predictions",
@@ -329,7 +383,7 @@ def test_generated_bundle_has_only_train_and_serialized_score_jobs():
         r"^    train:\n      name:.*\n      max_concurrent_runs: 1$", template, re.MULTILINE
     )
     assert 'if eq .retraining_mode "scheduled"' in template
-    assert "pause_status: UNPAUSED" in template
+    assert "pause_status: ${var.retraining_pause_status}" in template
     assert 'default: {{if eq .retraining_mode "scheduled"}}train_monthly' in template
     assert "quartz_cron_expression: ${var.retraining_cron_expression}" in template
     assert "timezone_id: ${var.retraining_timezone_id}" in template

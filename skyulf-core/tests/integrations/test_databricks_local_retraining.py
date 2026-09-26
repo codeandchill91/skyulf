@@ -1,5 +1,6 @@
 """Label-aware local candidate training from pinned Databricks snapshots."""
 
+import json
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -225,6 +226,7 @@ def test_failed_candidate_never_mutates_champion(monkeypatch, tmp_path):
 
 def test_invalid_comparison_request_fails_before_mlflow_publication(monkeypatch, tmp_path):
     """An unusable metric must not create an orphan candidate version."""
+    store = f"sqlite:///{(tmp_path / 'registry.db').as_posix()}"
     monkeypatch.setattr(retraining, "read_training_snapshot", lambda spark, request: _frame())
     monkeypatch.setattr(
         retraining,
@@ -247,8 +249,8 @@ def test_invalid_comparison_request_fails_before_mlflow_publication(monkeypatch,
             _spec(),
             {"preprocessing": [], "modeling": {"type": "linear_regression"}},
             model_name="workspace.test.model",
-            tracking_uri="file:unused",
-            registry_uri="file:unused",
+            tracking_uri=store,
+            registry_uri=store,
             experiment_name="test",
             run_name="candidate",
             artifact_path=tmp_path / "artifact",
@@ -415,6 +417,16 @@ def test_saved_filter_evidence_replays_after_project_file_changes(monkeypatch, t
     assert holdout["x"].tolist() == [15.0, 16.0, 17.0, 18.0, 19.0]
     assert saved.pre_split_steps == tuple(project["pre_split_steps"])
 
+    snapshot_path = client.download_artifacts(result.run_id, "training_snapshot.json")
+    snapshot = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
+    assert snapshot["version"] == 4
+    assert snapshot["engine"] == engine
+    assert snapshot["holdout_key_sha256"] is None
+    assert snapshot["training_evidence_sha256"] is None
+    config_path = client.download_artifacts(result.run_id, "skyulf_pipeline_config.json")
+    saved_config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    assert saved_config["project_python_source"] == project["pipeline"]["project_python_source"]
+
     downloaded = mlflow.artifacts.download_artifacts(
         artifact_uri=f"runs:/{result.run_id}/model", tracking_uri=store
     )
@@ -474,3 +486,212 @@ def test_saved_filter_evidence_replays_after_project_file_changes(monkeypatch, t
     monkeypatch.setattr(client, "download_artifacts", null_receipt)
     with pytest.raises(ValueError, match="training filter evidence.*object"):
         local_approval._load_evidence(client, result.model_name, result.model_version, digest)
+
+
+@pytest.mark.parametrize("engine", ["pandas", "polars"])
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "read_training_snapshot",
+        "split_labeled_snapshot",
+        "evaluate_training_cv",
+        "fit_local_workflow",
+        "evaluate_local_holdout",
+    ],
+)
+def test_failed_training_retains_pin_before_risky_work(monkeypatch, tmp_path, engine, operation):
+    """Runtime failures retain replay inputs without publishing a candidate or alias."""
+    import mlflow
+
+    from skyulf.integrations.databricks.project import load_project_workflow
+
+    source = tmp_path / "preprocessing.py"
+    original_source = "def build_preprocessing():\n    return []\n"
+    source.write_text(original_source, encoding="utf-8", newline="\n")
+    config = load_project_workflow(
+        {"pipeline": {"preprocessing": [], "modeling": {"type": "linear_regression"}}},
+        source,
+    )["pipeline"]
+    store = f"sqlite:///{(tmp_path / 'registry.db').as_posix()}"
+    client = mlflow.MlflowClient(tracking_uri=store, registry_uri=store)
+    experiment = client.create_experiment(
+        "failed_pin", artifact_location=(tmp_path / "runs").as_uri()
+    )
+    failure = RuntimeError(f"original {operation} failure")
+    observed = []
+
+    def read_pin():
+        """Inspect persisted inputs through a real client before the operation fails."""
+        runs = client.search_runs([experiment])
+        if not runs:
+            return None
+        run_id = runs[0].info.run_id
+        path = client.download_artifacts(run_id, "training_snapshot.json")
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        saved_path = client.download_artifacts(run_id, "training_pipeline_config.json")
+        saved_config = json.loads(Path(saved_path).read_text(encoding="utf-8"))
+        assert saved_config["project_python_source"] == original_source
+        return payload
+
+    def fail(*args, **kwargs):
+        """Capture evidence at the failure boundary while preserving exception identity."""
+        observed.append(read_pin())
+        source.write_text("def build_preprocessing():\n    return ['changed']\n", encoding="utf-8")
+        raise failure
+
+    monkeypatch.setattr(retraining, "read_training_snapshot", lambda *args: _frame())
+    monkeypatch.setattr(retraining, operation, fail)
+    publish = MagicMock(side_effect=AssertionError("failure must not publish"))
+    callback = MagicMock(side_effect=AssertionError("failure must not nominate an alias"))
+    monkeypatch.setattr(retraining, "_log_local_model", publish)
+    monkeypatch.setattr(retraining, "register_model", publish)
+    with pytest.raises(RuntimeError) as caught:
+        retraining.train_local_candidate(
+            None,
+            _spec(),
+            config,
+            model_name=f"failed_{engine}",
+            tracking_uri=store,
+            registry_uri=store,
+            experiment_name="failed_pin",
+            run_name=operation,
+            artifact_path=tmp_path / "artifact",
+            metric="heldout_rmse",
+            min_improvement=0,
+            engine=engine,
+            on_registered=callback,
+        )
+    assert caught.value is failure
+    assert observed != [None], "Training must save its concrete pin before risky work"
+    snapshot = observed[0]
+    assert snapshot["table"] == "workspace.test.labels"
+    assert snapshot["version"] == 4
+    assert snapshot["input_columns"] == ["x"]
+    assert snapshot["record_key_columns"] == ["id"]
+    assert snapshot["target_column"] == "target"
+    assert snapshot["engine"] == engine
+    assert snapshot["start"] == "2026-01-01T00:00:00+00:00"
+    assert snapshot["holdout_start"] == "2026-02-01T00:00:00+00:00"
+    assert snapshot["cutoff"] == snapshot["result_cutoff"] == "2026-03-01T00:00:00+00:00"
+    runs = client.search_runs([experiment])
+    assert len(runs) == 1 and runs[0].info.status == "FAILED"
+    artifacts = {item.path for item in client.list_artifacts(runs[0].info.run_id)}
+    assert artifacts == {
+        "training_snapshot.json",
+        "skyulf_pipeline_config.json",
+        "training_pipeline_config.json",
+    }
+    assert not client.search_registered_models()
+    publish.assert_not_called()
+    callback.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"engine": "spark"},
+        {"cv": {}},
+        {"min_improvement": -1},
+        {"quality_threshold": float("nan")},
+        {"champion_version": "latest"},
+        {"risk_category": 1},
+        {"spec": None},
+    ],
+)
+def test_invalid_training_arguments_do_not_start_tracking(monkeypatch, tmp_path, changes):
+    """Invalid requests must fail before a training run or source read exists."""
+    tracking = MagicMock(side_effect=AssertionError("invalid input must not start tracking"))
+    monkeypatch.setattr(retraining, "track_run", tracking)
+    monkeypatch.setattr(retraining, "read_training_snapshot", tracking)
+    arguments: dict[str, Any] = {
+        "spark": None,
+        "spec": _spec(),
+        "config": {"preprocessing": [], "modeling": {"type": "linear_regression"}},
+        "model_name": "candidate",
+        "tracking_uri": "unused",
+        "registry_uri": "unused",
+        "experiment_name": "unused",
+        "run_name": "invalid",
+        "artifact_path": tmp_path / "artifact",
+        "metric": "heldout_rmse",
+        "min_improvement": 0,
+    }
+    arguments.update(changes)
+    with pytest.raises((TypeError, ValueError)):
+        retraining.train_local_candidate(**arguments)
+    tracking.assert_not_called()
+
+
+@pytest.mark.parametrize("engine", ["pandas", "polars"])
+def test_snapshot_replay_uses_original_config_without_duplicate_fixed_steps(
+    monkeypatch, tmp_path, engine
+):
+    """Saved input config must replay a fixed replacement exactly once per pipeline."""
+    import mlflow
+
+    config = {"preprocessing": [], "modeling": {"type": "linear_regression"}}
+    spec = _spec(
+        pre_split_steps=(
+            {
+                "name": "replace",
+                "transformer": "ValueReplacement",
+                "params": {
+                    "columns": ["x"],
+                    "replacements": [
+                        {"old": 1, "new": 2},
+                        {"old": 2, "new": 3},
+                    ],
+                },
+            },
+        )
+    )
+    monkeypatch.setattr(retraining, "read_training_snapshot", lambda *args: _frame())
+    store = f"sqlite:///{(tmp_path / 'registry.db').as_posix()}"
+    client = mlflow.MlflowClient(tracking_uri=store, registry_uri=store)
+    client.create_experiment("manual_replay", artifact_location=(tmp_path / "runs").as_uri())
+    settings: dict[str, Any] = {
+        "model_name": f"replay_{engine}",
+        "tracking_uri": store,
+        "registry_uri": store,
+        "experiment_name": "manual_replay",
+        "run_name": "original",
+        "artifact_path": tmp_path / "original",
+        "metric": "heldout_rmse",
+        "min_improvement": 0,
+        "engine": engine,
+    }
+    original = retraining.train_local_candidate(None, spec, config, **settings)
+    snapshot = json.loads(
+        Path(client.download_artifacts(original.run_id, "training_snapshot.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    saved_config = json.loads(
+        Path(client.download_artifacts(original.run_id, "training_pipeline_config.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    saved_engine = snapshot.pop("engine")
+    for field in ("start", "holdout_start", "cutoff", "result_cutoff"):
+        snapshot[field] = (
+            None if snapshot[field] is None else datetime.fromisoformat(snapshot[field])
+        )
+    for field in ("event_time_parsing", "result_time_parsing"):
+        snapshot[field] = TrainingDateSpec(**snapshot[field])
+    for field in ("record_key_columns", "input_columns", "pre_split_steps"):
+        snapshot[field] = tuple(snapshot[field])
+    replay_spec = retraining.LocalTrainingSpec(**snapshot)
+    settings.update(
+        engine=saved_engine, run_name="manual_replay", artifact_path=tmp_path / "replay"
+    )
+    replay = retraining.train_local_candidate(None, replay_spec, saved_config, **settings)
+    effective = json.loads(
+        Path(client.download_artifacts(replay.run_id, "skyulf_pipeline_config.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert len(effective["preprocessing"]) == 1
+    assert replay.dataset_id == original.dataset_id
+    assert (
+        client.get_run(replay.run_id).data.metrics == client.get_run(original.run_id).data.metrics
+    )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,53 @@ from skyulf.integrations.mlflow.registry import (
 )
 from skyulf.integrations.mlflow.tracking import TrackingConfig, track_run
 from skyulf.pipeline import SkyulfPipeline
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        -1,
+        0,
+        "-1",
+        "0",
+        "garbage",
+        "1.5",
+        " 1 ",
+        "latest",
+        "Production",
+        True,
+        False,
+        1.5,
+        "",
+        "١",
+        "²",
+    ],
+)
+def test_invalid_concrete_version_fails_before_mlflow_import(monkeypatch, version: Any) -> None:
+    """Invalid selectors must fail locally instead of reaching registry resolution."""
+    from skyulf.integrations.mlflow import registry
+
+    monkeypatch.setattr(registry, "_require_mlflow", lambda: pytest.fail("MLflow import"))
+    with pytest.raises(ValueError, match="version"):
+        resolve_model("model", version=version)
+
+
+@pytest.mark.parametrize("version", [1, "1", "01", 200])
+def test_positive_concrete_version_is_valid(version: str | int) -> None:
+    """Positive ASCII selectors retain compatibility with pinned version loaders."""
+    from skyulf.integrations.mlflow.registry import _validate_reference
+
+    assert _validate_reference("model", None, version, None, None) is None
+
+
+@pytest.mark.parametrize("uri", [42, False, [], {}])
+def test_invalid_registry_uri_fails_before_mlflow_import(monkeypatch, uri: Any) -> None:
+    """Malformed URI types must produce an actionable local validation error."""
+    from skyulf.integrations.mlflow import registry
+
+    monkeypatch.setattr(registry, "_require_mlflow", lambda: pytest.fail("MLflow import"))
+    with pytest.raises(ValueError, match="registry_uri"):
+        resolve_model("model", version="1", registry_uri=uri)
 
 
 def _config(tmp_path: Path, name: str) -> TrackingConfig:
