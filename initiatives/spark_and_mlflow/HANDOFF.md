@@ -1,4 +1,64 @@
-# Current handoff: SM-34A LOCAL DONE; SM-35 READY
+# Current handoff: SM-34B DONE; SM-35 READY
+
+SM-34B passed user-authorized live acceptance on 2026-09-26/27; the user also
+requested its commit. The work on `090` is based on `3e92d14a` and includes the
+existing single-training-action/version-selection follow-up. The lifecycle has
+eight tasks and eight edges: train/evaluate/register, compare/decide and
+finalize/report are grouped. Two serialized jobs and durable MLflow phase
+receipts are preserved. Finalization runs after either branch; actual task
+states must show a successful active branch and excluded inactive branch
+before any result or score handoff is published. A notebook output failure
+after promotion therefore preserves the promotion but blocks scoring.
+
+The final broad Databricks suite passed 735 tests with 16 optional Spark/Delta
+skips; the separate real CLI generation suite passed 63. Full ty, scoped Ruff,
+wheel/strict Bundle validation, strict docs and independent review passed.
+See [commands, wheel hash and limits](67-sm34b-simplified-lifecycle-graph.md).
+
+Live pandas automatic training, Polars manual training/approval, child scoring,
+both 240+3 prediction paths and no-ops passed. Two intentional failures verified
+cleanup and blocked scoring, including failure after a committed promotion.
+Read-only audit `683054016979330` and the saved-evidence verifier passed.
+[Live run IDs and compact receipt](rehearsals/sm34b_live/README.md).
+
+Both existing jobs are idle and schedules PAUSED; normal pandas configuration
+is restored and remote fault injection removal verified. Live clocks, company
+acceptance and live reject/rollback remain outside this rehearsal. SM-35 is
+ready. The commit excludes unrelated staged `.gitignore` changes and local
+model/runtime artifacts. No push is requested.
+
+## Previous SM-34A live checkpoint (historical state)
+
+SM-34A was committed as `3e92d14a`. The user then requested a single training
+action: manual and cron invocations now both use `train`; `train_monthly` is
+removed. Null/missing `training_version` resolves latest once per invocation;
+explicit versions stay pinned. Fixed/rolling/full data selection remains a
+config choice, and an explicit result cutoff is preserved. These follow-up
+changes are deployed to the personal test workspace but not committed. Local evidence: 254
+Core/MLflow tests, 108 notebook/runtime tests, 61 template tests, and 63 real
+CLI generation cases passed. Full ty, scoped lint and strict docs passed.
+Independent core review found no issues. The user's final live rehearsal found
+and fixed a branch-join issue: default ALL_SUCCESS excluded `publish_result`
+after successful promotion. Explicit NONE_FAILED fixed it; all 63 CLI generation
+cases passed again. Corrected pandas run `175855943706739` and Polars training
+`921386114120286` / approval `519028138418463` completed the actual multi-task
+and child-score paths. Both outputs contain 240 + 3 predictions; subsequent
+no-ops kept Delta version 2 and the initial 240 full rows unchanged. Polars's
+second score was observed QUEUED. Read-only audit `794212622317843` and the local
+evidence verifier passed. See [live evidence](rehearsals/sm34a_live/README.md).
+
+The existing two jobs are idle and both cron schedules PAUSED. Final deployed
+config: pandas automatic promotion; schema `workspace.skyulf_lifecycle_test`.
+No resources were deleted. Original pandas model/run evidence is preserved;
+the corrected pandas model has suffix `_r2`. Runtime wheel SHA-256:
+`1e2d8f2c7fdbb835b1d66e74587ef698786d247266f46693109ef517b8d7a138`.
+Clock firing, new-graph rollback/reject and company production acceptance were
+not tested. During the rehearsal the user requested a simpler graph. The deployed
+graph still has eleven tasks; SM-34B's local eight-task replacement is described
+above. New rehearsal scripts/evidence are under the ignored initiative
+directory and need explicit selection when the user requests the next commit.
+
+Historical local checkpoint below predates this live rehearsal.
 
 Requested quality fixes and SM-34 were committed as `676feddf` with DCO after
 647 passing tests, one optional Spark skip, strict docs and applicable hooks.

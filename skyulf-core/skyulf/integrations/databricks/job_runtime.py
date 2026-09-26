@@ -162,10 +162,8 @@ def run_bundle_action(
         action = "score"
     elif task_role == "lifecycle":
         action = parameters.get("lifecycle_action", "")
-        if action not in {"train", "train_monthly", "approve", "reject", "rollback"}:
-            raise ValueError(
-                "Lifecycle action must be train, train_monthly, approve, reject or rollback."
-            )
+        if action not in {"train", "approve", "reject", "rollback"}:
+            raise ValueError("Lifecycle action must be train, approve, reject or rollback.")
     else:
         raise ValueError("Notebook task_role must be lifecycle or score.")
     override = parameters.get("score_model_version", "")
@@ -184,7 +182,7 @@ def run_bundle_action(
         options["comparison_sha256"] = resolve_candidate_comparison_digest(
             config, options["candidate_version"], action=action
         )
-    if action in {"train", "train_monthly"}:
+    if action == "train":
         options.update(experiment_name=experiment_name, artifact_path=artifact_path)
     result = run_action(spark, config, action, **options)
     return _bundle_result(config, action, result)
@@ -196,7 +194,7 @@ def _bundle_result(config: dict[str, Any], action: str, result: Any) -> BundleAc
     receipt = result.alias_change if isinstance(result, AutoTrainingOutcome) else result
     score_requested = (
         config["score_handoff"] == "after_alias_change"
-        and action in {"train", "train_monthly", "approve", "rollback"}
+        and action in {"train", "approve", "rollback"}
         and isinstance(receipt, AliasChangeReceipt)
         and receipt.kind in {"initial", "promotion", "rollback"}
     )
@@ -282,12 +280,10 @@ def _prepared_notebook_request(
 ) -> dict[str, Any]:
     """Validate a new invocation and freeze project Python only for training."""
     action = values.get("lifecycle_action", "")
-    if action not in {"train", "train_monthly", "approve", "reject", "rollback"}:
-        raise ValueError(
-            "Lifecycle action must be train, train_monthly, approve, reject or rollback."
-        )
+    if action not in {"train", "approve", "reject", "rollback"}:
+        raise ValueError("Lifecycle action must be train, approve, reject or rollback.")
     config = _read_notebook_config(values)
-    if action in {"train", "train_monthly"} and preprocessing_path is not None:
+    if action == "train" and preprocessing_path is not None:
         from .project import load_project_workflow  # noqa: PLC0415 - training-only project code
 
         config = load_project_workflow(
@@ -330,8 +326,9 @@ def run_lifecycle_notebook(
         run_lifecycle_phase,
     )
 
+    task_states = None
     if phase == "prepare":
-        options = _prepared_notebook_request(values, preprocessing_path)
+        options: dict[str, Any] = _prepared_notebook_request(values, preprocessing_path)
     else:
         try:
             reference = json.loads(values["reference_json"])
@@ -343,8 +340,17 @@ def run_lifecycle_notebook(
         if not isinstance(tracking_uri, str) or not tracking_uri or "{{" in tracking_uri:
             raise ValueError("Lifecycle task needs the prepared tracking URI.")
         options = {"reference": reference, "tracking_uri": tracking_uri}
+        if phase == "complete":
+            task_states = {
+                "training": values.get("training_result_state"),
+                "operator": values.get("operator_result_state"),
+            }
     outcome = run_lifecycle_phase(
-        spark, phase=phase, context=LifecycleContext(**context_values), **options
+        spark,
+        phase=phase,
+        context=LifecycleContext(**context_values),
+        task_states=task_states,
+        **options,
     )
     dbutils.jobs.taskValues.set(
         key="reference_json", value=json.dumps(outcome.reference, sort_keys=True)
@@ -354,14 +360,14 @@ def run_lifecycle_notebook(
         dbutils.jobs.taskValues.set(
             key="training_requested", value=outcome.output["training_requested"]
         )
-    if phase == "result":
+    if phase in {"result", "complete"}:
         dbutils.jobs.taskValues.set(key="score_requested", value=outcome.output["score_requested"])
     return _notebook_output(
         outcome.output,
         dbutils,
         render=(
             render_bundle_output
-            if phase == "result"
+            if phase in {"result", "complete"}
             else lambda payload: render_lifecycle_output(phase, payload)
         ),
         display_html=display_html,
@@ -402,7 +408,7 @@ def run_notebook(
     if (
         preprocessing_path is not None
         and task_role == "lifecycle"
-        and parameters.get("lifecycle_action") in {"train", "train_monthly"}
+        and parameters.get("lifecycle_action") == "train"
     ):
         from .project import load_project_workflow  # noqa: PLC0415 - project code is training-only
 

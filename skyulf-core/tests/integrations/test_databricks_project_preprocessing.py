@@ -259,9 +259,7 @@ print(json.dumps([
     assert json.loads(result.stdout) == [0.5, 1.0, 0.5]
 
 
-@pytest.mark.parametrize(
-    "action", ["train", "train_monthly", "approve", "reject", "rollback", "score"]
-)
+@pytest.mark.parametrize("action", ["train", "approve", "reject", "rollback", "score"])
 def test_notebook_uses_editable_code_only_for_training(
     tmp_path, monkeypatch, workflow_config, action
 ):

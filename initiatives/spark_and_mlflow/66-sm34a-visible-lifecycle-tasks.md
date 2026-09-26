@@ -1,5 +1,16 @@
 # SM-34A: Visible lifecycle tasks implementation plan
 
+Current status: selected live workflow acceptance PASSED on 2026-09-26 after
+the user explicitly authorized a final Databricks rehearsal. The original local
+implementation/verification notes below retain their historical boundaries.
+See [the complete live report](rehearsals/sm34a_live/README.md). A branch-join
+failure was reproduced and fixed with explicit NONE_FAILED; both engines passed
+training, policy/approval and child scoring, followed by 240 + 3 predictions,
+unchanged no-ops and a read-only artifact/history audit. The deployed graph has
+eleven tasks. [SM-34B](67-sm34b-simplified-lifecycle-graph.md) now implements an
+eight-task replacement locally; it has not been deployed. Follow-up changes
+are uncommitted.
+
 > **For agentic workers:** Use `subagent-driven-development` for implementation
 > and independent review. Keep the existing `090` branch. Do not deploy or run
 > cloud jobs as part of local implementation.
@@ -213,3 +224,43 @@ MLflow and CLI evidence does not establish serverless/Unity Catalog acceptance
 of this new multi-task graph. Existing live deployments still have their old
 graph until regenerated and deployed with the matching wheel and notebooks.
 The readable final result and operator inputs are now in `publish_result`.
+
+## Follow-up: one training action (2026-09-26)
+
+After commit `3e92d14a`, the user requested removal of the separate
+`train_monthly` action. Manual starts and all cron frequencies now invoke
+`train`. Null/missing `training_version` resolves the latest Delta snapshot
+once at preparation; explicit nonnegative versions (including zero) remain
+pinned. Fixed, rolling and full-snapshot selection is independent of the
+trigger. Rolling windows are computed at invocation; an explicit result
+cutoff is preserved, otherwise enabled result filtering derives it from the
+invocation instant minus the configured lag. No replacement action or legacy
+alias was added. Existing jobs must be regenerated with the matching wheel.
+
+Verification: 254 Core/MLflow tests (including both engines and cross-task
+snapshot retention), 108 notebook/runtime tests, 61 template tests and 63
+installed-CLI generation cases passed. Full ty, scoped Ruff/format, strict
+docs and strict generated dev Bundle validation passed. Independent core
+review found no actionable issues. The new validation wheel is under
+`.cache/unified-train-cli/test_cli_emits_independent_pol0/output/sm33_generated/dist/`;
+the earlier wheel digest above belongs to the preceding committed checkpoint.
+
+This follow-up remains uncommitted. Neither SM-34A nor this follow-up has been
+deployed or run end-to-end on Databricks; live serverless/UC acceptance remains
+pending. Validation did not deploy resources or execute a job.
+
+## Requested follow-up: SM-34B graph simplification
+
+During live acceptance the user found the eleven-task graph hard to follow and
+shared the [Databricks deployment example](https://docs.databricks.com/aws/en/assets/images/complex-deployment-job-9ea629abdeae12c52b0fd7f079d78a7e.png).
+The next task is to reduce internal bookkeeping boxes and redundant edges while
+retaining readable training, evaluation, model decision and scoring outcomes.
+Potential combinations are fit/evaluate/register, compare/decide, and
+finalize/publish. Manual approval/rejection/rollback must remain distinguishable
+from training, and failure cleanup and saved-evidence guards must survive the
+consolidation. Preserve the two-job deployment and avoid cosmetic nodes.
+
+This follow-up is now implemented and live-verified in
+[SM-34B](67-sm34b-simplified-lifecycle-graph.md). The new eight-task graph replaces
+the earlier live graph; see [its separate acceptance](rehearsals/sm34b_live/README.md).
+SM-35 is the next local implementation task.

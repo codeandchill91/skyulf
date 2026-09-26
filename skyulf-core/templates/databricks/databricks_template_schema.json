@@ -88,7 +88,7 @@
       "order": 12,
       "type": "string",
       "default": "null",
-      "description": "1. Data | Training table snapshot number from Databricks table History, e.g. 0 or 12 (not a model version). null = fill later before manual training; scheduled training selects latest",
+      "description": "1. Data | Training table snapshot number from Databricks table History, e.g. 0 or 12 (not a model version). null = resolve latest once at run start; an explicit version pins that snapshot for manual and scheduled runs",
       "pattern": "^(?:null|0|[1-9][0-9]*)$"
     },
     "split_strategy": {
@@ -629,36 +629,18 @@
       "order": 27,
       "type": "string",
       "default": "",
-      "description": "1. Data | Earliest observation to include, e.g. 2026-06-01T00:00:00+02:00. Blank = configure later; rolling scheduled runs calculate it",
+      "description": "1. Data | Earliest observation to include, e.g. 2026-06-01T00:00:00+02:00. Required for fixed_window; rolling_calendar calculates it for every run",
       "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(?:Z|[+-][0-9]{2}:[0-9]{2}))?$",
       "skip_prompt_if": {
-        "anyOf": [
-          {
-            "properties": {
-              "training_window_mode": {
-                "const": "full_snapshot"
-              }
-            }
-          },
-          {
-            "allOf": [
-              {
-                "properties": {
-                  "training_window_mode": {
-                    "const": "auto"
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "split_strategy": {
-                    "const": "random"
-                  }
-                }
-              }
+        "properties": {
+          "training_window_mode": {
+            "enum": [
+              "auto",
+              "full_snapshot",
+              "rolling_calendar"
             ]
           }
-        ]
+        }
       }
     },
     "holdout_start": {
@@ -668,11 +650,26 @@
       "description": "1. Data | Observations from this time onward are test rows, e.g. 2026-08-01T00:00:00+02:00. Older selected rows train the model; rolling runs calculate it",
       "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(?:Z|[+-][0-9]{2}:[0-9]{2}))?$",
       "skip_prompt_if": {
-        "properties": {
-          "split_strategy": {
-            "const": "random"
+        "anyOf": [
+          {
+            "properties": {
+              "training_window_mode": {
+                "enum": [
+                  "auto",
+                  "full_snapshot",
+                  "rolling_calendar"
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "split_strategy": {
+                "const": "random"
+              }
+            }
           }
-        }
+        ]
       }
     },
     "cutoff": {
@@ -682,33 +679,15 @@
       "description": "1. Data | Stop before this observation time, e.g. 2026-09-01T00:00:00+02:00. This is a data boundary, not the job date; rolling runs calculate it",
       "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(?:Z|[+-][0-9]{2}:[0-9]{2}))?$",
       "skip_prompt_if": {
-        "anyOf": [
-          {
-            "properties": {
-              "training_window_mode": {
-                "const": "full_snapshot"
-              }
-            }
-          },
-          {
-            "allOf": [
-              {
-                "properties": {
-                  "training_window_mode": {
-                    "const": "auto"
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "split_strategy": {
-                    "const": "random"
-                  }
-                }
-              }
+        "properties": {
+          "training_window_mode": {
+            "enum": [
+              "auto",
+              "full_snapshot",
+              "rolling_calendar"
             ]
           }
-        ]
+        }
       }
     },
     "filter_unavailable_results": {
@@ -724,7 +703,7 @@
     "result_availability_lag_hours": {
       "type": "string",
       "default": "0",
-      "description": "1. Data | How many hours should results mature before automatic training? Enter 0 to 87600; example: 48 excludes results available in the last two days. Manual training uses your result cutoff",
+      "description": "1. Data | When result_cutoff is blank, subtract this many hours from run start. Enter 0 to 87600; example: 48 excludes results available in the last two days. An explicit result_cutoff overrides this lag for every run",
       "pattern": "^(0|[1-9][0-9]*)$",
       "skip_prompt_if": {
         "properties": {
@@ -948,7 +927,7 @@
     "result_cutoff": {
       "type": "string",
       "default": "",
-      "description": "1. Data | Use answers known by this time, INCLUDING this instant, e.g. 2026-09-15T00:00:00+02:00. Later answers are excluded; scheduled runs use their start time",
+      "description": "1. Data | Use answers known by this time, INCLUDING this instant, e.g. 2026-09-15T00:00:00+02:00. An explicit cutoff applies to every run; blank derives run start minus result_availability_lag_hours",
       "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(?:Z|[+-][0-9]{2}:[0-9]{2}))?$",
       "skip_prompt_if": {
         "properties": {

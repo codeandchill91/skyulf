@@ -12,7 +12,7 @@ import pytest
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
 @pytest.mark.parametrize("policy", ["manual_approval", "automatic"])
-def test_monthly_failure_retains_once_selected_version_and_window(
+def test_training_failure_retains_once_selected_version_and_window(
     monkeypatch, tmp_path, engine, policy
 ):
     """Later clock and history changes cannot replace an invocation's persisted pin."""
@@ -24,6 +24,8 @@ def test_monthly_failure_retains_once_selected_version_and_window(
     config = _config()
     store = f"sqlite:///{(tmp_path / 'registry.db').as_posix()}"
     config.update(
+        training_version=None,
+        result_cutoff=None,
         engine=engine,
         training_window_mode="rolling_calendar",
         monthly_lookback_months=4,
@@ -62,7 +64,7 @@ def test_monthly_failure_retains_once_selected_version_and_window(
         workflow.run_action(
             spark,
             config,
-            "train_monthly",
+            "train",
             experiment_name="monthly_failure",
             artifact_path=tmp_path / "model",
             now=datetime(2027, 1, 3, tzinfo=UTC),
@@ -348,7 +350,7 @@ def test_train_preserves_selected_polars_engine_and_never_promotes(monkeypatch, 
     assert callable(train.call_args.kwargs["on_registered"])
 
 
-def test_monthly_window_pins_current_delta_version_across_year_boundary():
+def test_rolling_window_pins_current_delta_version_across_year_boundary():
     """A delayed or timezone-shifted run must pin one reproducible monthly window."""
     workflow = _workflow()
     history = Mock()
@@ -357,8 +359,10 @@ def test_monthly_window_pins_current_delta_version_across_year_boundary():
     spark.sql.return_value = history
     config = _config()
     config["monthly_lookback_months"] = 4
-    config.update(training_window_mode="rolling_calendar", window_timezone="UTC")
-    spec = workflow._monthly_training_spec(
+    config.update(
+        training_window_mode="rolling_calendar", window_timezone="UTC", training_version=None
+    )
+    spec = workflow._resolve_training_spec(
         spark, config, datetime(2027, 1, 3, 5, tzinfo=timezone(timedelta(hours=2)))
     )
     assert (spec.version, spec.start, spec.holdout_start, spec.cutoff) == (
@@ -370,28 +374,30 @@ def test_monthly_window_pins_current_delta_version_across_year_boundary():
     spark.sql.assert_called_once_with("DESCRIBE HISTORY workspace.test.training")
 
 
-def test_monthly_training_rejects_missing_version_and_invalid_lookback():
+def test_training_rejects_missing_source_history_and_invalid_lookback():
     """A scheduled run must fail before fitting an unpinned or empty window."""
     workflow = _workflow()
     spark = Mock()
     spark.sql.return_value.select.return_value.orderBy.return_value.first.return_value = None
     config = _config()
     config["monthly_lookback_months"] = 1
-    config.update(training_window_mode="rolling_calendar", window_timezone="UTC")
+    config.update(
+        training_window_mode="rolling_calendar", window_timezone="UTC", training_version=None
+    )
     with pytest.raises(ValueError, match="monthly_lookback_months"):
-        workflow._monthly_training_spec(spark, config, datetime(2027, 1, 3, tzinfo=UTC))
+        workflow._resolve_training_spec(spark, config, datetime(2027, 1, 3, tzinfo=UTC))
     config["monthly_lookback_months"] = 3
     with pytest.raises(ValueError, match="version"):
-        workflow._monthly_training_spec(spark, config, datetime(2027, 1, 3, tzinfo=UTC))
+        workflow._resolve_training_spec(spark, config, datetime(2027, 1, 3, tzinfo=UTC))
 
 
-def test_monthly_train_compares_pinned_champion_without_activation(monkeypatch, tmp_path):
-    """Monthly nomination must not activate a model or change the scorer's pin."""
+def test_train_compares_pinned_champion_without_activation(monkeypatch, tmp_path):
+    """Candidate nomination must not activate a model or change the scorer's pin."""
     workflow = _workflow()
     spec = workflow._training_spec(_config())
     train = Mock(return_value=SimpleNamespace(model_version="3"))
     champion = Mock(return_value=SimpleNamespace(version="2"))
-    monkeypatch.setattr(workflow, "_monthly_training_spec", lambda *args: spec)
+    monkeypatch.setattr(workflow, "_resolve_training_spec", lambda *args: spec)
     monkeypatch.setattr(workflow, "resolve_model", champion)
     monkeypatch.setattr(workflow, "train_local_candidate", train)
     monkeypatch.setattr(workflow, "_automatic_promotion", Mock(return_value=None))
@@ -401,7 +407,7 @@ def test_monthly_train_compares_pinned_champion_without_activation(monkeypatch, 
     workflow.run_action(
         object(),
         config,
-        "train_monthly",
+        "train",
         experiment_name="/Users/test/experiment",
         artifact_path=tmp_path / "artifact",
         now=datetime(2027, 1, 3, tzinfo=UTC),
@@ -411,7 +417,7 @@ def test_monthly_train_compares_pinned_champion_without_activation(monkeypatch, 
     champion.assert_called_once()
 
 
-def test_monthly_train_allows_first_model_but_propagates_registry_errors(monkeypatch):
+def test_train_allows_first_model_but_propagates_registry_errors(monkeypatch):
     """Only a missing champion alias is a valid first-training condition."""
     workflow = _workflow()
     from skyulf.integrations.mlflow.registry import RegistryModelNotFoundError
@@ -421,12 +427,12 @@ def test_monthly_train_allows_first_model_but_propagates_registry_errors(monkeyp
         raise RegistryModelNotFoundError("alias missing")
 
     monkeypatch.setattr(workflow, "resolve_model", missing)
-    assert workflow._monthly_champion_version(_config()) is None
+    assert workflow._current_champion_version(_config()) is None
     monkeypatch.setattr(
         workflow, "resolve_model", Mock(side_effect=RuntimeError("permission denied"))
     )
     with pytest.raises(RuntimeError, match="permission denied"):
-        workflow._monthly_champion_version(_config())
+        workflow._current_champion_version(_config())
 
 
 def test_auto_champion_train_promotes_only_an_eligible_candidate(monkeypatch, tmp_path):

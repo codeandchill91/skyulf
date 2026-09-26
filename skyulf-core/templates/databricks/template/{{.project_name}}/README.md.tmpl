@@ -30,10 +30,10 @@ python src/preview.py --list-preprocessors
 python src/preview.py --action train
 ```
 
-The default preview validates structure, shows the ordered pipeline, and explains
-missing manual training pins. `--action train` additionally requires a concrete
-source version and any manual dates. `--action train_monthly` checks the automatic
-selection policy. Preview executes your trusted Python recipe to list its steps;
+The default preview validates structure and shows the ordered pipeline.
+`--action train` checks the training selection policy for both manual and scheduled
+runs. A null source version resolves latest at run start; only `fixed_window`
+requires configured dates. Preview executes your trusted Python recipe to list its steps;
 it does not itself read data, train or deploy. Keep data access and training out
 of module-level code and both recipe functions. The preview
 uses the generated dev catalog/schema defaults; for another target pass
@@ -192,9 +192,9 @@ size samples eligible source records before splitting; it includes the holdout.
 | Prediction output | Choose `prediction_table_name` during setup, e.g. `customer_predictions`; blank defaults to a project-named output. The configured output schema and target suffix apply. |
 | Record keys | Enter `customer_id` or `customer_id, observation_id`; these identify one row. |
 | Feature columns | Enter `income, age`; these are inputs the model learns from. |
-| Training version | Delta snapshot number from the source table's History, such as 12. It pins data, not a model version. `null` means configure it before manual training; scheduled runs select latest. |
+| Training version | Delta snapshot number from the source table's History, such as 12. It pins data, not a model version. `null` or missing resolves latest once at run start; an explicit nonnegative integer pins that snapshot for manual and scheduled runs. |
 | Source window | All rows (`full_snapshot`), fixed observation dates (`fixed_window`), or recent complete months (`rolling_calendar`). `auto` picks all rows for random splitting and rolling months for temporal splitting. |
-| Result availability | A column such as `claim_confirmed_at` tells when each answer became known. Availability filtering excludes answers known after `result_cutoff`; automatic runs use invocation UTC minus `result_availability_lag_hours` (default 0 elapsed hours). |
+| Result availability | A column such as `claim_confirmed_at` tells when each answer became known. Availability filtering excludes answers known after `result_cutoff`; an explicit cutoff is honored in every run. A null cutoff derives invocation UTC minus `result_availability_lag_hours` (default 0 elapsed hours). |
 | Text date format | `10/08/2026 14:30` uses `%d/%m/%Y %H:%M`; `2026-08-10` uses `%Y-%m-%d`. Database timestamp/date columns need no text format. |
 | Source timezone | For a clock value with no offset, enter its location, e.g. `Europe/Copenhagen`. A value ending in `+02:00` already identifies its offset. |
 | Date only | `reject` stops; `midnight` treats a date with no clock time as 00:00 in the declared source timezone. |
@@ -217,16 +217,16 @@ The train job exposes the actual work:
 
 ```text
 prepare_request -> training_requested
-  training: train_candidate -> evaluate_and_register -> compare_candidate
-            -> apply_promotion_policy -> finalize_training
+  training: train_and_register -> compare_and_decide
   operator: apply_operator_action
-  successful branch -> publish_result -> scoring_requested -> run_batch_scoring
+  either branch -> finalize_and_report -> scoring_requested -> run_batch_scoring
 ```
 
-Open `publish_result` for metrics, the final decision and manual action inputs.
+Open `finalize_and_report` for metrics, the final decision and manual action inputs.
 Training tasks share pinned configuration and saved MLflow artifacts, not local
-temporary files. `finalize_training` also runs when an earlier training task
-fails; the result/score path requires success. Failed initial evaluation cannot
+temporary files. `finalize_and_report` runs after either branch, including an
+earlier failure; it finalizes training and requires verified success before
+publishing a result or score request. Failed initial evaluation cannot
 register or promote a model. Approve/reject/rollback take the operator branch
 without fitting another model. There are still exactly two jobs and no new
 control tables.
@@ -244,8 +244,8 @@ Choose `PAUSED` explicitly to keep a clock inactive. These are Bundle settings,
 not fields in `config/workflow.json`.
 Your Quartz cron controls frequency. For example, `0 0 3 1 1,7 ?` runs at 03:00
 on January 1 and July 1 in the chosen schedule timezone. There is no additional
-monthly timer overriding it. The runtime action is still named `train_monthly`;
-it selects the latest snapshot and derives configured data windows at invocation.
+monthly timer overriding it. Both manual and scheduled runs use the `train`
+action and resolve the same configured source version and window policy.
 The data window is independent: running every six months does not automatically
 read six months of data.
 
@@ -319,11 +319,11 @@ when an event column is active, otherwise `full_snapshot`; set
 `monthly_lookback_months`, `holdout_months` and `window_timezone` to null.
 Set `result_availability_lag_hours` to null when result filtering is disabled,
 otherwise 0; manual replay uses the saved `result_cutoff` rather than this lag.
-Manual `train` uses these saved boundaries rather than current rolling policy.
+The `fixed_window` policy preserves these saved boundaries on every `train` run.
 Restore the recorded CV parameters and reviewed
 comparison/promotion settings. Run the serialized train job with action `train`.
-Do not use `train_monthly` for replay: it selects a fresh source version and
-resolves the window and result cutoff again.
+Keep the saved explicit version, fixed boundaries and result cutoff for replay;
+leaving them automatic would select a fresh snapshot or resolve dates again.
 
 For a direct Core replay, reconstruct `LocalTrainingSpec` from the snapshot
 (ISO strings to aware datetimes, parsing objects to `TrainingDateSpec`, and
@@ -359,7 +359,7 @@ Configuration and lifecycle policy overrides are not accepted as run parameters.
 
 | `lifecycle_action` | Additional parameters |
 | --- | --- |
-| `train` / `train_monthly` | Leave operator evidence fields empty |
+| `train` | Leave operator evidence fields empty |
 | `approve` | `candidate_version`, `expected_champion_version` |
 | `reject` | Same evidence plus `rejection_reason` |
 | `rollback` | `promotion_receipt_json`, `expected_champion_version` |
@@ -406,8 +406,9 @@ are selected at initialization and remain editable as
 `retraining_cron_expression`, `retraining_timezone_id` and
 `retraining_pause_status` Bundle variables.
 The default is 03:00 UTC on the third day of each month; choose any supported
-Quartz cron cadence. Each run captures the latest concrete Delta source
-version. `training_window_mode` independently selects `full_snapshot`,
+Quartz cron cadence. Every invocation uses `train`: a null or missing
+`training_version` resolves the latest concrete Delta version once at run start;
+an explicit version pins that snapshot. `training_window_mode` independently selects `full_snapshot`,
 `fixed_window` or `rolling_calendar`. Rolling selection uses the explicit
 `window_timezone` and `monthly_lookback_months` (initial temporal project:
 UTC and four months). A temporal split uses `holdout_months` (default 1),
@@ -415,15 +416,16 @@ included in that total. Set an integer from 1 through total lookback minus 1.
 Random splitting uses `test_size` and null `holdout_months`; fixed temporal
 selection keeps explicit boundaries and null `holdout_months`. A fixed window
 never advances with the schedule. If result availability filtering is enabled,
-its cutoff is invocation UTC minus `result_availability_lag_hours` (default 0;
+an explicit `result_cutoff` is honored; otherwise its cutoff is invocation UTC
+minus `result_availability_lag_hours` (default 0;
 integer from 0 to 87600 elapsed hours). This subtraction follows UTC across DST.
-Inactive availability filtering requires null lag. Manual `train` keeps your
-explicit `result_cutoff`, regardless of lag. Result timestamps exactly at that
+Inactive availability filtering requires null lag. These rules apply equally
+to manual and scheduled runs. Result timestamps exactly at that
 cutoff are included; observation selection remains `[start, cutoff)`.
 
 For example, use four lookback months, `holdout_months=2`, and
 `result_availability_lag_hours=48` with availability filtering enabled. A
-`train_monthly` invocation on September 3 at 00:00 UTC, using a UTC window,
+`train` invocation on September 3 at 00:00 UTC, using a UTC window and null result cutoff,
 selects May through August: May/June train, July/August hold out. Only results
 available by September 1 at 00:00 UTC participate. Availability can also be used
 with a full snapshot and no event column. Job timezone, source parsing timezone,
@@ -468,7 +470,8 @@ With no key input, `entity_id` remains the example source-column name.
 
 `result_available_at_column` names the source timestamp recording when each
 row's target became available. It defaults to null and is required only with
-`filter_unavailable_results: true`, together with an aware `result_cutoff`.
+`filter_unavailable_results: true`. An aware `result_cutoff` pins the cutoff;
+null derives it from invocation time minus `result_availability_lag_hours`.
 `event_column` names the observation timestamp for `split_strategy: temporal`;
 `start`, `holdout_start` and `cutoff` apply to it. Rows can have different result
 dates. Result availability is independent of the observation window.
@@ -495,8 +498,8 @@ This is evaluation with fixed parameters, not Optuna/search support.
 | Split | Availability filter | Date settings |
 | --- | --- | --- |
 | Random | Disabled | None; all targets must be known. |
-| Random | Enabled | Result column and `result_cutoff`. |
-| Temporal | Disabled | Event column and ordered `start`, `holdout_start`, `cutoff`. |
+| Random | Enabled | Result column; explicit `result_cutoff` or invocation time minus lag. |
+| Temporal | Disabled | Event column; ordered `start`, `holdout_start`, `cutoff` for `fixed_window`, or rolling calendar settings. |
 | Temporal | Enabled | Both sets; independent observation and result cutoffs. |
 
 Null or late result times are excluded when filtering is enabled. Eligible
@@ -549,12 +552,14 @@ need to publish to one target.
    scoring is never sampled. Leave `training_sample_rows` null to use all data.
    In an initialization config file, supply those limits as integer strings
    (for example, `"max_rows": "10000"`); generated workflow limits are numbers.
-   For manual training, explicitly set `training_version`. Random splitting
-   needs no dates. Temporal splitting requires an event column and aware
-   `start < holdout_start < cutoff`. Availability filtering requires a result
-   column and independent `result_cutoff`. Monthly training derives its snapshot
-   per run and derives observation boundaries only for `rolling_calendar`,
-   using `window_timezone` independently of the cron timezone.
+   Leave `training_version` null to resolve latest once per run, or pin an explicit
+   version. Random full-snapshot splitting needs no dates. Temporal splitting
+   requires an event column; `fixed_window` needs aware
+   `start < holdout_start < cutoff`, while `rolling_calendar` derives boundaries
+   at every invocation. Availability filtering requires a result column; pin
+   `result_cutoff` or leave it null to derive invocation time minus lag.
+   `window_timezone` is independent of the cron timezone. Manual and scheduled
+   runs use the same `train` action and selection rules.
    Enable Delta Change
    Data Feed on the scoring source before new rows arrive. Check that the
    source's initial rows are the rows you intend to score: the first `score`

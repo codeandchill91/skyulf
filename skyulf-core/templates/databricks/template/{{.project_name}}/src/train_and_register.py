@@ -1,5 +1,5 @@
 # Databricks notebook source
-"""Record training completion or failure independently of scoring."""
+"""Fit, evaluate and register the candidate using pinned training evidence."""
 
 from skyulf.integrations.databricks.job_runtime import run_lifecycle_notebook
 
@@ -7,7 +7,7 @@ if __name__ == "__main__":
     output = run_lifecycle_notebook(
         globals()["spark"],
         globals()["dbutils"],
-        phase="finalize",
+        phase="train_register",
         display_html=globals().get("displayHTML"),
         exit_notebook=False,
     )

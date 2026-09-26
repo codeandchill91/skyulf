@@ -12,9 +12,9 @@ python src/preview.py
 python src/preview.py --action train
 ```
 
-The first command explains the setup and missing manual training pins. The second
-checks the configuration for manual training without starting a job. Use
-`--action train_monthly` to inspect runtime window selection instead. Preview uses
+The first command explains the setup. The second checks the shared `train`
+configuration for manual and scheduled runs without starting a job, including
+automatic snapshot/window selection when configured. Preview uses
 the generated dev bindings; supply the matching catalog/schema/suffix arguments
 when reviewing another target. Edit preprocessing and custom fit/apply code in
 `src/preprocessing.py`; keep model hyperparameters in `config/workflow.json`.
@@ -83,12 +83,12 @@ For manual replay through the generated project:
    set `monthly_lookback_months`, `holdout_months` and `window_timezone` to null.
    Set `result_availability_lag_hours` to null when result filtering is disabled,
    otherwise 0; manual replay uses the saved `result_cutoff` rather than this lag.
-   Manual `train` uses the saved boundaries, independently of current rolling
-   policy. Restore the recorded CV parameters and reviewed comparison/promotion
+   The `fixed_window` policy preserves the saved boundaries on every run.
+   Restore the recorded CV parameters and reviewed comparison/promotion
    settings.
-3. Invoke the serialized train job with action `train`. A new `train_monthly`
-   call deliberately selects fresh source history and resolves dates again,
-   even if the cron or invocation occurs soon after the failed attempt.
+3. Invoke the serialized train job with action `train`. Keep the saved explicit
+   version, fixed boundaries and result cutoff for replay; automatic settings
+   would select fresh source history or resolve dates again.
 
 A direct Core replay instead reconstructs `LocalTrainingSpec` from the snapshot
 using aware datetime objects, `TrainingDateSpec` parsing objects and tuple
@@ -248,7 +248,7 @@ not cause an incremental run to rewrite existing predictions.
 
 ```mermaid
 flowchart TD
-    A["Run train job: train or train_monthly"] --> B["Fit with pandas or Polars; log artifacts and metrics"]
+    A["Run train job: train"] --> B["Fit with pandas or Polars; log artifacts and metrics"]
     B --> C["Register candidate and nominate challenger"]
     C --> D["Evaluate against current champion"]
     D --> E{"Promotion policy?"}
@@ -288,47 +288,54 @@ for each action. It does not train or create prediction tables by itself.
 | Job/task | Purpose |
 | --- | --- |
 | `prepare_request` | Validates the action and freezes configuration; training also pins Delta data, dates and the expected champion |
-| `training_requested` | Routes train/train_monthly to training, and approve/reject/rollback to the operator branch |
-| `train_candidate` | Reads the pinned data, applies the saved split recipe, runs fold-local CV and fits the pipeline; saves the artifact in MLflow |
-| `evaluate_and_register` | Loads that saved artifact, verifies the same holdout, logs metrics, then registers and nominates the candidate |
-| `compare_candidate` | Compares the concrete candidate and pinned champion on the same holdout |
-| `apply_promotion_policy` | Applies the existing evidence checks and quality gate; promotes automatically or leaves a candidate for review |
+| `training_requested` | Routes train to training, and approve/reject/rollback to the operator branch |
+| `train_and_register` | Reads pinned data, runs the saved split/CV recipe and fits the pipeline; evaluates the saved artifact on the verified holdout before registering and nominating it |
+| `compare_and_decide` | Compares the candidate with the pinned champion on the same holdout; checks saved evidence and quality gates, then promotes automatically or leaves it for manual review |
 | `apply_operator_action` | Approves, rejects or rolls back saved model evidence without training another model |
-| `finalize_training` | Records successful or failed training in MLflow, including failures in preceding training tasks |
-| `publish_result` | Shows the verified decision, metrics, optional operator inputs and whether scoring was requested |
-| `scoring_requested` | Reads `publish_result`'s boolean `score_requested` value |
+| `finalize_and_report` | Runs after either branch, including failures; closes training in MLflow and publishes a report and score request only for a verified successful result |
+| `scoring_requested` | Reads `finalize_and_report`'s boolean `score_requested` value |
 | `run_batch_scoring` | Calls the existing score job when scoring was requested |
 | `score` job, `score` task | Loads the selected model/artifact, predicts and publishes rows |
 
-All rows except the last are tasks inside the **same train job**. These are
-real computation boundaries; they do not create extra jobs or control tables.
+All rows except the last are tasks inside the **same train job**. These
+eight tasks represent business steps; their internal phase evidence remains in
+MLflow. They do not create extra jobs or control tables.
 
 ```mermaid
 flowchart TD
     A["prepare_request: validate and pin"] --> B{"training_requested?"}
-    B -->|"Yes"| C["train_candidate"]
-    C --> D["evaluate_and_register"]
-    D --> E["compare_candidate"]
-    E --> F["apply_promotion_policy"]
-    B -->|"No: approve, reject or rollback"| G["apply_operator_action"]
-    C --> H["finalize_training: runs even on failure"]
-    D --> H
-    E --> H
-    F --> H
-    F --> I["publish_result: verified successful branch"]
-    H --> I
-    G --> I
-    I --> J{"scoring_requested?"}
-    J -->|"Yes"| K["run_batch_scoring"]
-    K --> L["Existing score job"]
+    B -->|"Yes"| C["train_and_register"]
+    C --> D["compare_and_decide"]
+    B -->|"No: approve, reject or rollback"| E["apply_operator_action"]
+    D --> F["finalize_and_report: runs even on failure"]
+    E --> F
+    F --> G{"scoring_requested?"}
+    G -->|"Yes"| H["run_batch_scoring"]
+    H --> I["Existing score job"]
 ```
 
-The inactive branch is excluded. `finalize_training` waits for all training
-tasks, including failed ones, and is excluded for operator actions.
-`publish_result` requires the active branch to succeed. A failed evaluation
+The inactive branch is excluded. The shared `finalize_and_report` task uses
+`ALL_DONE` to wait for both branch tails, including failed or upstream-failed
+tasks. It closes failed training in MLflow and raises when the saved result is
+unsuccessful; no score request is published in that case. A failed evaluation
 cannot register a model or request scoring. A comparison failure after
 registration retains the candidate with error evidence. A failed score run
 does not undo an already committed promotion or change training's status.
+
+Completion also checks the actual Databricks task states: the active branch
+must succeed and the inactive branch must be excluded. A notebook output error
+after a saved promotion therefore blocks scoring while preserving that promotion.
+
+In the run graph, `EXCLUDED` means a branch was not selected; it is expected
+for `apply_operator_action` during training, and for the training tasks during
+approval or rollback. With manual approval, the training run also excludes
+`run_batch_scoring` until a later approval requests scoring. After a successful
+active branch, `finalize_and_report` must run and show the verified decision.
+Its result checks block scoring after an unsuccessful branch. A completed
+evaluation that fails the quality gate is successful training with no promotion.
+Check the exact run ID: an earlier run keeps its original graph and result even
+after a fix is deployed. Overall job `SUCCESS` alone does not prove scoring ran;
+also inspect `finalize_and_report`, the child score run and the prediction table.
 
 Tasks exchange small MLflow references, not DataFrames or temporary local
 paths. Editing the source table or project files after `prepare_request` does
@@ -382,12 +389,15 @@ Earlier experimental projects and training evidence are not automatically conver
 1. Set the task, engine, existing source tables, row keys, features, target, pipeline,
    model name, prediction name, training split and bounded read limits:
    `max_rows` and `max_input_mb` (MiB, not total process RAM).
-   For manual training, set a concrete `training_version`. The default random
+   Leave `training_version` null to resolve latest once per run, or pin a concrete
+   version. The default random
    split needs no date columns: configure `test_size`, `random_state`, and optional
    classification `stratify`. For temporal splitting, select `split_strategy: "temporal"`,
-   map `event_column` and set aware `start < holdout_start < cutoff`.
+   map `event_column`, then configure rolling calendar selection or set aware
+   `start < holdout_start < cutoff` for `fixed_window`.
    Independently enable `filter_unavailable_results` if results arrive later;
-   map `result_available_at_column` and set `result_cutoff`. Leave inactive fields
+   map `result_available_at_column` and pin `result_cutoff`, or leave it null
+   to derive invocation time minus `result_availability_lag_hours`. Leave inactive fields
    null/default. See the [four training combinations](databricks_bundle.md#choose-the-evaluation-split-and-result-availability).
    For strings, local-clock timestamps or dates, configure `event_time_parsing`
    and `result_time_parsing` using the [source-date examples](databricks_bundle.md#source-date-formats-and-timezones).
@@ -430,8 +440,8 @@ redeployment. Do not switch shared configuration while jobs are running.
 2. Choose **Run with different settings** (also called **Run now with different
    parameters** in some UI versions).
 3. Set `lifecycle_action=train`. Leave all operator-evidence fields empty.
-4. Open the completed run, then **publish_result** for the final decision.
-   Open **train_candidate**, **evaluate_and_register** or **compare_candidate**
+4. Open the completed run, then **finalize_and_report** for the final decision.
+   Open **train_and_register** or **compare_and_decide**
    to inspect the corresponding work separately.
 5. Read `result`: model version, MLflow run and comparison. Follow the MLflow
    experiment to inspect metrics, artifacts and input provenance.
@@ -455,7 +465,7 @@ another version; it does not approve the candidate you just inspected.
 
 | Field | Meaning | When to fill it |
 | --- | --- | --- |
-| `lifecycle_action` | Operation to execute on this run | `train`, `train_monthly`, `approve`, `reject` or `rollback` |
+| `lifecycle_action` | Operation to execute on this run | `train`, `approve`, `reject` or `rollback` |
 | `candidate_version` | Registered model version to approve/reject; not a job run ID or MLflow run ID | Copy from the candidate's `next_actions` for approve/reject |
 | `expected_champion_version` | Champion version that must still be current when the operation executes | Copy for approve/reject/rollback; literal `none` only for first-champion approval/rejection |
 | `promotion_receipt_json` | Saved JSON receipt identifying a completed promotion to reverse | Rollback only |
@@ -488,7 +498,7 @@ check. Direct Core approval/rejection APIs still require their explicit digest.
 ## Reading the notebook result
 
 The phase notebooks show their own counts, metrics or status. The
-**publish_result** and **score** notebooks use the shared final output renderer.
+**finalize_and_report** and **score** notebooks use the shared final output renderer.
 Their executed cell shows an operation summary, champion version change when relevant, metric
 comparison for training, prediction counts for scoring, and **Available action**
 parameter tables. Expand **Technical details (JSON)** for the full result.
@@ -508,13 +518,13 @@ older than today's champion. No new rows or model provenance were written.
 
 ## Where to find `next_actions`
 
-`next_actions` is a key in the completed **publish_result task's JSON output**. It is not
+`next_actions` is a key in the completed **finalize_and_report task's JSON output**. It is not
 a menu, a Catalog alias, an MLflow tag or an extra field in the run settings
 form. You do not need another training run to retrieve it.
 
 1. Close the new-run settings dialog and open the train job's **Runs** tab.
 2. Open the completed training run you want to review.
-3. In that run's task graph/list, click **publish_result**. The condition and
+3. In that run's task graph/list, click **finalize_and_report**. The condition and
    score-handoff tasks do not contain the operator parameter tables.
 4. Open the task's executed notebook/output and inspect the **first cell's report**.
    Use the **Available action: approve/reject** parameter table. The equivalent
@@ -563,7 +573,7 @@ Before approving, inspect these values:
 | `result.comparison.eligible` / `reason` | Whether the candidate passed the configured gates and why |
 | `score_requested` | Whether this action requests scoring; false while waiting for manual approval |
 
-For a CLI fallback, use the **publish_result task run ID**, not the multi-task parent run
+For a CLI fallback, use the **finalize_and_report task run ID**, not the multi-task parent run
 ID:
 
 ```powershell
@@ -739,9 +749,11 @@ successfully but had no new rows; a queued run is waiting for its turn.
 There are still exactly two jobs, no control tables and no automatic mutation
 retries.
 
-The `train_monthly` name is retained: it pins the latest Delta snapshot at each
-invocation and applies your configured selection. Any supported cron frequency
-can invoke it; the cron never determines the data window. Date-free
+Manual and scheduled invocations use the same `train` action. Null or missing
+`training_version` resolves the latest Delta snapshot once at run start; an
+explicit nonnegative integer pins that snapshot. Any supported cron frequency
+can invoke it; the cron never determines the data window. Rolling windows derive
+at every invocation, including manual runs. Date-free
 `full_snapshot` training remains available. Source parsing timezone, the
 `window_timezone` defining month boundaries, and each job clock timezone are
 separate settings.
@@ -754,9 +766,10 @@ boundaries and null holdout months. Default temporal selection still uses four
 completed months in UTC and holds out the final month.
 
 With `filter_unavailable_results=true`, integer
-`result_availability_lag_hours` is 0 to 87600 (default 0). Automatic training uses
-invocation UTC minus that many elapsed hours, even across DST; manual `train`
-uses the explicit `result_cutoff`. The lag is null when filtering is disabled.
+`result_availability_lag_hours` is 0 to 87600 (default 0). An explicit
+`result_cutoff` is honored; null derives invocation UTC minus that many elapsed
+hours, even across DST. Manual and scheduled runs follow the same rule.
+The lag is null when filtering is disabled.
 Availability filtering also works without an event column. Results exactly at
 the availability cutoff are included; observation windows are half-open
 `[start, cutoff)`.
@@ -772,15 +785,16 @@ two days for result availability:
   "monthly_lookback_months": 4,
   "holdout_months": 2,
   "filter_unavailable_results": true,
+  "result_cutoff": null,
   "result_availability_lag_hours": 48
 }
 ```
 
 Add these fields to your complete workflow and map the real event and result
-availability columns. At September 3, 00:00 UTC, automatic training selects May
+availability columns. At September 3, 00:00 UTC, a `train` invocation selects May
 through August, trains on May/June, holds out July/August, and includes results
 available by September 1, 00:00 UTC. Run
-`python src/preview.py --action train_monthly` to inspect this policy offline.
+`python src/preview.py --action train` to inspect this policy offline.
 Preview does not resolve Bundle clocks; inspect `bundle validate -t dev
 --strict --output json` for the resolved schedule. CLI validation is not proof
 of a live scheduled trigger or contention run.

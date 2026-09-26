@@ -121,7 +121,11 @@ opts into seeded Spark-side selection before local transfer. The limit includes
 training and final holdout rows and cannot exceed `max_rows`. Sample membership
 is pinned for approval replay. Leaving it null preserves overflow-fail behavior.
 See [Bundle CV, sampling and selection](databricks_bundle.md#optional-basic-model-cross-validation)
-for full contracts and the separate `train_monthly` calendar settings.
+for full contracts and the Bundle's `train` calendar settings. The Bundle uses
+the same action for manual and scheduled runs: null source version resolves
+latest once, explicit version pins the snapshot, and rolling windows derive at
+invocation. The direct `train_local_candidate` API still takes a concrete
+`LocalTrainingSpec` with its source version and any active date boundaries.
 
 Install the same `skyulf-core`, pandas, Polars and scikit-learn versions in the
 training and scoring environments. The local artifact records those versions,

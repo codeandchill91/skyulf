@@ -14,7 +14,7 @@ from skyulf.registry import NodeRegistry
 def main():
     """Show the selected pipeline or discover installed Core model/node metadata."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--action", choices=["score", "train", "train_monthly"], default="score")
+    parser.add_argument("--action", choices=["score", "train"], default="score")
     parser.add_argument("--catalog", default="{{.catalog}}")
     parser.add_argument("--input-schema", default="{{.schema}}")
     parser.add_argument("--output-schema", default="{{.schema}}")

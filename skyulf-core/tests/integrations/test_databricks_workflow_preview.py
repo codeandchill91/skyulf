@@ -26,18 +26,24 @@ def test_preview_preserves_step_order_and_separates_cv_from_holdout(workflow_con
 
 
 def test_preview_does_not_call_a_draft_train_ready(workflow_config):
-    """A structurally valid draft still needs a pinned version for manual training."""
-    workflow_config["training_version"] = None
+    """An incomplete fixed window must not be presented as ready for training."""
+    workflow_config.update(
+        training_window_mode="fixed_window",
+        monthly_lookback_months=None,
+        window_timezone=None,
+        start=None,
+    )
     report = preview_workflow_config(workflow_config)
-    assert "Manual training: needs configuration" in report
-    assert "training_version" in report
-    with pytest.raises(ValueError, match="training_version"):
+    assert "Training: needs configuration" in report
+    assert "start" in report
+    with pytest.raises(ValueError, match="start"):
         preview_workflow_config(workflow_config, action="train")
 
 
-def test_monthly_preview_describes_runtime_selection_instead_of_manual_pins(workflow_config):
-    """A scheduled run must not appear to reuse stale manual dates or a pinned snapshot."""
-    report = preview_workflow_config(workflow_config, action="train_monthly")
+def test_preview_describes_runtime_selection_when_unset(workflow_config):
+    """Latest and rolling selections apply equally to manual and scheduled training."""
+    workflow_config.update(training_version=None, result_cutoff=None)
+    report = preview_workflow_config(workflow_config, action="train")
     assert "latest snapshot at invocation" in report
     assert "completed calendar months at invocation" in report
     assert "cutoff=invocation time" in report
@@ -48,8 +54,8 @@ def test_monthly_preview_describes_runtime_selection_instead_of_manual_pins(work
 
 def test_preview_explains_holdout_lag_and_independent_job_clocks(workflow_config):
     """Preview must distinguish selected rows from scheduled triggers and queued work."""
-    workflow_config.update(holdout_months=2, result_availability_lag_hours=48)
-    report = preview_workflow_config(workflow_config, action="train_monthly")
+    workflow_config.update(holdout_months=2, result_availability_lag_hours=48, result_cutoff=None)
+    report = preview_workflow_config(workflow_config, action="train")
     assert "last 2 completed calendar months" in report
     assert "UTC minus 48 elapsed hours (inclusive)" in report
     assert "Bundle variables" in report

@@ -30,7 +30,10 @@ from .training_dates import training_date_spec
 
 __all__ = ["LifecycleContext", "LifecyclePhaseResult", "run_lifecycle_phase"]
 
-_TRAINING = {"train", "train_monthly"}
+_GROUPED_PHASES = {
+    "train_register": ("train", "evaluate_register"),
+    "compare_decide": ("compare", "decide"),
+}
 
 
 def _spec(payload: dict[str, Any], source: str | None) -> training.LocalTrainingSpec:
@@ -58,7 +61,7 @@ def _prepare(
     now: datetime | None,
 ) -> LifecyclePhaseResult:
     """Resolve source and champion once, then persist the complete immutable invocation."""
-    if action not in _TRAINING | {"approve", "reject", "rollback"}:
+    if action not in {"train", "approve", "reject", "rollback"}:
         raise ValueError("Unsupported lifecycle action.")
     _, policy = workflow._workflow_policies(config)
     options = {
@@ -72,16 +75,12 @@ def _prepare(
         "action": action,
         "operator_options": options,
     }
-    if action in _TRAINING:
+    if action == "train":
         if options:
             raise ValueError("Training cannot accept operator options.")
         if policy == "automatic" and config.get("quality_threshold") is None:
             raise ValueError("Automatic promotion requires an absolute quality_threshold.")
-        spec = (
-            workflow._monthly_training_spec(spark, config, now or datetime.now(UTC))
-            if action == "train_monthly"
-            else workflow._training_spec(config)
-        )
+        spec = workflow._resolve_training_spec(spark, config, now or datetime.now(UTC))
         champion = (
             workflow.controlled_champion_version(
                 config["model_name"],
@@ -89,7 +88,7 @@ def _prepare(
                 registry_uri=config.get("registry_uri", "databricks-uc"),
             )
             if policy == "automatic" or "score_model_selection" in config
-            else workflow._monthly_champion_version(config)
+            else workflow._current_champion_version(config)
         )
         if (
             config.get("champion_version") is not None
@@ -128,7 +127,7 @@ def _prepare(
         )
     created = store.client.create_run(
         experiment,
-        run_name="candidate_training" if action in _TRAINING else f"lifecycle_{action}",
+        run_name="candidate_training" if action == "train" else f"lifecycle_{action}",
         tags={
             "skyulf.lifecycle.job_id": store.context.job_id,
             "skyulf.lifecycle.job_run_id": store.context.job_run_id,
@@ -145,10 +144,10 @@ def _prepare(
         store.begin("prepare")
         output = {
             "action": action,
-            "training_requested": action in _TRAINING,
+            "training_requested": action == "train",
             "model_name": config["model_name"],
         }
-        if action in _TRAINING:
+        if action == "train":
             pinned = request["spec"]
             output.update(
                 source_table=pinned["table"],
@@ -447,7 +446,7 @@ def _result(store: _PhaseStore) -> dict[str, Any]:
         or store.client.get_run(store.run_id).info.status != "FINISHED"
     ):
         raise ValueError("Lifecycle has no successful finalized result.")
-    if request["action"] in _TRAINING:
+    if request["action"] == "train":
         if store.receipt("finalize")["output"]["status"] != "FINISHED":
             raise ValueError("Lifecycle has no successful training finalization.")
         decision = store.receipt("decide")["output"]
@@ -479,21 +478,38 @@ def run_lifecycle_phase(
     experiment_name: str | None = None,
     operator_options: dict[str, Any] | None = None,
     now: datetime | None = None,
+    task_states: dict[str, str] | None = None,
 ) -> LifecyclePhaseResult:
-    """Run one fixed notebook phase with durable references and no cross-task local state.
+    """Run fixed notebook phases with durable references and no cross-task local state.
 
-    Only prepare accepts configuration, action and operator inputs. Finalize and
-    result take the prepare reference so excluded graph branches need no task value.
-    All other phases take their immediate predecessor's reference. This adapter
-    requires the lifecycle job's existing serialization and never runs scoring.
+    Only prepare accepts configuration, action and operator inputs. Groups retain
+    each internal phase's receipts and return the last phase's reference. Complete
+    takes the prepare reference, finalizes training when requested, then requires
+    successful selected-branch task outcomes before publishing the result.
+    Finalize and result also take the prepare reference; other phases
+    take their immediate predecessor's reference. This adapter requires the
+    lifecycle job's existing serialization and never runs scoring.
     """
     context.validate()
-    if phase not in {"prepare", *_PREDECESSORS}:
+    if phase not in {"prepare", "complete", *_PREDECESSORS, *_GROUPED_PHASES}:
         raise ValueError("Unsupported fixed lifecycle phase.")
+    if phase != "complete" and task_states is not None:
+        raise ValueError("Task states are accepted only by complete.")
     if phase != "prepare" and any(
         value is not None for value in (config, action, experiment_name, operator_options, now)
     ):
         raise ValueError("Downstream lifecycle phases must use only the pinned invocation.")
+    if phase in _GROUPED_PHASES:
+        for internal_phase in _GROUPED_PHASES[phase]:
+            completed = run_lifecycle_phase(
+                spark,
+                phase=internal_phase,
+                context=context,
+                tracking_uri=tracking_uri,
+                reference=reference,
+            )
+            reference = completed.reference
+        return completed
     store = _PhaseStore(tracking_uri, context)
     if phase == "prepare":
         if reference is not None or config is None or action is None or not experiment_name:
@@ -512,9 +528,33 @@ def run_lifecycle_phase(
     if reference is None:
         raise ValueError("Lifecycle phase requires its predecessor reference.")
     store.bind(reference)
-    if reference["phase"] != _PREDECESSORS[phase]:
+    expected_predecessor = "prepare" if phase == "complete" else _PREDECESSORS[phase]
+    if reference["phase"] != expected_predecessor:
         raise ValueError("Lifecycle phase received the wrong predecessor reference.")
-    training_action = store.request["action"] in _TRAINING
+    training_action = store.request["action"] == "train"
+    if phase == "complete":
+        if training_action:
+            run_lifecycle_phase(
+                spark,
+                phase="finalize",
+                context=context,
+                tracking_uri=tracking_uri,
+                reference=reference,
+            )
+        expected_states = (
+            {"training": "success", "operator": "excluded"}
+            if training_action
+            else {"training": "excluded", "operator": "success"}
+        )
+        if task_states != expected_states:
+            raise ValueError("Lifecycle task outcomes do not allow publishing a result.")
+        return run_lifecycle_phase(
+            spark,
+            phase="result",
+            context=context,
+            tracking_uri=tracking_uri,
+            reference=reference,
+        )
     if (
         phase in {"train", "evaluate_register", "compare", "decide", "finalize"}
         and not training_action

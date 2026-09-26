@@ -58,8 +58,10 @@ def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
         "prepare": "Request validated and data pinned",
         "train": "Candidate pipeline trained",
         "evaluate_register": "Candidate evaluated and registered",
+        "train_register": "Candidate trained, evaluated and registered",
         "compare": "Candidate comparison completed",
         "decide": "Promotion policy evaluated",
+        "compare_decide": "Candidate compared and promotion policy evaluated",
         "operator": "Operator action completed",
         "finalize": "Training status recorded",
     }
@@ -83,15 +85,16 @@ def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
     if phase == "operator" and receipt.get("model_name"):
         sections.append(f"<p><strong>Model:</strong> {_text(receipt['model_name'])}</p>")
     sections.extend(_receipt_summary(receipt))
-    if phase == "decide" and not payload.get("alias_change"):
+    if phase in {"decide", "compare_decide"} and not payload.get("alias_change"):
         sections.append(
             "<p>Awaiting manual review. Champion is unchanged.</p>"
             if payload.get("promotion_policy") == "manual_approval"
             else "<p>Champion is unchanged. The candidate did not pass promotion gates.</p>"
         )
-    if phase in {"decide", "operator"}:
+    if phase in {"decide", "compare_decide", "operator"}:
         sections.append(
-            "<p>Open <strong>publish_result</strong> for the final decision and operator actions.</p>"
+            "<p>Open <strong>finalize_and_report</strong> for the final decision "
+            "and operator actions.</p>"
         )
     raw = json.dumps(payload, indent=2, default=str, allow_nan=False)
     sections.append(

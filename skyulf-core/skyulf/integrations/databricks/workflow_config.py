@@ -14,11 +14,11 @@ from ..mlflow.validation import _CLASSIFICATION, _MINIMIZE, _REGRESSION
 from ._contracts import PREDICTION_METADATA_COLUMNS, input_budget_bytes
 from .local_cv import CV_FIELDS, LocalCVSpec
 from .local_sdk import ModelSelection
-from .local_workflow import _training_spec, _training_window_mode
+from .local_workflow import _training_settings, _training_spec, _training_window_mode
 from .prediction_output import _IDENTIFIER, _TABLE_NAME
 from .training_dates import training_date_spec
 
-_ACTIONS = {"train", "train_monthly", "score", "approve", "reject", "rollback"}
+_ACTIONS = {"train", "score", "approve", "reject", "rollback"}
 _FIELDS = {
     "pre_split_steps",
     *CV_FIELDS,
@@ -116,22 +116,18 @@ def _columns(config: dict[str, Any]) -> None:
 
 
 def _training_contract(config: dict[str, Any], action: str) -> None:
-    """Validate explicit policies while requiring manual pins only for manual training."""
+    """Validate training selection offline, allowing unset versions to resolve at invocation."""
     settings = dict(config)
     strategy = config.get("split_strategy", "random")
     mode = _training_window_mode(config)
     if config.get("stratify") is True and config["task"] != "classification":
         raise ValueError("stratify requires a classification task.")
     if action == "train":
-        version = config.get("training_version")
-        if type(version) is not int or version < 0:
-            raise ValueError(
-                "Set training_version to an explicit nonnegative Delta version before train."
-            )
+        settings = _training_settings(config, datetime(2000, 3, 1, tzinfo=UTC))
     else:
         settings["training_version"] = 0
         # These actions use saved evidence or derive fresh boundaries at invocation.
-        if mode != "full_snapshot" and (action != "train_monthly" or mode == "rolling_calendar"):
+        if mode != "full_snapshot":
             boundaries = {"start": 1, "cutoff": 3}
             if strategy == "temporal":
                 boundaries["holdout_start"] = 2
@@ -145,9 +141,9 @@ def _training_contract(config: dict[str, Any], action: str) -> None:
 def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str, Any]:
     """Validate a resolved project without starting Spark, fitting or accessing MLflow.
 
-    Historical dates are allowed for deliberate snapshot replays. Generated
-    projects leave manual dates/version unset so examples cannot silently train
-    on an obsolete snapshot. Saved-evidence actions use their own pinned data.
+    Historical dates and explicit versions allow deliberate snapshot replays.
+    An unset version selects the latest snapshot at invocation. Saved-evidence
+    actions use their own pinned data.
     """
     if not isinstance(config, dict):
         raise ValueError("Workflow configuration must be an object.")
@@ -252,39 +248,39 @@ def preview_workflow_config(config: dict[str, Any], *, action: str = "score") ->
     """Describe resolved settings offline using the same preflight as job execution.
 
     The default checks the configuration without requiring manual training pins.
-    Pass ``action='train'`` or ``'train_monthly'`` for action-specific validation.
+    Pass ``action='train'`` to validate training selection as well.
     This cannot check source values, installed worker dependencies or permissions.
     """
     checked = validate_workflow_config(config, action=action)
     model = checked["pipeline"]["modeling"]
     cv = LocalCVSpec.from_workflow(checked)
-    manual_status = "configured (source data and permissions not checked)"
+    training_status = "configured (source data and permissions not checked)"
     try:
         validate_workflow_config(checked, action="train")
     except ValueError as exc:
-        manual_status = f"needs configuration: {exc}"
+        training_status = f"needs configuration: {exc}"
     sample = checked.get("training_sample_rows")
     window = _training_window_mode(checked)
-    monthly = action == "train_monthly"
-    version = "latest snapshot at invocation" if monthly else checked.get("training_version")
+    version = checked.get("training_version")
+    if version is None:
+        version = "latest snapshot at invocation"
     observation_window = f"[{checked.get('start')}, {checked.get('cutoff')})"
     holdout_start = checked.get("holdout_start")
     result_cutoff = checked.get("result_cutoff")
-    if monthly:
-        if window == "rolling_calendar":
-            observation_window = "completed calendar months at invocation"
-            if checked.get("split_strategy") == "temporal":
-                months = checked.get("holdout_months", 1)
-                holdout_start = (
-                    "last completed calendar month"
-                    if months == 1
-                    else f"last {months} completed calendar months"
-                )
-        if checked.get("filter_unavailable_results"):
-            result_cutoff = (
-                f"invocation time UTC minus {checked.get('result_availability_lag_hours', 0)} "
-                "elapsed hours (inclusive)"
+    if window == "rolling_calendar":
+        observation_window = "completed calendar months at invocation"
+        if checked.get("split_strategy") == "temporal":
+            months = checked.get("holdout_months", 1)
+            holdout_start = (
+                "last completed calendar month"
+                if months == 1
+                else f"last {months} completed calendar months"
             )
+    if checked.get("filter_unavailable_results") and result_cutoff is None:
+        result_cutoff = (
+            f"invocation time UTC minus {checked.get('result_availability_lag_hours', 0)} "
+            "elapsed hours (inclusive)"
+        )
     lines = [
         "Skyulf workflow preview",
         "No data read, training, registry mutation or deployment.",
@@ -297,7 +293,8 @@ def preview_workflow_config(config: dict[str, Any], *, action: str = "score") ->
         f"Calendar: {checked.get('monthly_lookback_months')} months, "
         f"timezone={checked.get('window_timezone')}",
         "Job clocks and pause settings live in Bundle variables, independently of data selection. "
-        "train_monthly pins fresh data at invocation and accepts any cron frequency.",
+        "The same train action runs manually or at any cron frequency; "
+        "training_version=null pins the latest snapshot once per invocation.",
         "PAUSED stops clock triggers; an unchanged score can finish as a no-op. "
         "Overlapping runs queue behind the same job's single active run; "
         "scheduled scoring and lifecycle handoff share that score job.",
@@ -314,7 +311,7 @@ def preview_workflow_config(config: dict[str, Any], *, action: str = "score") ->
         "sampling, it is selected after the bounded read.",
         f"Final holdout: {checked.get('split_strategy', 'random')} | "
         f"fraction={checked.get('test_size', 0.2)} | start={holdout_start}",
-        f"Manual training: {manual_status}",
+        f"Training: {training_status}",
         "Pre-split cleanup (fixed normalization and training eligibility; edit build_pre_split_steps()):",
     ]
     for index, step in enumerate(checked.get("pre_split_steps", []), 1):

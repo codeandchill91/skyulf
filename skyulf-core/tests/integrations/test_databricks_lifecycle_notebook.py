@@ -85,17 +85,58 @@ def test_downstream_notebook_uses_saved_reference_without_editable_config(monkey
     execute.assert_called_once()
 
 
+@pytest.mark.parametrize("fails", [False, True])
+def test_completion_publishes_score_request_only_after_verified_result(monkeypatch, fails):
+    """The ALL_DONE join must never emit a score request when finalization fails."""
+    from skyulf.integrations.databricks import job_runtime, lifecycle_tasks
+
+    payload = {"action": "train", "result": {}, "score_requested": True}
+    execute = Mock(return_value=SimpleNamespace(reference={"phase": "result"}, output=payload))
+    if fails:
+        execute.side_effect = ValueError("Lifecycle has no successful finalized result.")
+    monkeypatch.setattr(lifecycle_tasks, "run_lifecycle_phase", execute)
+    values = {
+        "job_id": "10",
+        "job_run_id": "20",
+        "repair_count": "0",
+        "execution_count": "1",
+        "workflow_contract": "2",
+        "reference_json": '{"phase": "prepare"}',
+        "tracking_uri": "databricks",
+        "training_result_state": "failed" if fails else "success",
+        "operator_result_state": "excluded",
+    }
+    task_values = Mock()
+    display = Mock()
+    dbutils = SimpleNamespace(
+        widgets=SimpleNamespace(getAll=lambda: values),
+        jobs=SimpleNamespace(taskValues=task_values),
+    )
+    if fails:
+        with pytest.raises(ValueError, match="successful finalized"):
+            job_runtime.run_lifecycle_notebook(None, dbutils, phase="complete")
+        task_values.set.assert_not_called()
+    else:
+        result = job_runtime.run_lifecycle_notebook(
+            None, dbutils, phase="complete", display_html=display, exit_notebook=False
+        )
+        assert json.loads(result) == payload
+        task_values.set.assert_any_call(key="score_requested", value=True)
+        assert "Scoring requested" in display.call_args.args[0]
+    assert execute.call_args.kwargs["task_states"] == {
+        "training": "failed" if fails else "success",
+        "operator": "excluded",
+    }
+
+
 @pytest.mark.parametrize(
     "filename,phase",
     [
         ("workflow", "prepare"),
-        ("train_candidate", "train"),
-        ("evaluate_candidate", "evaluate_register"),
-        ("compare_candidate", "compare"),
-        ("apply_promotion_policy", "decide"),
+        ("train_and_register", "train_register"),
+        ("compare_and_decide", "compare_decide"),
         ("apply_operator_action", "operator"),
-        ("finalize_training", "finalize"),
-        ("publish_result", "result"),
+        ("finalize_and_report", "complete"),
     ],
 )
 def test_generated_notebooks_bind_their_own_phase_and_defer_exit(monkeypatch, filename, phase):
@@ -134,7 +175,7 @@ def test_phase_output_escapes_values_and_folds_technical_digests():
     assert "&lt;script&gt;" in output
 
 
-@pytest.mark.parametrize("phase", ["compare", "decide"])
+@pytest.mark.parametrize("phase", ["compare", "decide", "compare_decide"])
 def test_phase_report_shows_comparison_and_actual_promotion_decision(phase):
     """Reviewers must see metrics and the alias decision without opening technical JSON."""
     from skyulf.integrations.databricks.job_output import render_lifecycle_output
@@ -162,16 +203,17 @@ def test_phase_report_shows_comparison_and_actual_promotion_decision(phase):
     assert "heldout_rmse" in visible and "1.5" in visible and "2.0" in visible
     assert "candidate_improved" in visible
     assert "Eligible" in visible
-    if phase == "decide":
+    if phase in {"decide", "compare_decide"}:
         assert "Champion changed" in visible and "v2" in visible and "v3" in visible
 
 
-def test_manual_review_report_does_not_imply_promotion():
+@pytest.mark.parametrize("phase", ["decide", "compare_decide"])
+def test_manual_review_report_does_not_imply_promotion(phase):
     """A candidate awaiting human approval must not look like a successful champion change."""
     from skyulf.integrations.databricks.job_output import render_lifecycle_output
 
     visible = render_lifecycle_output(
-        "decide",
+        phase,
         {
             "candidate": {"model_version": "3"},
             "alias_change": None,

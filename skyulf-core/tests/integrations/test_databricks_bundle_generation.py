@@ -114,6 +114,11 @@ def test_cli_independent_schedules_preserve_shared_two_job_graph(tmp_path, train
     ]
     config = _read_validated_config(project)
     assert set(jobs) == {"train", "score"}
+    bundle = yaml.safe_load((project / "databricks.yml").read_text())
+    synced_notebooks = {path for path in bundle["sync"]["include"] if path.startswith("src/")}
+    assert all((project / path).is_file() for path in synced_notebooks)
+    defaults = {entry["name"]: entry["default"] for entry in jobs["train"]["parameters"]}
+    assert defaults["lifecycle_action"] == "train"
     for job, mode, prefix, cron, zone, pause in (
         ("train", train_mode, "retraining", "0 0 3 1 1,7 ?", "Europe/Vilnius", "PAUSED"),
         ("score", score_mode, "scoring", "0 15 * * * ?", "America/New_York", "UNPAUSED"),
@@ -138,7 +143,9 @@ def test_cli_independent_schedules_preserve_shared_two_job_graph(tmp_path, train
                 assert f"{prefix}_{suffix}" not in config
     tasks = {task["task_key"]: task for task in jobs["train"]["tasks"]}
     assert tasks["run_batch_scoring"]["run_job_task"]["job_id"] == "${resources.jobs.score.id}"
-    assert tasks["train_candidate"]["max_retries"] == jobs["score"]["tasks"][0]["max_retries"] == 0
+    assert (
+        tasks["train_and_register"]["max_retries"] == jobs["score"]["tasks"][0]["max_retries"] == 0
+    )
 
 
 @pytest.mark.parametrize("strategy,holdout", [("random", None), ("temporal", 2)])
@@ -400,6 +407,7 @@ def test_cli_preserves_existing_sources_composite_keys_and_explicit_split(tmp_pa
         input_columns="\tincome, age ",
         target_column="churn",
         split_strategy="temporal",
+        training_window_mode="fixed_window",
         filter_unavailable_results="true",
         event_column="observed_at",
         result_available_at_column="labeled_at",
@@ -469,17 +477,17 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
     assert set(jobs) == {"train", "score"}
     for job in jobs.values():
         assert job["max_concurrent_runs"] == 1 and job["queue"]["enabled"] is True
+    bundle = yaml.safe_load((project / "databricks.yml").read_text())
+    synced_notebooks = {path for path in bundle["sync"]["include"] if path.startswith("src/")}
+    assert all((project / path).is_file() for path in synced_notebooks)
     tasks = {task["task_key"]: task for task in jobs["train"]["tasks"]}
     assert set(tasks) == {
         "prepare_request",
         "training_requested",
-        "train_candidate",
-        "evaluate_and_register",
-        "compare_candidate",
-        "apply_promotion_policy",
+        "train_and_register",
+        "compare_and_decide",
         "apply_operator_action",
-        "finalize_training",
-        "publish_result",
+        "finalize_and_report",
         "scoring_requested",
         "run_batch_scoring",
     }
@@ -489,31 +497,27 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
         "left": "{{tasks.prepare_request.values.training_requested}}",
         "right": "true",
     }
-    for task, branch in (("train_candidate", "true"), ("apply_operator_action", "false")):
+    for task, branch in (("train_and_register", "true"), ("apply_operator_action", "false")):
         assert tasks[task]["depends_on"] == [{"task_key": "training_requested", "outcome": branch}]
-    for task, previous in (
-        ("evaluate_and_register", "train_candidate"),
-        ("compare_candidate", "evaluate_and_register"),
-        ("apply_promotion_policy", "compare_candidate"),
-    ):
-        assert tasks[task]["depends_on"] == [{"task_key": previous}]
-    assert tasks["finalize_training"]["run_if"] == "ALL_DONE"
-    assert {item["task_key"] for item in tasks["finalize_training"]["depends_on"]} == {
-        "train_candidate",
-        "evaluate_and_register",
-        "compare_candidate",
-        "apply_promotion_policy",
-    }
-    assert {item["task_key"] for item in tasks["publish_result"]["depends_on"]} == {
-        "apply_promotion_policy",
+    assert tasks["compare_and_decide"]["depends_on"] == [{"task_key": "train_and_register"}]
+    assert {item["task_key"] for item in tasks["finalize_and_report"]["depends_on"]} == {
+        "compare_and_decide",
         "apply_operator_action",
-        "finalize_training",
     }
-    assert tasks["publish_result"].get("run_if", "ALL_SUCCESS") == "ALL_SUCCESS"
-    assert tasks["scoring_requested"]["depends_on"] == [{"task_key": "publish_result"}]
+    # Cleanup runs after success, failure or upstream failure on the active branch.
+    # The runtime publishes score_requested only after verifying successful evidence.
+    assert tasks["finalize_and_report"]["run_if"] == "ALL_DONE"
+    completion_parameters = tasks["finalize_and_report"]["notebook_task"]["base_parameters"]
+    assert completion_parameters["training_result_state"] == (
+        "{{tasks.compare_and_decide.result_state}}"
+    )
+    assert completion_parameters["operator_result_state"] == (
+        "{{tasks.apply_operator_action.result_state}}"
+    )
+    assert tasks["scoring_requested"]["depends_on"] == [{"task_key": "finalize_and_report"}]
     assert tasks["scoring_requested"]["condition_task"] == {
         "op": "EQUAL_TO",
-        "left": "{{tasks.publish_result.values.score_requested}}",
+        "left": "{{tasks.finalize_and_report.values.score_requested}}",
         "right": "true",
     }
     assert tasks["run_batch_scoring"]["depends_on"] == [
@@ -524,7 +528,7 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
         "job_parameters": {"score_model_version": ""},
     }
     defaults = {item["name"]: item["default"] for item in jobs["train"]["parameters"]}
-    assert defaults["lifecycle_action"] == ("train_monthly" if monthly else "train")
+    assert defaults["lifecycle_action"] == "train"
     assert set(defaults) == {
         "lifecycle_action",
         "candidate_version",
@@ -555,16 +559,17 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
     else:
         assert "schedule" not in jobs["train"]
     if compute == "serverless":
-        assert tasks["train_candidate"]["environment_key"] == "skyulf"
+        assert tasks["train_and_register"]["environment_key"] == "skyulf"
         assert "job_clusters" not in jobs["train"]
     else:
-        assert tasks["train_candidate"]["job_cluster_key"] == "skyulf"
+        assert tasks["train_and_register"]["job_cluster_key"] == "skyulf"
         assert "environments" not in jobs["train"]
     for task in tasks.values():
         assert task["max_retries"] == 0
         if "notebook_task" in task:
             notebook = task["notebook_task"]
             assert (project / "resources" / notebook["notebook_path"]).is_file()
+            assert notebook["notebook_path"].removeprefix("../") in synced_notebooks
             runtime = notebook["base_parameters"]
             assert runtime["job_id"] == "{{job.id}}"
             assert runtime["job_run_id"] == "{{job.run_id}}"
@@ -675,3 +680,5 @@ def test_cli_training_examples_pass_manual_preflight(tmp_path, filename):
     checked = validate_workflow_config(resolved, action="train")
     assert checked["training_version"] == 12
     assert checked["split_strategy"] == inputs["split_strategy"]
+    if inputs.get("start"):
+        assert checked["training_window_mode"] == "fixed_window"

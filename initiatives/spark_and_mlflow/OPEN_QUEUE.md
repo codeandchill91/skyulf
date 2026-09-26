@@ -52,6 +52,18 @@ tests and strict CLI checks passed; live clock/queue checks remain unrun.
 Quality fixes and SM-34 are committed as `676feddf`. Before SM-35, the user
 approved SM-34A: meaningful training/evaluation/lifecycle tasks in the existing
 two-job Bundle. See [the task graph plan](66-sm34a-visible-lifecycle-tasks.md).
+SM-34A is committed as `3e92d14a`; its user-requested follow-up now uses only
+`train` for manual and cron starts. Latest/explicit snapshot selection belongs
+to `training_version`, independently of schedules. The follow-up passed local
+and CLI generation tests and remains uncommitted. The subsequent user-authorized
+SM-34A live rehearsal found/fixed a branch join, then passed pandas automatic
+and Polars manual approval, child scoring, three-row append/no-op and artifact
+audit. [Live evidence](rehearsals/sm34a_live/README.md). SM-34B is now DONE:
+eight tasks/eight edges, preserved durable phases, shared failure cleanup and
+task-state-guarded score handoff. [Evidence](67-sm34b-simplified-lifecycle-graph.md).
+The new graph passed [live acceptance](rehearsals/sm34b_live/README.md), including
+both engines, manual approval, scoring/no-op and two controlled failures.
+SM-35 is the next local task.
 New generic row predicates, group-aware splitting and data-quality thresholds
 are parked at the user's request.
 See [the operation audit and implementation tasks](62-pre-split-cleaning-and-leakage-plan.md).
@@ -106,8 +118,9 @@ on an existing candidate without retraining or reuploading the model.
 | SM-33H2 | Cleanup artifact evidence and lifecycle replay | SM-33H1 | DONE | Reviewed evidence checks; local suites and one approved serverless run passed both engines, saved-code replay, CV/MLflow, lifecycle and exact 240+3/no-op output identity; [live evidence](62-pre-split-cleaning-and-leakage-plan.md#sm-33h2-live-acceptance-evidence-2026-09-26); committed in d5d2398d |
 | SM-33H3 | All existing nodes in the correct pre-split/preprocessing phase | SM-33H2 | DONE | Local code/review/gates and approved live run848857785722024 passed. Registry-complete node/mode matrix; reuse Core nodes, ordered fixed cleanup and existing dedup, fold-local learned FE, train-only resampling, saved normalization/inference replay, pandas/Polars tests and Python examples; [scope](62-pre-split-cleaning-and-leakage-plan.md#sm-33h3--all-existing-nodes-in-the-correct-phase) |
 | SM-34 | Independent score/train schedules and training windows | SM-33H3 | LOCAL DONE | Independent cron/timezone/pause, holdout/result lag, early MLflow pin; 647 local tests, 63 CLI generation tests, strict dev validation and independent review passed. [Evidence and live limits](65-sm34-schedules-and-window-plan.md); no new live clock/queue run. |
-| SM-34A | Meaningful lifecycle task graph | SM-34 | LOCAL DONE | Shared Core phases and durable MLflow references; manual action branch, real finalization and readable outcomes. 354 relevant / 27 final staged / 223 boundary tests (overlapping), 63 CLI cases and strict dev validation passed; independently reviewed. [Evidence](66-sm34a-visible-lifecycle-tasks.md). Two jobs, no new control tables; live graph acceptance remains unrun. |
-| SM-35 | Multi-metric quality gates and clear thresholds | SM-34A | READY | One selection metric plus optional guardrails; task/domain validation, first-model gate, failed-gate explanations and no probability-threshold confusion |
+| SM-34A | Meaningful lifecycle task graph | SM-34 | DONE | Shared phases and durable MLflow references; live join corrected to NONE_FAILED. Pandas automatic and Polars manual approval both reached child score; each wrote 240 + 3 rows, no-op retained Delta v2, exact initial rows/MLflow evidence verified. [Live evidence](rehearsals/sm34a_live/README.md). Two jobs, no new control tables; clocks paused, clock firing/new-graph rollback/reject not tested. |
+| SM-34B | Simplify the visible lifecycle graph | SM-34A live acceptance | DONE | Eight tasks/eight edges; durable evidence and guarded handoff preserved. Final 735 local tests/16 optional skips plus 63 CLI checks, lint/type/docs/Bundle gates and independent review passed. Both engines, approval, 240+3/no-op, two intentional failures and audit `683054016979330` passed live. [Evidence](67-sm34b-simplified-lifecycle-graph.md), [live receipt](rehearsals/sm34b_live/README.md). |
+| SM-35 | Multi-metric quality gates and clear thresholds | SM-34B | READY | One selection metric plus optional guardrails; task/domain validation, first-model gate, failed-gate explanations and no probability-threshold confusion |
 | SM-36 | Core tuning, model search and optional explainability | SM-35 | WAIT | Guided advanced search on a selected base model; existing hyperparameter_tuner/TuningConfig and shared CV settings; Core spaces/trials/FE, validated budgets, protected holdout and MLflow/inference parity; routing audit in report 58 |
 | SM-36a | Project-owned feature engineering and output rules | SM-33D, SM-33H3 | WAIT | SM-33F delivers single-file custom FE; existing node placement/normalization/dedup moves to H3. Remaining: temporal context/CV policy, keyed scoring exclusions, broader packaging and output rules; optional H3Index/sentence-model execution and custom pre-split value normalization remain open in matrix63. New group-split/predicate/data-quality gates are parked; reports 58/62 |
 | SM-36b | Multiple training branches from one pinned source | SM-36, SM-36a | WAIT | Per-target pipelines/labels/tuning/metrics, linked MLflow runs, reproducible splits and bounded execution; keep multiple models rather than selecting one winner |
@@ -125,6 +138,40 @@ The tasks are sequenced by this table when dependencies allow. SM-43b needs
 actual company settings and access; it must not prevent unrelated local work.
 No new live resources or company deployments are authorized merely by a queue
 status. Existing explicit live authorizations retain their original scope.
+
+## SM-34B local and live closure - 2026-09-26/27
+
+Baseline: `3e92d14a` on `090`; the requested commit includes the pre-existing
+single-training-action/version-selection follow-up. Core lifecycle/runtime/report helpers,
+Bundle YAML/sync/notebooks and their tests/guides now produce eight tasks and
+eight edges. Two jobs, pinned evidence and manual actions are preserved.
+
+Final checks: `python -m pytest` on `test_databricks_lifecycle_tasks.py` passed
+83 tests; the lifecycle-notebook/job-runtime/job-output files passed 81 tests.
+`$env:SKYULF_BUNDLE_CLI_TEST_PROFILE='skyulf'` followed by
+`python -m pytest skyulf-core/tests/integrations/test_databricks_bundle_generation.py -q --tb=short -p no:cacheprovider`
+passed 63. The earlier broad Databricks suite passed 717 with 16 optional
+Spark/Delta skips. Counts overlap. Scoped Ruff/format, full
+`ty check backend skyulf-core/skyulf skyulf-core/tests run_skyulf.py celery_worker.py`,
+wheel build and `databricks bundle validate --strict -t dev --profile skyulf`
+passed. Python 3.12.10 / MLflow 3.16.1 / pandas 2.3.2 / Polars 1.44.1 /
+Databricks CLI 1.17.0. Exact commands and evidence: [report67](67-sm34b-simplified-lifecycle-graph.md).
+
+Independent review reproduced and verified the fix for a notebook failing
+after its promotion receipt: cleanup preserves the committed promotion, while
+task-state checks prevent result publication and scoring. Both engines,
+manual actions, phase failures and stale/foreign/repeated references are
+covered locally. Fresh final verification passed 735 tests with 16 optional
+skips plus the separate 63-case CLI suite, strict docs and applicable hooks.
+
+The user subsequently authorized live testing followed by a commit. Both engines,
+Polars approval, child-score handoff, incremental/no-op scoring, failed fit and
+post-promotion notebook failure passed their acceptance assertions. Audit
+`683054016979330` and the local evidence verifier confirmed complete phase
+receipts, 240+3 predictions, unchanged historical rows, preserved promotion
+and blocked score handoff on failure. [Live record](rehearsals/sm34b_live/README.md).
+The existing two jobs are idle, schedules PAUSED and normal pandas config is
+restored. SM-35 is next; scheduled clocks and company acceptance remain separate.
 
 ## Custom feature engineering and multi-model follow-up
 

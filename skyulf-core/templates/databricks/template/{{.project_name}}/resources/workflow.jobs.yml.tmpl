@@ -7,7 +7,7 @@ resources:
         enabled: true
       parameters:
         - name: lifecycle_action
-          default: {{if eq .retraining_mode "scheduled"}}train_monthly{{else}}train{{end}}
+          default: train
         - name: candidate_version
           default: ""
         - name: expected_champion_version
@@ -66,45 +66,25 @@ resources:
             left: '{{"{{tasks.prepare_request.values.training_requested}}"}}'
             right: "true"
         - <<: *lifecycle_task
-          task_key: train_candidate
+          task_key: train_and_register
           depends_on:
             - task_key: training_requested
               outcome: "true"
           notebook_task:
-            notebook_path: ../src/train_candidate.py
+            notebook_path: ../src/train_and_register.py
             base_parameters:
               <<: *lifecycle_parameters
               reference_json: '{{"{{tasks.prepare_request.values.reference_json}}"}}'
               tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
         - <<: *lifecycle_task
-          task_key: evaluate_and_register
+          task_key: compare_and_decide
           depends_on:
-            - task_key: train_candidate
+            - task_key: train_and_register
           notebook_task:
-            notebook_path: ../src/evaluate_candidate.py
+            notebook_path: ../src/compare_and_decide.py
             base_parameters:
               <<: *lifecycle_parameters
-              reference_json: '{{"{{tasks.train_candidate.values.reference_json}}"}}'
-              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
-        - <<: *lifecycle_task
-          task_key: compare_candidate
-          depends_on:
-            - task_key: evaluate_and_register
-          notebook_task:
-            notebook_path: ../src/compare_candidate.py
-            base_parameters:
-              <<: *lifecycle_parameters
-              reference_json: '{{"{{tasks.evaluate_and_register.values.reference_json}}"}}'
-              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
-        - <<: *lifecycle_task
-          task_key: apply_promotion_policy
-          depends_on:
-            - task_key: compare_candidate
-          notebook_task:
-            notebook_path: ../src/apply_promotion_policy.py
-            base_parameters:
-              <<: *lifecycle_parameters
-              reference_json: '{{"{{tasks.compare_candidate.values.reference_json}}"}}'
+              reference_json: '{{"{{tasks.train_and_register.values.reference_json}}"}}'
               tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
         - <<: *lifecycle_task
           task_key: apply_operator_action
@@ -118,38 +98,26 @@ resources:
               reference_json: '{{"{{tasks.prepare_request.values.reference_json}}"}}'
               tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
         - <<: *lifecycle_task
-          task_key: finalize_training
+          task_key: finalize_and_report
           run_if: ALL_DONE
           depends_on:
-            - task_key: train_candidate
-            - task_key: evaluate_and_register
-            - task_key: compare_candidate
-            - task_key: apply_promotion_policy
-          notebook_task:
-            notebook_path: ../src/finalize_training.py
-            base_parameters:
-              <<: *lifecycle_parameters
-              reference_json: '{{"{{tasks.prepare_request.values.reference_json}}"}}'
-              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
-        - <<: *lifecycle_task
-          task_key: publish_result
-          depends_on:
-            - task_key: apply_promotion_policy
+            - task_key: compare_and_decide
             - task_key: apply_operator_action
-            - task_key: finalize_training
           notebook_task:
-            notebook_path: ../src/publish_result.py
+            notebook_path: ../src/finalize_and_report.py
             base_parameters:
               <<: *lifecycle_parameters
               reference_json: '{{"{{tasks.prepare_request.values.reference_json}}"}}'
               tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
+              training_result_state: '{{"{{tasks.compare_and_decide.result_state}}"}}'
+              operator_result_state: '{{"{{tasks.apply_operator_action.result_state}}"}}'
         - task_key: scoring_requested
           depends_on:
-            - task_key: publish_result
+            - task_key: finalize_and_report
           max_retries: 0
           condition_task:
             op: EQUAL_TO
-            left: '{{"{{tasks.publish_result.values.score_requested}}"}}'
+            left: '{{"{{tasks.finalize_and_report.values.score_requested}}"}}'
             right: "true"
         - task_key: run_batch_scoring
           max_retries: 0

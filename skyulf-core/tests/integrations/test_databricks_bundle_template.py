@@ -2,6 +2,8 @@
 
 import json
 import re
+import runpy
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -166,6 +168,23 @@ def test_window_control_questions_follow_active_data_policies(window, strategy, 
     ).is_valid(values)
     assert holdout_hidden == (strategy != "temporal" or window not in ("auto", "rolling_calendar"))
     assert lag_hidden == (availability == "false")
+
+
+@pytest.mark.parametrize("window", ["auto", "full_snapshot", "fixed_window", "rolling_calendar"])
+@pytest.mark.parametrize("strategy", ["random", "temporal"])
+def test_explicit_boundary_questions_only_apply_to_fixed_windows(window, strategy):
+    """Rolling runs derive boundaries, so setup must not ask for dates it will replace."""
+    from jsonschema import Draft7Validator
+
+    properties = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())[
+        "properties"
+    ]
+    values = {key: spec["default"] for key, spec in properties.items()}
+    values.update(training_window_mode=window, split_strategy=strategy)
+    for field in ("start", "holdout_start", "cutoff"):
+        visible = window == "fixed_window" and (field != "holdout_start" or strategy == "temporal")
+        hidden = Draft7Validator(properties[field]["skip_prompt_if"]).is_valid(values)
+        assert hidden is not visible
 
 
 def _output():
@@ -384,9 +403,21 @@ def test_generated_bundle_has_only_train_and_serialized_score_jobs():
     )
     assert 'if eq .retraining_mode "scheduled"' in template
     assert "pause_status: ${var.retraining_pause_status}" in template
-    assert 'default: {{if eq .retraining_mode "scheduled"}}train_monthly' in template
+    assert "          default: train\n" in template
+    assert "train_monthly" not in template
     assert "quartz_cron_expression: ${var.retraining_cron_expression}" in template
     assert "timezone_id: ${var.retraining_timezone_id}" in template
+
+
+def test_preview_cli_exposes_one_training_action(monkeypatch, capsys):
+    """Offline preview must present the same training action for every trigger."""
+    monkeypatch.setattr(sys, "argv", ["preview.py", "--help"])
+    with pytest.raises(SystemExit) as stopped:
+        runpy.run_path(str(WORKFLOW.with_name("preview.py.tmpl")), run_name="__main__")
+    assert stopped.value.code == 0
+    output = capsys.readouterr().out
+    assert "{score,train}" in output
+    assert "train_monthly" not in output
 
 
 def test_init_exposes_both_model_change_modes_and_editable_training_cadence():

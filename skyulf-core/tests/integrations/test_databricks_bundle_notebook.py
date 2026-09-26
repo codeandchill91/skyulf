@@ -48,9 +48,7 @@ def test_notebook_rejects_invalid_project_before_registry_or_writes(
 
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
-@pytest.mark.parametrize(
-    "action", ["train", "train_monthly", "score", "score_from_approve", "score_from_rollback"]
-)
+@pytest.mark.parametrize("action", ["train", "score", "score_from_approve", "score_from_rollback"])
 def test_notebook_delegates_bound_target_and_selected_action(
     tmp_path, monkeypatch, workflow_config, engine, action
 ):

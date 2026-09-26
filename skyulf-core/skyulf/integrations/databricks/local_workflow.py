@@ -281,10 +281,10 @@ def _training_window_mode(config: dict[str, Any]) -> str:
     return mode
 
 
-def _monthly_training_spec(spark: Any, config: dict[str, Any], now: datetime) -> LocalTrainingSpec:
-    """Pin latest source and the explicitly selected full, fixed or rolling window."""
+def _training_settings(config: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """Resolve data windows independently of how training was triggered."""
     if now.tzinfo is None or now.utcoffset() is None:
-        raise ValueError("Monthly training needs a timezone-aware run instant.")
+        raise ValueError("Training needs a timezone-aware run instant.")
     settings = dict(config)
     mode = _training_window_mode(config)
     if mode == "rolling_calendar":
@@ -308,13 +308,21 @@ def _monthly_training_spec(spark: Any, config: dict[str, Any], now: datetime) ->
             ),
             cutoff=cutoff.isoformat(),
         )
-    if config.get("filter_unavailable_results", False):
+    if config.get("filter_unavailable_results", False) and config.get("result_cutoff") is None:
         settings["result_cutoff"] = (
             now.astimezone(UTC) - timedelta(hours=config.get("result_availability_lag_hours", 0))
         ).isoformat()
-    # Validate all selection policies before contacting the source history.
-    settings["training_version"] = 0
-    spec = _training_spec(settings)
+    # A placeholder allows validation before resolving an unspecified version.
+    if settings.get("training_version") is None:
+        settings["training_version"] = 0
+    return settings
+
+
+def _resolve_training_spec(spark: Any, config: dict[str, Any], now: datetime) -> LocalTrainingSpec:
+    """Pin an explicit or latest snapshot once, using the configured data window."""
+    spec = _training_spec(_training_settings(config, now))
+    if config.get("training_version") is not None:
+        return spec
     table = spec.table
     latest = (
         spark.sql(f"DESCRIBE HISTORY {table}")
@@ -322,12 +330,12 @@ def _monthly_training_spec(spark: Any, config: dict[str, Any], now: datetime) ->
         .orderBy("version", ascending=False)
         .first()
     )
-    if latest is None or type(latest["version"]) is not int:
+    if latest is None or type(latest["version"]) is not int or latest["version"] < 0:
         raise ValueError("Training source has no concrete Delta version.")
     return replace(spec, version=latest["version"])
 
 
-def _monthly_champion_version(config: dict[str, Any]) -> str | None:
+def _current_champion_version(config: dict[str, Any]) -> str | None:
     """Resolve the current champion once while allowing first-model training."""
     try:
         champion = resolve_model(
@@ -462,10 +470,9 @@ def run_action(
             comparison_sha256=comparison_sha256,
             expected_champion_version=expected_champion_version,
         )
-    if action in {"train", "train_monthly"}:
+    if action == "train":
         if experiment_name is None or artifact_path is None:
             raise ValueError("Training needs an experiment and temporary artifact path.")
-        monthly = action == "train_monthly"
         if policy == "automatic" and config.get("quality_threshold") is None:
             raise ValueError("Automatic promotion requires an absolute quality_threshold.")
         cv = LocalCVSpec.from_workflow(config)
@@ -474,11 +481,7 @@ def run_action(
             target_column=config["target_column"],
             event_column=config.get("event_column"),
         )
-        spec = (
-            _monthly_training_spec(spark, config, now or datetime.now(UTC))
-            if monthly
-            else _training_spec(config)
-        )
+        spec = _resolve_training_spec(spark, config, now or datetime.now(UTC))
         if policy == "automatic" or "score_model_selection" in config:
             champion_version = controlled_champion_version(
                 config["model_name"], tracking_uri=tracking_uri, registry_uri=registry_uri
@@ -491,7 +494,7 @@ def run_action(
             ):
                 raise ValueError("champion_version does not match the current champion.")
         else:
-            champion_version = _monthly_champion_version(config)
+            champion_version = _current_champion_version(config)
             expected = config.get("champion_version")
             if expected is not None and str(expected) != champion_version:
                 raise ValueError("champion_version does not match the current champion.")

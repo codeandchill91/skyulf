@@ -5,7 +5,7 @@ from copy import deepcopy
 import pytest
 
 
-@pytest.mark.parametrize("action", ["train", "train_monthly", "score"])
+@pytest.mark.parametrize("action", ["train", "score"])
 def test_config_accepts_exact_window_controls_and_rejects_schedule_fields(workflow_config, action):
     """Data policy belongs in workflow JSON while job clock settings stay in the Bundle."""
     from skyulf.integrations.databricks.workflow_config import validate_workflow_config
@@ -19,7 +19,7 @@ def test_config_accepts_exact_window_controls_and_rejects_schedule_fields(workfl
         validate_workflow_config({**settings, "scoring_mode": "scheduled"}, action=action)
 
 
-@pytest.mark.parametrize("action", ["train", "train_monthly", "score", "approve"])
+@pytest.mark.parametrize("action", ["train", "score", "approve"])
 def test_random_workflow_allows_null_inactive_dates_and_explicit_snapshot(workflow_config, action):
     """Regenerated ordinary-table projects require no time columns or calendar windows."""
     from skyulf.integrations.databricks.workflow_config import validate_workflow_config
@@ -71,7 +71,7 @@ def test_random_stratification_requires_classification_in_workflow(workflow_conf
         validate_workflow_config(settings, action="train")
 
 
-@pytest.mark.parametrize("action", ["train", "train_monthly", "score"])
+@pytest.mark.parametrize("action", ["train", "score"])
 def test_source_date_rules_are_validated_offline(workflow_config, action):
     """Invalid parsing cannot wait until a monthly run has opened its Delta source."""
     from skyulf.integrations.databricks.workflow_config import validate_workflow_config
@@ -148,16 +148,45 @@ def test_invalid_project_settings_are_rejected_offline(workflow_config, changes,
         validate_workflow_config({**workflow_config, **changes}, action="train")
 
 
-@pytest.mark.parametrize("field", ["start", "holdout_start", "cutoff", "training_version"])
-def test_missing_manual_snapshot_is_required_only_for_manual_training(workflow_config, field):
-    """Scoring and saved-evidence actions must not require new manual training dates."""
+@pytest.mark.parametrize("field", ["start", "holdout_start", "cutoff"])
+def test_fixed_window_needs_boundaries_only_for_training(workflow_config, field):
+    """Saved-evidence actions do not require dates, but fixed-window training does."""
     from skyulf.integrations.databricks.workflow_config import validate_workflow_config
 
-    settings = {**workflow_config, field: None}
+    settings = {
+        **workflow_config,
+        "training_window_mode": "fixed_window",
+        "monthly_lookback_months": None,
+        "window_timezone": None,
+        field: None,
+    }
     with pytest.raises(ValueError, match=field):
         validate_workflow_config(settings, action="train")
-    for action in ("score", "approve", "reject", "rollback", "train_monthly"):
+    for action in ("score", "approve", "reject", "rollback"):
         assert validate_workflow_config(settings, action=action)[field] is None
+
+
+def test_train_allows_runtime_version_and_calendar_resolution(workflow_config):
+    """One train action must work without manual pins for rolling data selection."""
+    from skyulf.integrations.databricks.workflow_config import validate_workflow_config
+
+    settings = {
+        **workflow_config,
+        "training_version": None,
+        "start": None,
+        "holdout_start": None,
+        "cutoff": None,
+        "result_cutoff": None,
+    }
+    assert validate_workflow_config(settings, action="train") == settings
+
+
+def test_removed_monthly_action_is_rejected(workflow_config):
+    """Old job definitions must not silently retain different training semantics."""
+    from skyulf.integrations.databricks.workflow_config import validate_workflow_config
+
+    with pytest.raises(ValueError, match="action"):
+        validate_workflow_config(workflow_config, action="train_monthly")
 
 
 def test_core_pipeline_and_task_validation_are_reused(workflow_config):
