@@ -215,14 +215,14 @@ def test_deployed_contract_refuses_json_only_handoff_changes(workflow_config):
 
     with pytest.raises(ValueError, match="redeploy"):
         validate_deployed_contract(
-            workflow_config, {"workflow_contract": "1", "deployed_score_handoff": "disabled"}
+            workflow_config, {"workflow_contract": "2", "deployed_score_handoff": "disabled"}
         )
     with pytest.raises(ValueError, match="regenerate|redeploy"):
         validate_deployed_contract(workflow_config, {})
     assert (
         validate_deployed_contract(
             workflow_config,
-            {"workflow_contract": "1", "deployed_score_handoff": "after_alias_change"},
+            {"workflow_contract": "2", "deployed_score_handoff": "after_alias_change"},
         )
         is None
     )

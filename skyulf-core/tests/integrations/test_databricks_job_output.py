@@ -111,7 +111,7 @@ def test_notebook_renders_summary_and_preserves_machine_result(
     path.write_text(json.dumps(workflow_config))
     values = {
         "config_path": str(path),
-        "workflow_contract": "1",
+        "workflow_contract": "2",
         "deployed_score_handoff": "after_alias_change",
         "catalog": "workspace",
         "input_schema": "test",
@@ -148,5 +148,6 @@ def test_generated_notebook_keeps_report_and_exit_in_separate_cells(entrypoint):
     )
     cells = path.read_text().split("# COMMAND ----------")
     assert len(cells) == 2
-    assert "exit_notebook=False" in cells[0] and "run_notebook(" in cells[0]
+    expected_call = "run_lifecycle_notebook(" if entrypoint == "workflow.py" else "run_notebook("
+    assert "exit_notebook=False" in cells[0] and expected_call in cells[0]
     assert ".notebook.exit(output)" in cells[1]

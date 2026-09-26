@@ -421,7 +421,7 @@ def test_auto_champion_init_exposes_metric_gates_and_reuses_score_job():
     assert _render_default_config()["metric"] == "heldout_rmse"
     jobs = (WORKFLOW.parents[1] / "resources/workflow.jobs.yml.tmpl").read_text(encoding="utf-8")
     assert "job_id: ${resources.jobs.score.id}" in jobs
-    assert "task_key: score_after_lifecycle" in jobs
+    assert "task_key: run_batch_scoring" in jobs
     assert jobs.count("queue:\n        enabled: true") == 2
 
 

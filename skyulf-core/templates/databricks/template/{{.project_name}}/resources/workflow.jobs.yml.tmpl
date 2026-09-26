@@ -23,12 +23,17 @@ resources:
         pause_status: ${var.retraining_pause_status}
 {{end}}
       tasks:
-        - task_key: train
+        - &lifecycle_task
+          task_key: prepare_request
           max_retries: 0
           notebook_task:
             notebook_path: ../src/workflow.py
-            base_parameters:
-              workflow_contract: "1"
+            base_parameters: &lifecycle_parameters
+              workflow_contract: "2"
+              job_id: '{{"{{job.id}}"}}'
+              job_run_id: '{{"{{job.run_id}}"}}'
+              repair_count: '{{"{{job.repair_count}}"}}'
+              execution_count: '{{"{{task.execution_count}}"}}'
               deployed_score_handoff: "{{.score_handoff}}"
               lifecycle_action: '{{"{{job.parameters.lifecycle_action}}"}}'
               candidate_version: '{{"{{job.parameters.candidate_version}}"}}'
@@ -52,17 +57,104 @@ resources:
             - pypi:
                 package: mlflow==3.16.1
 {{end}}
-        - task_key: should_score
+        - task_key: training_requested
           depends_on:
-            - task_key: train
+            - task_key: prepare_request
           max_retries: 0
           condition_task:
             op: EQUAL_TO
-            left: '{{"{{tasks.train.values.score_requested}}"}}'
+            left: '{{"{{tasks.prepare_request.values.training_requested}}"}}'
             right: "true"
-        - task_key: score_after_lifecycle
+        - <<: *lifecycle_task
+          task_key: train_candidate
           depends_on:
-            - task_key: should_score
+            - task_key: training_requested
+              outcome: "true"
+          notebook_task:
+            notebook_path: ../src/train_candidate.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{"{{tasks.prepare_request.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
+        - <<: *lifecycle_task
+          task_key: evaluate_and_register
+          depends_on:
+            - task_key: train_candidate
+          notebook_task:
+            notebook_path: ../src/evaluate_candidate.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{"{{tasks.train_candidate.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
+        - <<: *lifecycle_task
+          task_key: compare_candidate
+          depends_on:
+            - task_key: evaluate_and_register
+          notebook_task:
+            notebook_path: ../src/compare_candidate.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{"{{tasks.evaluate_and_register.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
+        - <<: *lifecycle_task
+          task_key: apply_promotion_policy
+          depends_on:
+            - task_key: compare_candidate
+          notebook_task:
+            notebook_path: ../src/apply_promotion_policy.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{"{{tasks.compare_candidate.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
+        - <<: *lifecycle_task
+          task_key: apply_operator_action
+          depends_on:
+            - task_key: training_requested
+              outcome: "false"
+          notebook_task:
+            notebook_path: ../src/apply_operator_action.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{"{{tasks.prepare_request.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
+        - <<: *lifecycle_task
+          task_key: finalize_training
+          run_if: ALL_DONE
+          depends_on:
+            - task_key: train_candidate
+            - task_key: evaluate_and_register
+            - task_key: compare_candidate
+            - task_key: apply_promotion_policy
+          notebook_task:
+            notebook_path: ../src/finalize_training.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{"{{tasks.prepare_request.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
+        - <<: *lifecycle_task
+          task_key: publish_result
+          depends_on:
+            - task_key: apply_promotion_policy
+            - task_key: apply_operator_action
+            - task_key: finalize_training
+          notebook_task:
+            notebook_path: ../src/publish_result.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{"{{tasks.prepare_request.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
+        - task_key: scoring_requested
+          depends_on:
+            - task_key: publish_result
+          max_retries: 0
+          condition_task:
+            op: EQUAL_TO
+            left: '{{"{{tasks.publish_result.values.score_requested}}"}}'
+            right: "true"
+        - task_key: run_batch_scoring
+          max_retries: 0
+          depends_on:
+            - task_key: scoring_requested
               outcome: "true"
           run_job_task:
             job_id: ${resources.jobs.score.id}
@@ -109,7 +201,7 @@ resources:
           notebook_task:
             notebook_path: ../src/score.py
             base_parameters:
-              workflow_contract: "1"
+              workflow_contract: "2"
               deployed_score_handoff: "{{.score_handoff}}"
               score_model_version: '{{"{{job.parameters.score_model_version}}"}}'
               config_path: ${workspace.file_path}/config/workflow.json

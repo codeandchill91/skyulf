@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..mlflow.promotion import AliasChangeReceipt
-from .job_output import render_bundle_output
+from .job_output import render_bundle_output, render_lifecycle_output
 from .local_approval import resolve_candidate_comparison_digest
 from .local_retraining import LocalCandidateResult
 from .local_workflow import (
@@ -187,6 +187,12 @@ def run_bundle_action(
     if action in {"train", "train_monthly"}:
         options.update(experiment_name=experiment_name, artifact_path=artifact_path)
     result = run_action(spark, config, action, **options)
+    return _bundle_result(config, action, result)
+
+
+def _bundle_result(config: dict[str, Any], action: str, result: Any) -> BundleActionResult:
+    """Derive operator inputs and score handoff only from a completed typed outcome."""
+    _, policy = _workflow_policies(config)
     receipt = result.alias_change if isinstance(result, AutoTrainingOutcome) else result
     score_requested = (
         config["score_handoff"] == "after_alias_change"
@@ -195,6 +201,172 @@ def run_bundle_action(
         and receipt.kind in {"initial", "promotion", "rollback"}
     )
     return BundleActionResult(action, result, score_requested, _next_actions(result, policy))
+
+
+def _read_notebook_config(values: dict[str, str]) -> dict[str, Any]:
+    """Load and bind the project once at the notebook's configuration boundary."""
+    config = json.loads(Path(values["config_path"]).read_text(encoding="utf-8"))
+    required = {"training_table", "score_source_table", "prediction_table", "model_name"}
+    if not isinstance(config, dict) or any(
+        not isinstance(config.get(key), str) for key in required
+    ):
+        raise ValueError(
+            "Workflow configuration must be an object with training_table, "
+            "score_source_table, prediction_table and model_name bindings."
+        )
+    config = resolve_target_config(
+        config,
+        {
+            name: values[name]
+            for name in (
+                "catalog",
+                "input_schema",
+                "output_schema",
+                "metadata_schema",
+                "resource_suffix",
+            )
+        },
+    )
+    validate_deployed_contract(config, values)
+    if config.get("config_version") != 1:
+        raise ValueError("config_version must be 1; migrate and regenerate/redeploy this Bundle.")
+    return config
+
+
+def _notebook_output(
+    payload: dict[str, Any],
+    dbutils: Any,
+    *,
+    render: Callable[[dict[str, Any]], str],
+    display_html: Callable[[str], Any] | None,
+    exit_notebook: bool,
+) -> str:
+    """Publish readable and machine output without retrying completed side effects."""
+    output = json.dumps(payload, default=str, allow_nan=False)
+    if display_html is not None:
+        try:
+            display_html(render(payload))
+        except Exception:  # noqa: BLE001 - display failure must not invite mutation retries
+            logging.getLogger(__name__).warning("Readable output unavailable; see JSON result.")
+            print(json.dumps(payload, indent=2, default=str, allow_nan=False))
+    else:
+        print(json.dumps(payload, indent=2, default=str, allow_nan=False))
+    if exit_notebook:
+        dbutils.notebook.exit(output)
+    return output
+
+
+def _lifecycle_widget_context(values: dict[str, str]) -> dict[str, Any]:
+    """Reject unresolved invocation values and unsupported repairs before loading files."""
+    if values.get("workflow_contract") != "2":
+        raise ValueError("Lifecycle tasks require graph contract 2; regenerate/redeploy together.")
+    if any(values.get(key) for key in ("phase", "task_role", "action", "score_model_version")):
+        raise ValueError("Notebook phase and lifecycle role cannot be overridden by parameters.")
+    for key in ("job_id", "job_run_id"):
+        if not isinstance(values.get(key), str) or not re.fullmatch(r"[1-9][0-9]*", values[key]):
+            raise ValueError(f"{key} must be a resolved Databricks job identity.")
+    if values.get("repair_count") != "0" or values.get("execution_count") != "1":
+        raise ValueError(
+            "Lifecycle repair/retry is unsupported. Inspect prior effects before starting a fresh run."
+        )
+    return {
+        "job_id": values["job_id"],
+        "job_run_id": values["job_run_id"],
+        "repair_count": 0,
+        "execution_count": 1,
+    }
+
+
+def _prepared_notebook_request(
+    values: dict[str, str], preprocessing_path: str | Path | None
+) -> dict[str, Any]:
+    """Validate a new invocation and freeze project Python only for training."""
+    action = values.get("lifecycle_action", "")
+    if action not in {"train", "train_monthly", "approve", "reject", "rollback"}:
+        raise ValueError(
+            "Lifecycle action must be train, train_monthly, approve, reject or rollback."
+        )
+    config = _read_notebook_config(values)
+    if action in {"train", "train_monthly"} and preprocessing_path is not None:
+        from .project import load_project_workflow  # noqa: PLC0415 - training-only project code
+
+        config = load_project_workflow(
+            config, Path(values["config_path"]).parent / preprocessing_path
+        )
+    config = validate_workflow_config(config, action=action)
+    options = _operator_options(action, values)
+    if action in {"approve", "reject"} and not options["comparison_sha256"]:
+        options["comparison_sha256"] = resolve_candidate_comparison_digest(
+            config, options["candidate_version"], action=action
+        )
+    return {
+        "config": config,
+        "action": action,
+        "operator_options": options,
+        "experiment_name": values.get("experiment_name"),
+        "tracking_uri": config.get("tracking_uri", "databricks"),
+    }
+
+
+def run_lifecycle_notebook(
+    spark: Any,
+    dbutils: Any,
+    *,
+    phase: str,
+    display_html: Callable[[str], Any] | None = None,
+    exit_notebook: bool = True,
+    preprocessing_path: str | Path | None = None,
+) -> str:
+    """Execute a fixed lifecycle phase using durable evidence from its predecessor.
+
+    Only prepare reads editable configuration and project Python. Later tasks
+    receive references from this job invocation and load the frozen MLflow
+    evidence. Notebook metadata is a misuse guard, not workspace authorization.
+    """
+    values = dbutils.widgets.getAll()
+    context_values = _lifecycle_widget_context(values)
+    from .lifecycle_tasks import (  # noqa: PLC0415 - shared runtime helpers avoid a module cycle
+        LifecycleContext,
+        run_lifecycle_phase,
+    )
+
+    if phase == "prepare":
+        options = _prepared_notebook_request(values, preprocessing_path)
+    else:
+        try:
+            reference = json.loads(values["reference_json"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Lifecycle task needs its saved predecessor reference.") from exc
+        if not isinstance(reference, dict):
+            raise ValueError("Lifecycle predecessor reference must be a JSON object.")
+        tracking_uri = values.get("tracking_uri")
+        if not isinstance(tracking_uri, str) or not tracking_uri or "{{" in tracking_uri:
+            raise ValueError("Lifecycle task needs the prepared tracking URI.")
+        options = {"reference": reference, "tracking_uri": tracking_uri}
+    outcome = run_lifecycle_phase(
+        spark, phase=phase, context=LifecycleContext(**context_values), **options
+    )
+    dbutils.jobs.taskValues.set(
+        key="reference_json", value=json.dumps(outcome.reference, sort_keys=True)
+    )
+    if phase == "prepare":
+        dbutils.jobs.taskValues.set(key="tracking_uri", value=options["tracking_uri"])
+        dbutils.jobs.taskValues.set(
+            key="training_requested", value=outcome.output["training_requested"]
+        )
+    if phase == "result":
+        dbutils.jobs.taskValues.set(key="score_requested", value=outcome.output["score_requested"])
+    return _notebook_output(
+        outcome.output,
+        dbutils,
+        render=(
+            render_bundle_output
+            if phase == "result"
+            else lambda payload: render_lifecycle_output(phase, payload)
+        ),
+        display_html=display_html,
+        exit_notebook=exit_notebook,
+    )
 
 
 def run_notebook(
@@ -226,30 +398,7 @@ def run_notebook(
         if task_role == "score"
         else values
     )
-    config = json.loads(Path(values["config_path"]).read_text(encoding="utf-8"))
-    required = {"training_table", "score_source_table", "prediction_table", "model_name"}
-    if not isinstance(config, dict) or any(
-        not isinstance(config.get(key), str) for key in required
-    ):
-        raise ValueError(
-            "Workflow configuration must be an object with training_table, score_source_table, prediction_table and model_name bindings."
-        )
-    config = resolve_target_config(
-        config,
-        {
-            name: values[name]
-            for name in (
-                "catalog",
-                "input_schema",
-                "output_schema",
-                "metadata_schema",
-                "resource_suffix",
-            )
-        },
-    )
-    validate_deployed_contract(config, parameters)
-    if config.get("config_version") != 1:
-        raise ValueError("config_version must be 1; migrate and regenerate/redeploy this Bundle.")
+    config = _read_notebook_config(values)
     if (
         preprocessing_path is not None
         and task_role == "lifecycle"
@@ -270,17 +419,12 @@ def run_notebook(
             artifact_path=Path(directory) / "artifact",
         )
     payload = asdict(outcome)
-    output = json.dumps(payload, default=str, allow_nan=False)
     if task_role == "lifecycle":
         dbutils.jobs.taskValues.set(key="score_requested", value=outcome.score_requested)
-    if display_html is not None:
-        try:
-            display_html(render_bundle_output(payload))
-        except Exception:  # noqa: BLE001 - a display failure must not invite alias mutation retries
-            logging.getLogger(__name__).warning("Readable output unavailable; see JSON result.")
-            print(json.dumps(payload, indent=2, default=str, allow_nan=False))
-    else:
-        print(json.dumps(payload, indent=2, default=str, allow_nan=False))
-    if exit_notebook:
-        dbutils.notebook.exit(output)
-    return output
+    return _notebook_output(
+        payload,
+        dbutils,
+        render=render_bundle_output,
+        display_html=display_html,
+        exit_notebook=exit_notebook,
+    )

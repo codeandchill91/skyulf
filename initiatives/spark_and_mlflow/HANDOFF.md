@@ -1,4 +1,24 @@
-# Current handoff: SM-34 LOCAL DONE; SM-35 READY
+# Current handoff: SM-34A LOCAL DONE; SM-35 READY
+
+Requested quality fixes and SM-34 were committed as `676feddf` with DCO after
+647 passing tests, one optional Spark skip, strict docs and applicable hooks.
+No push. Subsequent SM-34A exposes real phases inside the existing two-job
+Bundle: prepare, train, evaluate/register, compare, promotion/operator action,
+finalization and result publication. See report66 for the graph and evidence.
+The final result/next_actions are in `publish_result`, not the old train task.
+
+Local checks: 354 relevant tests, final overlapping 27 real MLflow phase tests,
+223 notebook/config/project boundary tests and 63 real CLI generation cases
+passed. Independent task reviews approved; nested comparison/decision report
+visibility was fixed during review. Full ty, scoped Ruff/format and strict docs
+passed. Strict dev validation used a wheel matching all 250 Core Python files.
+No SM-34A cloud deployment/run occurred; the live workspace still has its old
+graph. Regenerate notebooks and job graph together with the matching wheel
+(graph contract 2; workflow config schema remains 1). No extra Delta tables.
+Lifecycle repair/retry is rejected; inspect unknown effects before a fresh run.
+Scoring recovery remains an independent score run, with no retraining required.
+
+Historical checkpoint notes below retain their original verification boundaries.
 
 Current checkpoint: prior H2/H3 work and fixed-column refactor were committed
 as `d5d2398d` with DCO after 289 passing tests, strict docs and applicable hooks.

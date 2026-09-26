@@ -137,8 +137,8 @@ def test_cli_independent_schedules_preserve_shared_two_job_graph(tmp_path, train
                 assert variables[f"{prefix}_{suffix}"]["default"] == expected
                 assert f"{prefix}_{suffix}" not in config
     tasks = {task["task_key"]: task for task in jobs["train"]["tasks"]}
-    assert tasks["score_after_lifecycle"]["run_job_task"]["job_id"] == "${resources.jobs.score.id}"
-    assert tasks["train"]["max_retries"] == jobs["score"]["tasks"][0]["max_retries"] == 0
+    assert tasks["run_batch_scoring"]["run_job_task"]["job_id"] == "${resources.jobs.score.id}"
+    assert tasks["train_candidate"]["max_retries"] == jobs["score"]["tasks"][0]["max_retries"] == 0
 
 
 @pytest.mark.parametrize("strategy,holdout", [("random", None), ("temporal", 2)])
@@ -470,17 +470,56 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
     for job in jobs.values():
         assert job["max_concurrent_runs"] == 1 and job["queue"]["enabled"] is True
     tasks = {task["task_key"]: task for task in jobs["train"]["tasks"]}
-    assert set(tasks) == {"train", "should_score", "score_after_lifecycle"}
-    assert tasks["should_score"]["depends_on"] == [{"task_key": "train"}]
-    assert tasks["should_score"]["condition_task"] == {
+    assert set(tasks) == {
+        "prepare_request",
+        "training_requested",
+        "train_candidate",
+        "evaluate_and_register",
+        "compare_candidate",
+        "apply_promotion_policy",
+        "apply_operator_action",
+        "finalize_training",
+        "publish_result",
+        "scoring_requested",
+        "run_batch_scoring",
+    }
+    assert tasks["training_requested"]["depends_on"] == [{"task_key": "prepare_request"}]
+    assert tasks["training_requested"]["condition_task"] == {
         "op": "EQUAL_TO",
-        "left": "{{tasks.train.values.score_requested}}",
+        "left": "{{tasks.prepare_request.values.training_requested}}",
         "right": "true",
     }
-    assert tasks["score_after_lifecycle"]["depends_on"] == [
-        {"task_key": "should_score", "outcome": "true"}
+    for task, branch in (("train_candidate", "true"), ("apply_operator_action", "false")):
+        assert tasks[task]["depends_on"] == [{"task_key": "training_requested", "outcome": branch}]
+    for task, previous in (
+        ("evaluate_and_register", "train_candidate"),
+        ("compare_candidate", "evaluate_and_register"),
+        ("apply_promotion_policy", "compare_candidate"),
+    ):
+        assert tasks[task]["depends_on"] == [{"task_key": previous}]
+    assert tasks["finalize_training"]["run_if"] == "ALL_DONE"
+    assert {item["task_key"] for item in tasks["finalize_training"]["depends_on"]} == {
+        "train_candidate",
+        "evaluate_and_register",
+        "compare_candidate",
+        "apply_promotion_policy",
+    }
+    assert {item["task_key"] for item in tasks["publish_result"]["depends_on"]} == {
+        "apply_promotion_policy",
+        "apply_operator_action",
+        "finalize_training",
+    }
+    assert tasks["publish_result"].get("run_if", "ALL_SUCCESS") == "ALL_SUCCESS"
+    assert tasks["scoring_requested"]["depends_on"] == [{"task_key": "publish_result"}]
+    assert tasks["scoring_requested"]["condition_task"] == {
+        "op": "EQUAL_TO",
+        "left": "{{tasks.publish_result.values.score_requested}}",
+        "right": "true",
+    }
+    assert tasks["run_batch_scoring"]["depends_on"] == [
+        {"task_key": "scoring_requested", "outcome": "true"}
     ]
-    assert tasks["score_after_lifecycle"]["run_job_task"] == {
+    assert tasks["run_batch_scoring"]["run_job_task"] == {
         "job_id": "${resources.jobs.score.id}",
         "job_parameters": {"score_model_version": ""},
     }
@@ -493,7 +532,7 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
         "rejection_reason",
         "promotion_receipt_json",
     }
-    parameters = tasks["train"]["notebook_task"]["base_parameters"]
+    parameters = tasks["prepare_request"]["notebook_task"]["base_parameters"]
     for name in defaults:
         assert parameters[name] == "{{job.parameters." + name + "}}"
     score_task = jobs["score"]["tasks"][0]
@@ -503,7 +542,7 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
     score_parameters = score_task["notebook_task"]["base_parameters"]
     assert score_parameters["score_model_version"] == "{{job.parameters.score_model_version}}"
     for notebook_parameters in (parameters, score_parameters):
-        assert notebook_parameters["workflow_contract"] == "1"
+        assert notebook_parameters["workflow_contract"] == "2"
         assert notebook_parameters["deployed_score_handoff"] == handoff
     assert (project / "src/score.py").is_file()
     assert config["score_model_selection"] == selection
@@ -516,11 +555,23 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
     else:
         assert "schedule" not in jobs["train"]
     if compute == "serverless":
-        assert tasks["train"]["environment_key"] == "skyulf"
+        assert tasks["train_candidate"]["environment_key"] == "skyulf"
         assert "job_clusters" not in jobs["train"]
     else:
-        assert tasks["train"]["job_cluster_key"] == "skyulf"
+        assert tasks["train_candidate"]["job_cluster_key"] == "skyulf"
         assert "environments" not in jobs["train"]
+    for task in tasks.values():
+        assert task["max_retries"] == 0
+        if "notebook_task" in task:
+            notebook = task["notebook_task"]
+            assert (project / "resources" / notebook["notebook_path"]).is_file()
+            runtime = notebook["base_parameters"]
+            assert runtime["job_id"] == "{{job.id}}"
+            assert runtime["job_run_id"] == "{{job.run_id}}"
+            assert runtime["repair_count"] == "{{job.repair_count}}"
+            assert runtime["execution_count"] == "{{task.execution_count}}"
+            if task["task_key"] != "prepare_request":
+                assert runtime["tracking_uri"] == "{{tasks.prepare_request.values.tracking_uri}}"
 
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])

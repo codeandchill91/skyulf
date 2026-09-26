@@ -96,6 +96,20 @@ class ChallengerLifecycle:
             )
             self.candidate = candidate
 
+    def restore(self, candidate: ResolvedModel) -> None:
+        """Restore one verified durable candidate for status reporting without nomination."""
+        if not isinstance(candidate, ResolvedModel) or candidate.name != self.model_name:
+            raise ValueError("Restored candidate must belong to the lifecycle model.")
+        fresh = resolve_model(
+            candidate.name,
+            version=candidate.version,
+            tracking_uri=self.tracking_uri,
+            registry_uri=self.registry_uri,
+        )
+        if not candidate.digest or fresh.digest != candidate.digest:
+            raise ValueError("Restored candidate digest differs from registered evidence.")
+        self.candidate = fresh
+
     def failed(self) -> None:
         """Retain the contender and record failure without copying raw exception text."""
         candidate = self.candidate

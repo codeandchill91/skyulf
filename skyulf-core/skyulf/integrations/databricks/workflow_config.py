@@ -392,7 +392,7 @@ def migrate_workflow_config(
 
 def validate_deployed_contract(config: dict[str, Any], parameters: dict[str, str]) -> None:
     """Require notebook/job generation to agree with the project's handoff contract."""
-    if parameters.get("workflow_contract") != "1" or parameters.get(
+    if parameters.get("workflow_contract") != "2" or parameters.get(
         "deployed_score_handoff"
     ) != config.get("score_handoff"):
         raise ValueError(

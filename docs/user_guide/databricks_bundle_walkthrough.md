@@ -287,10 +287,55 @@ for each action. It does not train or create prediction tables by itself.
 
 | Job/task | Purpose |
 | --- | --- |
-| `train` job, `train` task | Runs the selected lifecycle action: train, train_monthly, approve, reject or rollback |
-| `train` job, `should_score` task | Reads the action's boolean `score_requested` output |
-| `train` job, `score_after_lifecycle` task | Calls the existing score job when the condition is true |
+| `prepare_request` | Validates the action and freezes configuration; training also pins Delta data, dates and the expected champion |
+| `training_requested` | Routes train/train_monthly to training, and approve/reject/rollback to the operator branch |
+| `train_candidate` | Reads the pinned data, applies the saved split recipe, runs fold-local CV and fits the pipeline; saves the artifact in MLflow |
+| `evaluate_and_register` | Loads that saved artifact, verifies the same holdout, logs metrics, then registers and nominates the candidate |
+| `compare_candidate` | Compares the concrete candidate and pinned champion on the same holdout |
+| `apply_promotion_policy` | Applies the existing evidence checks and quality gate; promotes automatically or leaves a candidate for review |
+| `apply_operator_action` | Approves, rejects or rolls back saved model evidence without training another model |
+| `finalize_training` | Records successful or failed training in MLflow, including failures in preceding training tasks |
+| `publish_result` | Shows the verified decision, metrics, optional operator inputs and whether scoring was requested |
+| `scoring_requested` | Reads `publish_result`'s boolean `score_requested` value |
+| `run_batch_scoring` | Calls the existing score job when scoring was requested |
 | `score` job, `score` task | Loads the selected model/artifact, predicts and publishes rows |
+
+All rows except the last are tasks inside the **same train job**. These are
+real computation boundaries; they do not create extra jobs or control tables.
+
+```mermaid
+flowchart TD
+    A["prepare_request: validate and pin"] --> B{"training_requested?"}
+    B -->|"Yes"| C["train_candidate"]
+    C --> D["evaluate_and_register"]
+    D --> E["compare_candidate"]
+    E --> F["apply_promotion_policy"]
+    B -->|"No: approve, reject or rollback"| G["apply_operator_action"]
+    C --> H["finalize_training: runs even on failure"]
+    D --> H
+    E --> H
+    F --> H
+    F --> I["publish_result: verified successful branch"]
+    H --> I
+    G --> I
+    I --> J{"scoring_requested?"}
+    J -->|"Yes"| K["run_batch_scoring"]
+    K --> L["Existing score job"]
+```
+
+The inactive branch is excluded. `finalize_training` waits for all training
+tasks, including failed ones, and is excluded for operator actions.
+`publish_result` requires the active branch to succeed. A failed evaluation
+cannot register a model or request scoring. A comparison failure after
+registration retains the candidate with error evidence. A failed score run
+does not undo an already committed promotion or change training's status.
+
+Tasks exchange small MLflow references, not DataFrames or temporary local
+paths. Editing the source table or project files after `prepare_request` does
+not change this invocation's pinned input. The run stores phase evidence in
+MLflow alongside its model artifacts; no additional Delta table is needed.
+For the platform branch and cleanup rules, see
+[Databricks task dependencies](https://docs.databricks.com/aws/en/jobs/run-if).
 
 Each job queues runs and permits one active run. The lifecycle job is the
 single writer for aliases. The fixed score notebook ignores inherited lifecycle parameters and never
@@ -385,7 +430,9 @@ redeployment. Do not switch shared configuration while jobs are running.
 2. Choose **Run with different settings** (also called **Run now with different
    parameters** in some UI versions).
 3. Set `lifecycle_action=train`. Leave all operator-evidence fields empty.
-4. Open the completed run, then the `train` task output.
+4. Open the completed run, then **publish_result** for the final decision.
+   Open **train_candidate**, **evaluate_and_register** or **compare_candidate**
+   to inspect the corresponding work separately.
 5. Read `result`: model version, MLflow run and comparison. Follow the MLflow
    experiment to inspect metrics, artifacts and input provenance.
 
@@ -440,8 +487,9 @@ check. Direct Core approval/rejection APIs still require their explicit digest.
 
 ## Reading the notebook result
 
-Both notebook entrypoints use the shared Core output renderer. The executed
-cell shows an operation summary, champion version change when relevant, metric
+The phase notebooks show their own counts, metrics or status. The
+**publish_result** and **score** notebooks use the shared final output renderer.
+Their executed cell shows an operation summary, champion version change when relevant, metric
 comparison for training, prediction counts for scoring, and **Available action**
 parameter tables. Expand **Technical details (JSON)** for the full result.
 If HTML display is unavailable, the notebook prints indented JSON instead.
@@ -460,14 +508,14 @@ older than today's champion. No new rows or model provenance were written.
 
 ## Where to find `next_actions`
 
-`next_actions` is a key in the completed **train task's JSON output**. It is not
+`next_actions` is a key in the completed **publish_result task's JSON output**. It is not
 a menu, a Catalog alias, an MLflow tag or an extra field in the run settings
 form. You do not need another training run to retrieve it.
 
 1. Close the new-run settings dialog and open the train job's **Runs** tab.
 2. Open the completed training run you want to review.
-3. In that run's task graph/list, click **train**. Do not select `should_score`
-   or `score_after_lifecycle`; those tasks do not contain the comparison.
+3. In that run's task graph/list, click **publish_result**. The condition and
+   score-handoff tasks do not contain the operator parameter tables.
 4. Open the task's executed notebook/output and inspect the **first cell's report**.
    Use the **Available action: approve/reject** parameter table. The equivalent
    `next_actions` JSON is under **Technical details (JSON)** and in the notebook
@@ -515,11 +563,11 @@ Before approving, inspect these values:
 | `result.comparison.eligible` / `reason` | Whether the candidate passed the configured gates and why |
 | `score_requested` | Whether this action requests scoring; false while waiting for manual approval |
 
-For a CLI fallback, use the **train task run ID**, not the multi-task parent run
+For a CLI fallback, use the **publish_result task run ID**, not the multi-task parent run
 ID:
 
 ```powershell
-databricks jobs get-run-output <train-task-run-id> --profile <profile>
+databricks jobs get-run-output <publish-result-task-run-id> --profile <profile>
 ```
 
 The returned `notebook_output.result` is a JSON string containing `result` and
@@ -650,8 +698,12 @@ receipt tags or move controlled aliases directly through Catalog UI.
 
 ## Recovery and schedules
 
-- If training fails, inspect registration/evaluation evidence before retrying;
-  another training attempt can create another candidate version.
+- Staged lifecycle notebooks reject **Repair run** and task retries. Inspect
+  phase output and registration/evaluation evidence before starting a fresh
+  run; another training attempt can create another candidate version. This
+  prevents a repaired task from silently reusing an incomplete mutation.
+- To approve, reject or roll back, start a **new run** of the same train job
+  with the saved operator parameters. Its operator branch bypasses training.
 - If approval/rollback reports an uncertain alias write, reconcile its pending
   evidence before retrying. Do not force a competing alias update.
 - If promotion succeeds and the child score fails, fix scoring and run the

@@ -26,6 +26,7 @@ __all__ = [
     "ResolvedModel",
     "load_registered_bundle",
     "load_registered_local_pipeline",
+    "load_run_local_pipeline",
     "register_model",
     "resolve_model",
 ]
@@ -161,11 +162,35 @@ def load_registered_local_pipeline(
         model = mlflow.models.Model.load(Path(local_path))
     except Exception as exc:  # noqa: BLE001 - translate registry and transport failures
         raise _translate_error(exc, name=resolved.name, version=resolved.version) from exc
+    return _load_local_package(Path(local_path), model, resolved.digest)
+
+
+def load_run_local_pipeline(
+    model_uri: str,
+    *,
+    digest: str,
+    tracking_uri: str | None = None,
+) -> LocalPipelineArtifact:
+    """Load a trusted unregistered run package with the registered loader's checks."""
+    _parse_runs_uri(model_uri)
+    if not isinstance(digest, str) or not digest.strip():
+        raise ValueError("Run artifact requires a concrete local pipeline digest.")
+    mlflow = _require_mlflow()
+    local_path = mlflow.artifacts.download_artifacts(
+        artifact_uri=model_uri,
+        tracking_uri=tracking_uri,
+    )
+    model = mlflow.models.Model.load(Path(local_path))
+    return _load_local_package(Path(local_path), model, digest)
+
+
+def _load_local_package(local_path: Path, model: Any, digest: str) -> LocalPipelineArtifact:
+    """Validate shared run and registry metadata, contained paths and fitted identity."""
     metadata = model.metadata or {}
     if (
         metadata.get("skyulf_artifact_kind") != "local_pipeline"
         or metadata.get("skyulf_execution_scope") != "whole_frame_local"
-        or metadata.get("skyulf_local_pipeline_digest") != resolved.digest
+        or metadata.get("skyulf_local_pipeline_digest") != digest
     ):
         raise ValueError(
             "Packaged Skyulf local pipeline metadata differs from resolved digest or scope."
@@ -177,7 +202,7 @@ def load_registered_local_pipeline(
 
     artifact = load_local_pipeline(artifact_path)
     if (
-        artifact.manifest.pipeline_sha256 != resolved.digest
+        artifact.manifest.pipeline_sha256 != digest
         or artifact.manifest.fitted_engine != metadata.get("skyulf_fitted_engine")
     ):
         raise ValueError("Loaded Skyulf local pipeline identity differs from resolved package.")

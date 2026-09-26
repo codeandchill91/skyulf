@@ -793,37 +793,40 @@ def _training_spec_payload(spec: LocalTrainingSpec, engine: str) -> dict[str, An
     return {**payload, "engine": engine}
 
 
-def train_local_candidate(
-    spark: Any,
+@dataclass(slots=True)
+class _FittedCandidate:
+    """Carry fit-only state inside one process; durable callers persist its evidence."""
+
+    artifact: Any
+    spec: LocalTrainingSpec
+    holdout: Any
+    training_rows: int
+    holdout_rows: int
+    unavailable_labels: int
+    tags: dict[str, str]
+    evidence: dict[str, Any]
+    cv_results: dict[str, Any] | None
+    source_frame: pd.DataFrame
+    evidence_holdout: pd.DataFrame
+
+
+def _candidate_config(
     spec: LocalTrainingSpec,
     config: dict[str, Any],
     *,
-    model_name: str,
-    tracking_uri: str,
-    registry_uri: str,
-    experiment_name: str,
-    run_name: str,
-    artifact_path: str | Path,
+    engine: str,
+    cv: LocalCVSpec,
     metric: str,
     min_improvement: float,
-    engine: Literal["pandas", "polars"] = "pandas",
-    champion_version: str | None = None,
-    quality_threshold: float | None = None,
-    on_registered: Callable[[ResolvedModel], None] | None = None,
-    risk_category: str | None = None,
-    cv: LocalCVSpec | None = None,
-) -> LocalCandidateResult:
-    """Fit, register and compare; optionally notify an explicit lifecycle owner.
-
-    By default no aliases change. The on_registered hook runs after successful
-    registration and before comparison, allowing the caller to nominate a
-    contender without making the generic training service an alias writer.
-    """
+    champion_version: str | None,
+    quality_threshold: float | None,
+    risk_category: str | None,
+) -> dict[str, Any]:
+    """Validate one training request and derive its effective preprocessing recipe."""
     if not isinstance(spec, LocalTrainingSpec):
         raise TypeError("spec must be LocalTrainingSpec.")
     if engine not in ("pandas", "polars"):
         raise ValueError("engine must be pandas or polars.")
-    cv = LocalCVSpec() if cv is None else cv
     if not isinstance(cv, LocalCVSpec):
         raise TypeError("cv must be LocalCVSpec.")
     _pre_split_columns(
@@ -865,6 +868,286 @@ def train_local_candidate(
         or int(champion_version) <= 0
     ):
         raise ValueError("champion_version must be a concrete positive version.")
+    return pipeline_config
+
+
+def _fit_candidate(
+    spark: Any,
+    spec: LocalTrainingSpec,
+    config: dict[str, Any],
+    *,
+    run: Any,
+    pipeline_config: dict[str, Any],
+    artifact_path: str | Path,
+    engine: str,
+    cv: LocalCVSpec,
+    risk_category: str | None,
+) -> _FittedCandidate:
+    """Fit CV and final training rows, persisting selection and provenance evidence."""
+    run.log_config(pipeline_config, artifact_file="skyulf_pipeline_config.json")
+    run.client.log_dict(run.run_id, config, "training_pipeline_config.json")
+    run.log_params({key: getattr(cv, field) for key, field in CV_FIELDS.items()})
+    run.client.log_dict(run.run_id, _training_spec_payload(spec, engine), "training_snapshot.json")
+    frame = read_training_snapshot(spark, spec)
+    temporal_cv = cv.enabled and cv.method == "time_series_split"
+    train_frame, holdout, unavailable = split_labeled_snapshot(
+        frame, spec, keep_training_event=temporal_cv, engine=engine
+    )
+    spec = replace(
+        spec,
+        holdout_key_sha256=holdout.attrs["holdout_key_sha256"],
+        sample_key_sha256=holdout.attrs["sample_key_sha256"],
+    )
+    native_train = pl.from_pandas(train_frame) if engine == "polars" else train_frame
+    native_holdout = pl.from_pandas(holdout) if engine == "polars" else holdout
+    cv_results = evaluate_training_cv(
+        native_train,
+        pipeline_config,
+        cv,
+        target_column=spec.target_column,
+        event_column=spec.event_column if temporal_cv else None,
+    )
+    if temporal_cv:
+        model_columns = [*spec.input_columns, spec.target_column]
+        native_train = (
+            native_train.select(model_columns)
+            if isinstance(native_train, pl.DataFrame)
+            else native_train.loc[:, model_columns]
+        )
+    artifact = fit_local_workflow(
+        pipeline_config,
+        SplitDataset(train=native_train, test=native_train.head(0)),
+        target_column=spec.target_column,
+        artifact_path=artifact_path,
+        max_rows=spec.max_rows,
+        max_bytes=spec.max_bytes,
+    )
+    evidence = build_training_evidence(
+        spec, holdout, project_source_sha256=artifact.manifest.project_source_sha256
+    )
+    spec = replace(
+        spec,
+        survivor_key_sha256=holdout.attrs["survivor_key_sha256"],
+        training_evidence_sha256=evidence_digest(evidence),
+    )
+    return _FittedCandidate(
+        artifact,
+        spec,
+        native_holdout,
+        len(train_frame),
+        len(holdout),
+        unavailable,
+        {},
+        evidence,
+        cv_results,
+        frame,
+        holdout,
+    )
+
+
+def _log_fitted_candidate(
+    run: Any,
+    fitted: _FittedCandidate,
+    config: dict[str, Any],
+    *,
+    engine: str,
+    risk_category: str | None,
+) -> None:
+    """Persist fit evidence after SDK evaluation or before a durable stage boundary."""
+    spec, artifact = fitted.spec, fitted.artifact
+    frame, holdout = fitted.source_frame, fitted.evidence_holdout
+    cv_results, evidence = fitted.cv_results, fitted.evidence
+    unavailable = fitted.unavailable_labels
+    if cv_results is not None:
+        cv_results.update(
+            dataset_id=spec.dataset_id, training_rows=fitted.training_rows, engine=engine
+        )
+        run.client.log_dict(run.run_id, cv_results, "cross_validation.json")
+        run.log_metrics(
+            {
+                f"cv_{name}_{stat}": value
+                for name, statistics in cv_results["aggregated_metrics"].items()
+                for stat, value in statistics.items()
+            }
+        )
+    run.log_params(
+        {
+            "source_table": spec.table,
+            "source_version": spec.version,
+            "training_rows": fitted.training_rows,
+            "holdout_rows": len(holdout),
+            "unavailable_labels": unavailable,
+            "target_column": spec.target_column,
+            "model_digest": artifact.manifest.pipeline_sha256,
+            "engine": engine,
+            "code_version": version("skyulf-core"),
+        }
+    )
+    tags = {
+        "task": "training",
+        "train_data_destination": spec.table,
+        "test_data_destination": spec.table,
+        "train_data_version": str(spec.version),
+        "test_data_version": str(spec.version),
+        "split_strategy": spec.split_strategy,
+        "model_type": str(config["modeling"]["type"]),
+        "candidate_date_tag": datetime.now(UTC).date().isoformat(),
+        "engine": engine,
+    }
+    for tag, field in (
+        ("train_start", "start"),
+        ("test_start", "holdout_start"),
+        ("data_end", "cutoff"),
+        ("result_cutoff", "result_cutoff"),
+    ):
+        value = getattr(spec, field)
+        if value is not None:
+            tags[tag] = value.astimezone(UTC).isoformat()
+    if risk_category:
+        tags["risk_category"] = risk_category
+    run.set_tags(tags)
+    run.client.log_dict(run.run_id, {"dataset_id": spec.dataset_id, **tags}, "training_data.json")
+    run.client.log_dict(
+        run.run_id,
+        {
+            "requested_steps": list(spec.pre_split_steps),
+            "counts": holdout.attrs["pre_split_filter_counts"],
+            "source_rows": len(frame),
+            "eligible_rows": fitted.training_rows + len(holdout),
+            "excluded_rows": sum(
+                item["excluded_rows"] for item in holdout.attrs["pre_split_filter_counts"]
+            ),
+        },
+        "pre_split_filters.json",
+    )
+    run.client.log_dict(run.run_id, evidence, "training_filter_evidence.json")
+    if spec.training_sample_rows is not None:
+        run.client.log_dict(
+            run.run_id,
+            {
+                **frame.attrs.get("training_selection", {}),
+                "sample_key_sha256": spec.sample_key_sha256,
+                "dataset_id": spec.dataset_id,
+            },
+            "training_selection.json",
+        )
+    run.client.log_dict(
+        run.run_id,
+        {
+            "dataset_id": spec.dataset_id,
+            "holdout_key_sha256": spec.holdout_key_sha256,
+            "holdout_rows": len(holdout),
+            "record_key_columns": list(spec.record_key_columns),
+        },
+        "holdout_membership.json",
+    )
+    run.client.log_dict(
+        run.run_id, _training_spec_payload(spec, engine), "candidate_training_spec.json"
+    )
+    fitted.tags = tags
+
+
+def _evaluate_candidate(
+    artifact: Any, native_holdout: Any, *, spec: LocalTrainingSpec, metric: str
+) -> dict[str, float]:
+    """Require a finite initial holdout metric before any registration."""
+    metrics = evaluate_local_holdout(artifact, native_holdout, target_column=spec.target_column)
+    if metric not in metrics or not math.isfinite(metrics[metric]):
+        raise ValueError("Selected metric is unavailable or non-finite on the holdout.")
+    return metrics
+
+
+def _compare_candidate(
+    candidate: ResolvedModel,
+    champion: ResolvedModel | None,
+    native_holdout: Any,
+    *,
+    run: Any,
+    spec: LocalTrainingSpec,
+    model_name: str,
+    metric: str,
+    min_improvement: float,
+    quality_threshold: float | None,
+    tracking_uri: str,
+    registry_uri: str,
+    engine: str,
+    training_rows: int,
+    holdout_rows: int,
+    unavailable: int,
+) -> LocalCandidateResult:
+    """Compare concrete model versions and save the SDK's unchanged result evidence."""
+    report = compare_registered_local_models(
+        candidate,
+        champion,
+        native_holdout,
+        target_column=spec.target_column,
+        dataset_id=spec.dataset_id,
+        metric=metric,
+        min_improvement=min_improvement,
+        max_rows=spec.max_rows,
+        max_bytes=spec.max_bytes,
+        quality_threshold=quality_threshold,
+        tracking_uri=tracking_uri,
+        registry_uri=registry_uri,
+    )
+    run.client.log_dict(run.run_id, asdict(report), "candidate_comparison.json")
+    comparison_sha256 = hashlib.sha256(
+        json.dumps(asdict(report), sort_keys=True, allow_nan=False).encode()
+    ).hexdigest()
+    return LocalCandidateResult(
+        run_id=run.run_id,
+        model_name=model_name,
+        model_version=candidate.version,
+        model_digest=candidate.digest or "",
+        dataset_id=spec.dataset_id,
+        training_rows=training_rows,
+        holdout_rows=holdout_rows,
+        unavailable_labels=unavailable,
+        engine=engine,
+        comparison=report,
+        comparison_sha256=comparison_sha256,
+        holdout_key_sha256=spec.holdout_key_sha256 or "",
+    )
+
+
+def train_local_candidate(
+    spark: Any,
+    spec: LocalTrainingSpec,
+    config: dict[str, Any],
+    *,
+    model_name: str,
+    tracking_uri: str,
+    registry_uri: str,
+    experiment_name: str,
+    run_name: str,
+    artifact_path: str | Path,
+    metric: str,
+    min_improvement: float,
+    engine: Literal["pandas", "polars"] = "pandas",
+    champion_version: str | None = None,
+    quality_threshold: float | None = None,
+    on_registered: Callable[[ResolvedModel], None] | None = None,
+    risk_category: str | None = None,
+    cv: LocalCVSpec | None = None,
+) -> LocalCandidateResult:
+    """Fit, register and compare; optionally notify an explicit lifecycle owner.
+
+    By default no aliases change. The on_registered hook runs after successful
+    registration and before comparison, allowing the caller to nominate a
+    contender without making the generic training service an alias writer.
+    """
+    cv = LocalCVSpec() if cv is None else cv
+    pipeline_config = _candidate_config(
+        spec,
+        config,
+        engine=engine,
+        cv=cv,
+        metric=metric,
+        min_improvement=min_improvement,
+        champion_version=champion_version,
+        quality_threshold=quality_threshold,
+        risk_category=risk_category,
+    )
     champion = (
         resolve_model(
             model_name,
@@ -884,148 +1167,26 @@ def train_local_candidate(
     with track_run(tracking, run_name=run_name) as run:
         if run.run_id is None:
             raise RuntimeError("MLflow did not provide a run ID.")
-        run.log_config(pipeline_config, artifact_file="skyulf_pipeline_config.json")
-        run.client.log_dict(run.run_id, config, "training_pipeline_config.json")
-        run.log_params({key: getattr(cv, field) for key, field in CV_FIELDS.items()})
-        run.client.log_dict(
-            run.run_id, _training_spec_payload(spec, engine), "training_snapshot.json"
-        )
-        frame = read_training_snapshot(spark, spec)
-        temporal_cv = cv.enabled and cv.method == "time_series_split"
-        train_frame, holdout, unavailable = split_labeled_snapshot(
-            frame, spec, keep_training_event=temporal_cv, engine=engine
-        )
-        spec = replace(
+        fitted = _fit_candidate(
+            spark,
             spec,
-            holdout_key_sha256=holdout.attrs["holdout_key_sha256"],
-            sample_key_sha256=holdout.attrs["sample_key_sha256"],
-        )
-        native_train = pl.from_pandas(train_frame) if engine == "polars" else train_frame
-        native_holdout = pl.from_pandas(holdout) if engine == "polars" else holdout
-        cv_results = evaluate_training_cv(
-            native_train,
-            pipeline_config,
-            cv,
-            target_column=spec.target_column,
-            event_column=spec.event_column if temporal_cv else None,
-        )
-        if temporal_cv:
-            model_columns = [*spec.input_columns, spec.target_column]
-            native_train = (
-                native_train.select(model_columns)
-                if isinstance(native_train, pl.DataFrame)
-                else native_train.loc[:, model_columns]
-            )
-        artifact = fit_local_workflow(
-            pipeline_config,
-            SplitDataset(train=native_train, test=native_train.head(0)),
-            target_column=spec.target_column,
+            config,
+            run=run,
+            pipeline_config=pipeline_config,
             artifact_path=artifact_path,
-            max_rows=spec.max_rows,
-            max_bytes=spec.max_bytes,
+            engine=engine,
+            cv=cv,
+            risk_category=risk_category,
         )
-        evidence = build_training_evidence(
-            spec, holdout, project_source_sha256=artifact.manifest.project_source_sha256
+        metrics = _evaluate_candidate(
+            fitted.artifact,
+            fitted.holdout,
+            spec=fitted.spec,
+            metric=metric,
         )
-        spec = replace(
-            spec,
-            survivor_key_sha256=holdout.attrs["survivor_key_sha256"],
-            training_evidence_sha256=evidence_digest(evidence),
-        )
-        metrics = evaluate_local_holdout(artifact, native_holdout, target_column=spec.target_column)
-        if metric not in metrics or not math.isfinite(metrics[metric]):
-            raise ValueError("Selected metric is unavailable or non-finite on the holdout.")
-        if cv_results is not None:
-            cv_results.update(
-                dataset_id=spec.dataset_id, training_rows=len(train_frame), engine=engine
-            )
-            run.client.log_dict(run.run_id, cv_results, "cross_validation.json")
-            run.log_metrics(
-                {
-                    f"cv_{name}_{stat}": value
-                    for name, statistics in cv_results["aggregated_metrics"].items()
-                    for stat, value in statistics.items()
-                }
-            )
-        run.log_params(
-            {
-                "source_table": spec.table,
-                "source_version": spec.version,
-                "training_rows": len(train_frame),
-                "holdout_rows": len(holdout),
-                "unavailable_labels": unavailable,
-                "target_column": spec.target_column,
-                "model_digest": artifact.manifest.pipeline_sha256,
-                "engine": engine,
-                "code_version": version("skyulf-core"),
-            }
-        )
-        tags = {
-            "task": "training",
-            "train_data_destination": spec.table,
-            "test_data_destination": spec.table,
-            "train_data_version": str(spec.version),
-            "test_data_version": str(spec.version),
-            "split_strategy": spec.split_strategy,
-            "model_type": str(config["modeling"]["type"]),
-            "candidate_date_tag": datetime.now(UTC).date().isoformat(),
-            "engine": engine,
-        }
-        for tag, field in (
-            ("train_start", "start"),
-            ("test_start", "holdout_start"),
-            ("data_end", "cutoff"),
-            ("result_cutoff", "result_cutoff"),
-        ):
-            value = getattr(spec, field)
-            if value is not None:
-                tags[tag] = value.astimezone(UTC).isoformat()
-        if risk_category:
-            tags["risk_category"] = risk_category
-        run.set_tags(tags)
-        run.client.log_dict(
-            run.run_id, {"dataset_id": spec.dataset_id, **tags}, "training_data.json"
-        )
-        run.client.log_dict(
-            run.run_id,
-            {
-                "requested_steps": list(spec.pre_split_steps),
-                "counts": holdout.attrs["pre_split_filter_counts"],
-                "source_rows": len(frame),
-                "eligible_rows": len(train_frame) + len(holdout),
-                "excluded_rows": sum(
-                    item["excluded_rows"] for item in holdout.attrs["pre_split_filter_counts"]
-                ),
-            },
-            "pre_split_filters.json",
-        )
-        run.client.log_dict(run.run_id, evidence, "training_filter_evidence.json")
-        if spec.training_sample_rows is not None:
-            run.client.log_dict(
-                run.run_id,
-                {
-                    **frame.attrs.get("training_selection", {}),
-                    "sample_key_sha256": spec.sample_key_sha256,
-                    "dataset_id": spec.dataset_id,
-                },
-                "training_selection.json",
-            )
-        run.client.log_dict(
-            run.run_id,
-            {
-                "dataset_id": spec.dataset_id,
-                "holdout_key_sha256": spec.holdout_key_sha256,
-                "holdout_rows": len(holdout),
-                "record_key_columns": list(spec.record_key_columns),
-            },
-            "holdout_membership.json",
-        )
-        run.client.log_dict(
-            run.run_id, _training_spec_payload(spec, engine), "candidate_training_spec.json"
-        )
+        _log_fitted_candidate(run, fitted, config, engine=engine, risk_category=risk_category)
         run.log_metrics(metrics)
         model_uri = _log_local_model(artifact_path, run_id=run.run_id, tracking_uri=tracking_uri)
-        run_id = run.run_id
     registered = register_model(
         model_uri,
         model_name,
@@ -1033,7 +1194,7 @@ def train_local_candidate(
         registry_uri=registry_uri,
         tags={
             key: value if len(value.encode("utf-8")) <= 256 else "See training_data.json"
-            for key, value in tags.items()
+            for key, value in fitted.tags.items()
         },
     )
     candidate = resolve_model(
@@ -1044,35 +1205,20 @@ def train_local_candidate(
     )
     if on_registered is not None:
         on_registered(candidate)
-    report = compare_registered_local_models(
+    return _compare_candidate(
         candidate,
         champion,
-        native_holdout,
-        target_column=spec.target_column,
-        dataset_id=spec.dataset_id,
+        fitted.holdout,
+        run=run,
+        spec=fitted.spec,
+        model_name=model_name,
         metric=metric,
         min_improvement=min_improvement,
-        max_rows=spec.max_rows,
-        max_bytes=spec.max_bytes,
         quality_threshold=quality_threshold,
         tracking_uri=tracking_uri,
         registry_uri=registry_uri,
-    )
-    run.client.log_dict(run_id, asdict(report), "candidate_comparison.json")
-    comparison_sha256 = hashlib.sha256(
-        json.dumps(asdict(report), sort_keys=True, allow_nan=False).encode()
-    ).hexdigest()
-    return LocalCandidateResult(
-        run_id=run_id,
-        model_name=model_name,
-        model_version=candidate.version,
-        model_digest=candidate.digest or "",
-        dataset_id=spec.dataset_id,
-        training_rows=len(train_frame),
-        holdout_rows=len(holdout),
-        unavailable_labels=unavailable,
         engine=engine,
-        comparison=report,
-        comparison_sha256=comparison_sha256,
-        holdout_key_sha256=holdout.attrs["holdout_key_sha256"],
+        training_rows=fitted.training_rows,
+        holdout_rows=fitted.holdout_rows,
+        unavailable=fitted.unavailable_labels,
     )

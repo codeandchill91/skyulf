@@ -283,7 +283,7 @@ def test_notebook_uses_editable_code_only_for_training(
     )
     values = {
         "config_path": str(path),
-        "workflow_contract": "1",
+        "workflow_contract": "2",
         "deployed_score_handoff": "after_alias_change",
         "lifecycle_action": action,
         "catalog": "workspace",

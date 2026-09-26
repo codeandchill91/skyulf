@@ -207,11 +207,29 @@ clock timezone are separate because they answer different questions.
 
 ## What deployment creates
 
-`src/workflow.py` and `src/score.py` are thin, fixed-role entry points. The
-installed `job_runtime` adapter handles widgets/JSON and calls Core's existing
-`local_workflow` and `prediction_output` services. Customize preprocessing in
+The Python notebooks under `src/` are thin, fixed-phase entry points. The
+installed adapter handles widgets/JSON and calls Core's existing training,
+evaluation, lifecycle and prediction services. Customize preprocessing in
 `src/preprocessing.py` and model/workflow settings in `config/workflow.json`;
 common workflow changes belong in the Skyulf wheel.
+
+The train job exposes the actual work:
+
+```text
+prepare_request -> training_requested
+  training: train_candidate -> evaluate_and_register -> compare_candidate
+            -> apply_promotion_policy -> finalize_training
+  operator: apply_operator_action
+  successful branch -> publish_result -> scoring_requested -> run_batch_scoring
+```
+
+Open `publish_result` for metrics, the final decision and manual action inputs.
+Training tasks share pinned configuration and saved MLflow artifacts, not local
+temporary files. `finalize_training` also runs when an earlier training task
+fails; the result/score path requires success. Failed initial evaluation cannot
+register or promote a model. Approve/reject/rollback take the operator branch
+without fitting another model. There are still exactly two jobs and no new
+control tables.
 
 `bundle deploy` uploads the wheel, notebook and configuration, and creates
 two jobs. It creates **no** Unity Catalog table or registered model.
@@ -376,8 +394,10 @@ not change the saved pin or champion. The lifecycle handoff explicitly clears
 this parameter so it always uses the configured selection policy.
 
 Handoff and Delta publication remain separate operations. If score fails,
-retry the independent score job or repair only the handoff task; do not rerun
-training. An unknown alias write leaves a pending marker requiring reconciliation.
+run the independent score job again; do not rerun training. Staged lifecycle
+notebooks reject repairs and retries. Inspect any uncertain effects first,
+then start a fresh train-job run with the intended operator action. An unknown
+alias write leaves a pending marker requiring reconciliation.
 `previous_challenger` retains displaced candidates and clears if that version
 becomes champion/challenger again. Model versions and evidence remain available.
 

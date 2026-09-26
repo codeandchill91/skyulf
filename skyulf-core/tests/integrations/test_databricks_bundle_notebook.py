@@ -35,7 +35,7 @@ def test_notebook_rejects_invalid_project_before_registry_or_writes(
         "output_schema": "test",
         "metadata_schema": "test",
         "resource_suffix": "",
-        "workflow_contract": "1",
+        "workflow_contract": "2",
         "deployed_score_handoff": "after_alias_change",
     }
     execute = Mock()
@@ -97,7 +97,7 @@ def test_notebook_delegates_bound_target_and_selected_action(
     )
     values = {
         "config_path": str(config_path),
-        "workflow_contract": "1",
+        "workflow_contract": "2",
         "deployed_score_handoff": "disabled",
         "experiment_name": "/test/experiment",
         "catalog": "workspace",
@@ -130,18 +130,21 @@ def test_notebook_delegates_bound_target_and_selected_action(
     spark = object()
     monkeypatch.setattr(job_runtime, "run_action", run)
     task_values = Mock()
-    runpy.run_path(
-        str(path),
-        run_name="__main__",
-        init_globals={
-            "spark": spark,
-            "dbutils": SimpleNamespace(
-                widgets=SimpleNamespace(getAll=lambda: values),
-                notebook=notebook,
-                jobs=SimpleNamespace(taskValues=task_values),
-            ),
-        },
+    dbutils = SimpleNamespace(
+        widgets=SimpleNamespace(getAll=lambda: values),
+        notebook=notebook,
+        jobs=SimpleNamespace(taskValues=task_values),
     )
+    if action == "score":
+        runpy.run_path(
+            str(path), run_name="__main__", init_globals={"spark": spark, "dbutils": dbutils}
+        )
+    else:
+        # The direct notebook SDK remains sequential; generated lifecycle
+        # notebooks now have their own fixed-phase entrypoint coverage.
+        job_runtime.run_notebook(
+            spark, dbutils, task_role="lifecycle", preprocessing_path="../src/preprocessing.py"
+        )
     resolved = {
         **config,
         **{
@@ -206,7 +209,7 @@ def test_score_notebook_retains_override_guards_when_removing_parent_evidence(
     )
     values = {
         "config_path": str(config_path),
-        "workflow_contract": "1",
+        "workflow_contract": "2",
         "deployed_score_handoff": "after_alias_change",
         "catalog": "workspace",
         "input_schema": "test",

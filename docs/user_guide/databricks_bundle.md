@@ -570,13 +570,20 @@ versions; it does not change promotion gates or relabel existing versions.
 
 ## Where the workflow lives
 
-The generated `src/workflow.py` and `src/score.py` are small entrypoints with
-fixed lifecycle and score roles. The installed `job_runtime` adapter reads
-widgets/configuration, validates operator inputs and publishes task values.
-It delegates target resolution and execution to `local_workflow`; training,
-evaluation, registry changes and prediction use existing Core services.
+The generated notebooks are small entrypoints with fixed lifecycle phases or
+the score role. `src/workflow.py` prepares a request; separate tasks fit,
+evaluate/register, compare, apply the promotion policy and publish the result.
+Approve/reject/rollback use a separate branch without training. The installed
+`job_runtime` adapter reads configuration once and exchanges durable MLflow
+references between phases. Computation and lifecycle changes reuse existing
+Core services; no extra control tables or jobs are introduced. See the
+[task graph and operator walkthrough](databricks_bundle_walkthrough.md#the-two-jobs-and-their-tasks).
 `prediction_output` creates output tables and safely switches full-rebuild
 views. Imports do not create a Spark session or cloud resource.
+
+Regenerate and deploy the notebook files and job graph together with the
+matching wheel; graph contract 2 deliberately rejects older generated graphs.
+The workflow configuration schema remains version 1.
 
 Edit preprocessing in `src/preprocessing.py` and model/workflow settings in
 `config/workflow.json`. These remain project choices; common workflow fixes ship in the

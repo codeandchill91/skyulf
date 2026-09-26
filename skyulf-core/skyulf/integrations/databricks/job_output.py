@@ -19,6 +19,87 @@ def _table(headers: tuple[str, ...], rows: list[tuple[Any, ...]]) -> str:
     return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
 
+def _receipt_summary(receipt: dict[str, Any]) -> list[str]:
+    """Describe the actual committed transition without implying a new mutation."""
+    kind = receipt.get("kind")
+    if kind in {"initial", "promotion", "rollback"}:
+        prior = receipt.get("prior_version")
+        return [
+            "<p><strong>Champion changed:</strong> "
+            f"{_text('v' + prior if prior else 'none')} &rarr; "
+            f"{_text('v' + receipt['new_version'])}</p>"
+        ]
+    if kind == "rejection":
+        return ["<p>Candidate rejected. Champion is unchanged.</p>"]
+    return []
+
+
+def _comparison_summary(candidate: dict[str, Any]) -> list[str]:
+    """Present the same selection metric and metric panel in phase and final reports."""
+    comparison = candidate.get("comparison", {})
+    if not comparison:
+        return []
+    challenger = comparison.get("candidate_metrics", {})
+    champion = comparison.get("champion_metrics", {})
+    return [
+        f"<p><strong>Decision metric:</strong> {_text(comparison['metric'])}<br>"
+        f"<strong>Eligible:</strong> {_text(comparison['eligible'])}<br>"
+        f"<strong>Reason:</strong> {_text(comparison['reason'])}</p>",
+        _table(
+            ("Metric", "Candidate", "Champion"),
+            [(key, value, champion.get(key, "No champion")) for key, value in challenger.items()],
+        ),
+    ]
+
+
+def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
+    """Show a completed phase's useful values while keeping technical receipts folded."""
+    titles = {
+        "prepare": "Request validated and data pinned",
+        "train": "Candidate pipeline trained",
+        "evaluate_register": "Candidate evaluated and registered",
+        "compare": "Candidate comparison completed",
+        "decide": "Promotion policy evaluated",
+        "operator": "Operator action completed",
+        "finalize": "Training status recorded",
+    }
+    rows = [
+        (key.replace("_", " ").capitalize(), value)
+        for key, value in payload.items()
+        if isinstance(value, (str, int, float, bool)) and not key.endswith(("sha256", "digest"))
+    ]
+    sections = [f"<h2>{_text(titles.get(phase, phase))}</h2>", _table(("Result", "Value"), rows)]
+    metrics = payload.get("metrics")
+    if isinstance(metrics, dict):
+        sections.append(_table(("Metric", "Value"), list(metrics.items())))
+    candidate = payload.get("candidate", payload)
+    if "candidate" in payload:
+        sections.append(
+            f"<p><strong>Candidate:</strong> {_text(candidate.get('model_name', ''))} "
+            f"v{_text(candidate.get('model_version', ''))}</p>"
+        )
+    sections.extend(_comparison_summary(candidate))
+    receipt = payload.get("alias_change") or payload.get("result") or {}
+    if phase == "operator" and receipt.get("model_name"):
+        sections.append(f"<p><strong>Model:</strong> {_text(receipt['model_name'])}</p>")
+    sections.extend(_receipt_summary(receipt))
+    if phase == "decide" and not payload.get("alias_change"):
+        sections.append(
+            "<p>Awaiting manual review. Champion is unchanged.</p>"
+            if payload.get("promotion_policy") == "manual_approval"
+            else "<p>Champion is unchanged. The candidate did not pass promotion gates.</p>"
+        )
+    if phase in {"decide", "operator"}:
+        sections.append(
+            "<p>Open <strong>publish_result</strong> for the final decision and operator actions.</p>"
+        )
+    raw = json.dumps(payload, indent=2, default=str, allow_nan=False)
+    sections.append(
+        f"<details><summary>Technical details (JSON)</summary><pre>{_text(raw)}</pre></details>"
+    )
+    return '<div style="font-family:system-ui;line-height:1.5">' + "".join(sections) + "</div>"
+
+
 def render_bundle_output(payload: dict[str, Any]) -> str:
     """Present lifecycle, comparison, scoring and next steps with raw JSON in a disclosure.
 
@@ -31,16 +112,7 @@ def render_bundle_output(payload: dict[str, Any]) -> str:
     candidate = result.get("candidate", result)
     receipt = result.get("alias_change") or result
     sections = [f"<h2>{_text(action.replace('_', ' ').title())} completed</h2>"]
-    kind = receipt.get("kind")
-    if kind in {"initial", "promotion", "rollback"}:
-        prior = receipt.get("prior_version")
-        sections.append(
-            "<p><strong>Champion changed:</strong> "
-            f"{_text('v' + prior if prior else 'none')} &rarr; "
-            f"{_text('v' + receipt['new_version'])}</p>"
-        )
-    elif kind == "rejection":
-        sections.append("<p>Candidate rejected. Champion is unchanged.</p>")
+    sections.extend(_receipt_summary(receipt))
     name = candidate.get("model_name") or receipt.get("model_name")
     if name:
         sections.append(f"<p><strong>Model:</strong> {_text(name)}</p>")
@@ -48,24 +120,7 @@ def render_bundle_output(payload: dict[str, Any]) -> str:
         sections.append(
             f"<p><strong>Candidate version:</strong> {_text(candidate.get('model_version'))}</p>"
         )
-        comparison = candidate.get("comparison", {})
-        if comparison:
-            sections.append(
-                f"<p><strong>Decision metric:</strong> {_text(comparison['metric'])}<br>"
-                f"<strong>Eligible:</strong> {_text(comparison['eligible'])}<br>"
-                f"<strong>Reason:</strong> {_text(comparison['reason'])}</p>"
-            )
-            challenger = comparison.get("candidate_metrics", {})
-            champion = comparison.get("champion_metrics", {})
-            sections.append(
-                _table(
-                    ("Metric", "Candidate", "Champion"),
-                    [
-                        (key, value, champion.get(key, "No champion"))
-                        for key, value in challenger.items()
-                    ],
-                )
-            )
+        sections.extend(_comparison_summary(candidate))
     if action == "score":
         if result.get("selected_model_version"):
             sections.append(
