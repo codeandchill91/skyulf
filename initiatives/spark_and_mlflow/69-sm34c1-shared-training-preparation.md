@@ -1,7 +1,8 @@
 # SM-34C1: shared training preparation and registration
 
 Date: 2026-09-27. Baseline: `454d2dad`, branch `090`.
-Status: locally complete, uncommitted. Next: SM-34C2.
+Status: locally complete; committed with C2 as `e16b27e8` on 2026-09-27.
+The verification details below describe the pre-commit checkpoint.
 
 ## Changes and ownership
 

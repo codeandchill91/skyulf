@@ -4,6 +4,7 @@ import importlib
 import importlib.util
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -12,6 +13,145 @@ import pytest
 
 _TRAIN_TASK_STATES = {"training": "success", "operator": "excluded"}
 _OPERATOR_TASK_STATES = {"training": "excluded", "operator": "success"}
+
+
+@pytest.mark.parametrize("engine", ["pandas", "polars"])
+@pytest.mark.parametrize("policy", ["automatic", "manual_approval"])
+def test_grouped_replay_avoids_discarded_source_reads(staged, monkeypatch, engine, policy):
+    """Reuse checked phase metadata while retaining fresh source replay before alias mutation."""
+    import mlflow
+
+    from skyulf.integrations.databricks import local_retraining, local_workflow
+
+    adapter, client, config, _, frame = staged
+    config.update(engine=engine, promotion_policy=policy)
+    counts = Counter()
+    download = mlflow.MlflowClient.download_artifacts
+    package_download = mlflow.artifacts.download_artifacts
+    validate = adapter.validate_training_evidence
+
+    def read_source(spark, spec):
+        """Count the shared external source boundary across both task and decision adapters."""
+        counts["source_reads"] += 1
+        return frame.copy()
+
+    def read_artifact(self, run_id, path, *args, **kwargs):
+        """Count persisted receipt/spec downloads without replacing their real verification."""
+        counts[f"artifact:{path}"] += 1
+        return download(self, run_id, path, *args, **kwargs)
+
+    def read_package(*args, **kwargs):
+        """Count MLflow download API calls, including receipt downloads delegated by the client."""
+        counts["download_api_calls"] += 1
+        return package_download(*args, **kwargs)
+
+    def check_evidence(*args, **kwargs):
+        """Count task evidence validation while preserving the real digest and membership checks."""
+        counts["task_evidence_checks"] += 1
+        return validate(*args, **kwargs)
+
+    monkeypatch.setattr(local_retraining, "read_training_snapshot", read_source)
+    monkeypatch.setattr(local_workflow, "read_training_snapshot", read_source)
+    monkeypatch.setattr(mlflow.MlflowClient, "download_artifacts", read_artifact)
+    monkeypatch.setattr(mlflow.artifacts, "download_artifacts", read_package)
+    monkeypatch.setattr(adapter, "validate_training_evidence", check_evidence)
+    prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
+    counts.clear()
+    registered = _call(staged, "train_register", prepared.reference)
+    train_counts = dict(counts)
+    counts.clear()
+    decided = _call(staged, "compare_decide", registered.reference)
+    decision_counts = dict(counts)
+    print(
+        json.dumps(
+            {
+                "engine": engine,
+                "policy": policy,
+                "train_register": train_counts,
+                "compare_decide": decision_counts,
+            },
+            sort_keys=True,
+        )
+    )
+    assert train_counts["source_reads"] == 2
+    assert decision_counts["source_reads"] == 2
+    assert train_counts["artifact:lifecycle/train.json"] == 3
+    assert decision_counts["artifact:lifecycle/train.json"] == 5
+    assert decision_counts["artifact:lifecycle/prepare.json"] == 5
+    assert decided.reference["phase"] == "decide"
+    assert ("champion" in client.get_registered_model(config["model_name"]).aliases) == (
+        policy == "automatic"
+    )
+
+
+def test_registration_rechecks_train_receipt_after_evaluation(staged, monkeypatch):
+    """Phase-local reuse must not remove the final integrity check before registry mutation."""
+    from skyulf.integrations.databricks import local_retraining
+
+    _, client, config, _, _ = staged
+    prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
+    trained = _call(staged, "train", prepared.reference)
+    run_id = prepared.reference["run_id"]
+    evaluate = local_retraining._evaluate_candidate
+
+    def alter_receipt(*args, **kwargs):
+        """Model an edit while evaluation is running, before registration intent is written."""
+        metrics = evaluate(*args, **kwargs)
+        path = "lifecycle/train.json"
+        receipt = json.loads(
+            Path(client.download_artifacts(run_id, path)).read_text(encoding="utf-8")
+        )
+        receipt["output"]["training_rows"] += 1
+        client.log_dict(run_id, receipt, path)
+        return metrics
+
+    monkeypatch.setattr(local_retraining, "_evaluate_candidate", alter_receipt)
+    with pytest.raises(ValueError, match="digest"):
+        _call(staged, "evaluate_register", trained.reference)
+    assert not client.search_registered_models()
+    assert "skyulf.lifecycle.registration_intent" not in client.get_run(run_id).data.tags
+
+
+@pytest.mark.parametrize("change", ["receipt", "evidence", "membership", "champion"])
+def test_grouped_decision_rechecks_mutations_after_comparison(staged, monkeypatch, change):
+    """Phase-local data must not hide edits or changed aliases before the decision phase."""
+    from skyulf.integrations.mlflow.promotion import AliasConflictError
+
+    adapter, client, config, _, frame = staged
+    prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
+    registered = _call(staged, "train_register", prepared.reference)
+    run_id = prepared.reference["run_id"]
+    compare = adapter._compare
+
+    def change_after_compare(*args, **kwargs):
+        """Inject changes at the grouped task's internal durable phase boundary."""
+        result = compare(*args, **kwargs)
+        if change == "champion":
+            client.set_registered_model_alias(config["model_name"], "champion", "1")
+        elif change == "membership":
+            frame["id"] += 1000
+        else:
+            path = (
+                "lifecycle/train.json" if change == "receipt" else "training_filter_evidence.json"
+            )
+            receipt = json.loads(
+                Path(client.download_artifacts(run_id, path)).read_text(encoding="utf-8")
+            )
+            receipt["tampered"] = True
+            client.log_dict(run_id, receipt, path)
+        return result
+
+    monkeypatch.setattr(adapter, "_compare", change_after_compare)
+    with pytest.raises((ValueError, AliasConflictError)):
+        _call(staged, "compare_decide", registered.reference)
+    run = client.get_run(run_id)
+    assert "skyulf.lifecycle.decide.receipt" not in run.data.tags
+    assert "skyulf.lifecycle.result.receipt" not in run.data.tags
+    aliases = client.get_registered_model(config["model_name"]).aliases
+    if change == "champion":
+        assert str(aliases["champion"]) == "1"
+    else:
+        assert "champion" not in aliases
 
 
 def _module():

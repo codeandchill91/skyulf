@@ -31,12 +31,13 @@ SUPERSEDED = replaced by a later user-directed scope; not a completed feature.
 ## Next session: integration/template simplification
 
 The user resumed the six simplification tasks on 2026-09-27. **SM-34C1/C2 are
-locally complete and uncommitted; start SM-34C3 next**, then follow C4-C6 before
-SM-35. [C1 evidence](69-sm34c1-shared-training-preparation.md) and
-[C2 implementation and 503 passing tests](70-sm34c2-evidence-result-ownership.md).
+committed as `e16b27e8`; C3 is locally complete and uncommitted. Start SM-34C4
+next**, then follow C5-C6 before SM-35. [C1 evidence](69-sm34c1-shared-training-preparation.md),
+[C2 and 503 tests](70-sm34c2-evidence-result-ownership.md), and
+[C3 measured read reduction and 327 tests](71-sm34c3-replay-reuse.md).
 See [scope, file map and acceptance checks](68-integration-template-simplification-plan.md).
 
-Current HEAD: `454d2dad`; graph implementation: `bd49f49e`; readable-output fix:
+Current HEAD: `e16b27e8`; graph implementation: `bd49f49e`; readable-output fix:
 `daa1e1c7`. The latter passed one live rendering test (`6136609106178`), but the
 two persistent jobs were not updated to that wheel. Queue changes do not authorize
 deployment. Preserve existing snapshots, receipts, manual actions and score guards.
@@ -76,7 +77,7 @@ eight tasks/eight edges, preserved durable phases, shared failure cleanup and
 task-state-guarded score handoff. [Evidence](67-sm34b-simplified-lifecycle-graph.md).
 The new graph passed [live acceptance](rehearsals/sm34b_live/README.md), including
 both engines, manual approval, scoring/no-op and two controlled failures.
-SM-34C3 is the next local task; SM-35 follows the C1-C6 simplification sequence.
+SM-34C4 is the next local task; SM-35 follows the C1-C6 simplification sequence.
 New generic row predicates, group-aware splitting and data-quality thresholds
 are parked at the user's request.
 See [the operation audit and implementation tasks](62-pre-split-cleaning-and-leakage-plan.md).
@@ -133,10 +134,10 @@ on an existing candidate without retraining or reuploading the model.
 | SM-34 | Independent score/train schedules and training windows | SM-33H3 | LOCAL DONE | Independent cron/timezone/pause, holdout/result lag, early MLflow pin; 647 local tests, 63 CLI generation tests, strict dev validation and independent review passed. [Evidence and live limits](65-sm34-schedules-and-window-plan.md); no new live clock/queue run. |
 | SM-34A | Meaningful lifecycle task graph | SM-34 | DONE | Shared phases and durable MLflow references; live join corrected to NONE_FAILED. Pandas automatic and Polars manual approval both reached child score; each wrote 240 + 3 rows, no-op retained Delta v2, exact initial rows/MLflow evidence verified. [Live evidence](rehearsals/sm34a_live/README.md). Two jobs, no new control tables; clocks paused, clock firing/new-graph rollback/reject not tested. |
 | SM-34B | Simplify the visible lifecycle graph | SM-34A live acceptance | DONE | Eight tasks/eight edges; durable evidence and guarded handoff preserved. Final 735 local tests/16 optional skips plus 63 CLI checks, lint/type/docs/Bundle gates and independent review passed. Both engines, approval, 240+3/no-op, two intentional failures and audit `683054016979330` passed live. [Evidence](67-sm34b-simplified-lifecycle-graph.md), [live receipt](rehearsals/sm34b_live/README.md). |
-| SM-34C1 | Share training preparation and registration operations | SM-34B | DONE | Shared SDK/task preparation and registration; durable boundaries and compatibility preserved. Local tests, Ruff/type checks and independent review passed; uncommitted, no cloud run. [Evidence](69-sm34c1-shared-training-preparation.md) |
-| SM-34C2 | Clarify evidence and result ownership | SM-34C1 | DONE | Shared saved-spec conversion, verified evidence owner and workflow result builder; task-to-notebook dependency removed with compatibility imports preserved. 503 tests after Sourcery readability follow-up, lint/type checks and independent review passed; uncommitted, no cloud run. [Evidence](70-sm34c2-evidence-result-ownership.md) |
-| SM-34C3 | Avoid redundant replay within a task | SM-34C2 | READY | Measure reads/downloads, reuse verified invocation state, retain fresh mutation checks and corruption/failure guards |
-| SM-34C4 | Reduce initial setup complexity | After SM-34C3 in delivery order | WAIT | Smaller basic setup; preserve advanced config and existing initializer examples; real CLI generation/preview parity |
+| SM-34C1 | Share training preparation and registration operations | SM-34B | DONE | Shared SDK/task preparation and registration; durable boundaries and compatibility preserved. Local tests, Ruff/type checks and independent review passed; committed as e16b27e8, no cloud run. [Evidence](69-sm34c1-shared-training-preparation.md) |
+| SM-34C2 | Clarify evidence and result ownership | SM-34C1 | DONE | Shared saved-spec conversion, verified evidence owner and workflow result builder; task-to-notebook dependency removed with compatibility imports preserved. 503 tests after Sourcery readability follow-up, lint/type checks and independent review passed; committed as e16b27e8, no cloud run. [Evidence](70-sm34c2-evidence-result-ownership.md) |
+| SM-34C3 | Avoid redundant replay within a task | SM-34C2 | DONE | Both engines/policies: compare/decide source reads 3 to 2, client artifact downloads 27 to 25; registration and mutation guards retained. 327 tests, lint/type checks and review passed; uncommitted. [Evidence](71-sm34c3-replay-reuse.md) |
+| SM-34C4 | Reduce initial setup complexity | After SM-34C3 in delivery order | READY | Smaller basic setup; preserve advanced config and existing initializer examples; real CLI generation/preview parity |
 | SM-34C5 | Keep generated projects small and docs consistent | SM-34C4 | WAIT | Short starter README/recipe; central examples; fix stale graph-contract wording; preserve custom-code snapshot/replay |
 | SM-34C6 | Retire redundant notebook lifecycle routing carefully | SM-34C5; ownership from C2 | WAIT | Audit callers, narrow score/fixed-phase adapters, preserve SDK APIs or documented compatibility wrapper; final affected checks |
 | SM-35 | Multi-metric quality gates and clear thresholds | SM-34C6 | WAIT | One selection metric plus optional guardrails; task/domain validation, first-model gate, failed-gate explanations and no probability-threshold confusion |

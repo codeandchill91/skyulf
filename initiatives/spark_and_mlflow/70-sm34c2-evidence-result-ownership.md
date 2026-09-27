@@ -1,7 +1,9 @@
 # SM-34C2: shared evidence and result ownership
 
 Date: 2026-09-27. Baseline: `454d2dad` plus the existing C1 changes.
-Status: locally complete, uncommitted. Next: SM-34C3.
+Status: locally complete; committed with C1 and the Sourcery follow-up as
+`e16b27e8` on 2026-09-27. Applicable commit hooks passed with DCO sign-off.
+The verification details below describe the pre-commit checkpoints. Next: SM-34C3.
 
 ## Ownership map
 

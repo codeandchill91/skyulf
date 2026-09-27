@@ -7,7 +7,7 @@ Repairs and retries are rejected; uncertain outcomes require operator inspection
 
 import json
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -33,6 +33,16 @@ _GROUPED_PHASES = {
     "train_register": ("train", "evaluate_register"),
     "compare_decide": ("compare", "decide"),
 }
+
+
+@dataclass(frozen=True)
+class _ReplayEvidence:
+    """Keep verified fit metadata within one phase; never reuse it across phase calls."""
+
+    artifact: Any
+    spec: training.LocalTrainingSpec
+    fitted: dict[str, Any]
+    filter_evidence: dict[str, Any]
 
 
 def _spec(payload: dict[str, Any], source: str | None) -> training.LocalTrainingSpec:
@@ -94,14 +104,13 @@ def _prepare(
     # JSON normalization also detaches all caller-owned editable dictionaries.
     request = json.loads(json.dumps(request, allow_nan=False))
     experiment = _get_or_create_experiment(store.client, experiment_name)
-    existing = store.client.search_runs(
+    if store.client.search_runs(
         [experiment],
         filter_string=(
             f"tags.`skyulf.lifecycle.job_id` = '{store.context.job_id}' AND "
             f"tags.`skyulf.lifecycle.job_run_id` = '{store.context.job_run_id}'"
         ),
-    )
-    if existing:
+    ):
         raise ValueError(
             "Lifecycle invocation already attempted; inspect evidence and start a fresh run."
         )
@@ -195,8 +204,8 @@ def _train(spark: Any, store: _PhaseStore) -> dict[str, Any]:
     }
 
 
-def _replay(spark: Any, store: _PhaseStore) -> tuple[Any, training.LocalTrainingSpec, Any]:
-    """Load only the saved fit and reconstruct its exact heldout population."""
+def _load_training_evidence(store: _PhaseStore) -> _ReplayEvidence:
+    """Verify saved fit, invocation and filter evidence before any source replay."""
     fitted = store.receipt("train")["output"]
     config = store.request["config"]
     if fitted["model_uri"] != f"runs:/{store.run_id}/model":
@@ -230,11 +239,23 @@ def _replay(spark: Any, store: _PhaseStore) -> tuple[Any, training.LocalTraining
         raise ValueError("Saved training source differs from pinned invocation.")
     evidence = store.read("training_filter_evidence.json")
     validate_training_evidence(evidence, spec, project_source_sha256=source_sha)
-    frame = training.read_training_snapshot(spark, spec)
-    _, holdout, _ = training.split_labeled_snapshot(frame, spec, engine=config["engine"])
-    validate_training_evidence(evidence, spec, project_source_sha256=source_sha, heldout=holdout)
-    native = pl.from_pandas(holdout) if config["engine"] == "polars" else holdout
-    return artifact, spec, native
+    return _ReplayEvidence(artifact, spec, fitted, evidence)
+
+
+def _replay(spark: Any, store: _PhaseStore) -> tuple[_ReplayEvidence, Any]:
+    """Reconstruct exact heldout membership from freshly verified phase evidence."""
+    verified = _load_training_evidence(store)
+    engine = store.request["config"]["engine"]
+    frame = training.read_training_snapshot(spark, verified.spec)
+    _, holdout, _ = training.split_labeled_snapshot(frame, verified.spec, engine=engine)
+    validate_training_evidence(
+        verified.filter_evidence,
+        verified.spec,
+        project_source_sha256=verified.filter_evidence["project_source_sha256"],
+        heldout=holdout,
+    )
+    native = pl.from_pandas(holdout) if engine == "polars" else holdout
+    return verified, native
 
 
 def _lifecycle(store: _PhaseStore) -> ChallengerLifecycle:
@@ -286,13 +307,17 @@ def _registered(store: _PhaseStore) -> Any:
 
 def _evaluate_register(spark: Any, store: _PhaseStore) -> dict[str, Any]:
     """Evaluate first and record mutation intent before registering and nominating."""
-    artifact, spec, holdout = _replay(spark, store)
+    verified, holdout = _replay(spark, store)
+    spec = verified.spec
     config = store.request["config"]
-    metrics = training._evaluate_candidate(artifact, holdout, spec=spec, metric=config["metric"])
+    metrics = training._evaluate_candidate(
+        verified.artifact, holdout, spec=spec, metric=config["metric"]
+    )
     store.run.log_metrics(metrics)
     store.log(
         "lifecycle/initial_evaluation.json", {"metrics": metrics, "dataset_id": spec.dataset_id}
     )
+    # Recheck the chain after evaluation and immediately before registration intent.
     fitted = store.receipt("train")["output"]
     store.client.set_tag(store.run_id, "skyulf.lifecycle.registration_intent", "started")
     registered = training._register_candidate(
@@ -324,7 +349,8 @@ def _evaluate_register(spark: Any, store: _PhaseStore) -> dict[str, Any]:
 
 def _compare(spark: Any, store: _PhaseStore) -> dict[str, Any]:
     """Compare pinned versions through the same registered-model computation as the SDK."""
-    _, spec, holdout = _replay(spark, store)
+    verified, holdout = _replay(spark, store)
+    spec = verified.spec
     config = store.request["config"]
     candidate = _registered(store)
     champion_version = store.request["champion_version"]
@@ -338,7 +364,7 @@ def _compare(spark: Any, store: _PhaseStore) -> dict[str, Any]:
             registry_uri=config.get("registry_uri", "databricks-uc"),
         )
     )
-    fitted = store.receipt("train")["output"]
+    fitted = verified.fitted
     result = training._compare_candidate(
         candidate,
         champion,
@@ -371,11 +397,11 @@ def _decide(spark: Any, store: _PhaseStore) -> dict[str, Any]:
     config = store.request["config"]
     candidate = _candidate(store.receipt("compare")["output"])
     _, policy = workflow._workflow_policies(config)
-    # Replay validates the unregistered package and invocation before the existing
-    # promotion service independently validates the registered model and evidence.
-    _, spec, _ = _replay(spark, store)
+    # Verify invocation/package pins here; the decision service replays the source
+    # and checks membership against registered evidence before any alias mutation.
+    verified = _load_training_evidence(store)
     receipt = workflow._automatic_promotion(
-        spark, config, spec, candidate, promote=policy == "automatic"
+        spark, config, verified.spec, candidate, promote=policy == "automatic"
     )
     return {
         "candidate": asdict(candidate),

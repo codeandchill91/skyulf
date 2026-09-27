@@ -1,7 +1,7 @@
 # Integration and template simplification plan
 
 > Execute one task at a time using `executing-plans`; do not start implementation
-> merely because this plan exists. The user resumed C1 and C2 on 2026-09-27.
+> merely because this plan exists. The user resumed C1-C3 on 2026-09-27.
 
 **Goal:** Reduce duplicated decisions, repeated work and setup/documentation bulk
 without changing the supported training, approval, rollback and scoring contracts.
@@ -16,9 +16,10 @@ Use small explicit helpers rather than a new workflow framework or generic base 
 **Spec:** User-requested review of `skyulf-core/skyulf/integrations/` followed by
 `skyulf-core/templates/`, and the six findings summarized below, 2026-09-27.
 
-**State:** SM-34C1/C2 locally complete, uncommitted. **SM-34C3** is next. Current HEAD is
-`454d2dad`; implementation baseline is `daa1e1c7`, following graph commit `bd49f49e`.
-The intervening gitignore commit is unrelated and must be preserved.
+**State:** SM-34C1/C2 and the Sourcery follow-up are committed as `e16b27e8`.
+**SM-34C3** is locally complete, uncommitted; **SM-34C4** is next.
+Original baseline: `454d2dad`, following `daa1e1c7`
+and graph commit `bd49f49e`. The unrelated gitignore commit is preserved.
 
 ## Findings and constraints
 
@@ -58,7 +59,7 @@ by every earlier one. Complete and verify one slice before starting the next.
 
 ### SM-34C1 — Share training preparation and registration operations
 
-**Status:** DONE locally, uncommitted. [Evidence](69-sm34c1-shared-training-preparation.md).
+**Status:** DONE, committed in `e16b27e8`. [Evidence](69-sm34c1-shared-training-preparation.md).
 
 **Files:** `skyulf-core/skyulf/integrations/databricks/local_workflow.py`,
 `lifecycle_tasks.py`, `local_retraining.py`.
@@ -82,7 +83,7 @@ into a flag-heavy function merely to remove lines.
 
 ### SM-34C2 — Clarify evidence and result ownership
 
-**Status:** DONE locally, uncommitted; 503 tests after the Sourcery readability follow-up,
+**Status:** DONE, committed in `e16b27e8`; 503 tests after the Sourcery readability follow-up,
 lint/type checks and independent review passed. [Evidence](70-sm34c2-evidence-result-ownership.md).
 
 **Files:** `lifecycle_tasks.py`, `local_approval.py`, `local_workflow.py`,
@@ -104,18 +105,19 @@ APIs accidentally. Naming changes alone do not count as completion.
 
 ### SM-34C3 — Avoid redundant replay within a task
 
-**Status:** READY.
+**Status:** DONE locally, uncommitted. 327 tests, lint/type checks and independent
+review passed. [Measured operation counts and guards](71-sm34c3-replay-reuse.md).
 
 **Files:** `lifecycle_tasks.py`, `_lifecycle_state.py`, `local_workflow.py`,
 `local_approval.py`; `test_databricks_lifecycle_tasks.py` and approval tests.
 
-- [ ] Record source reads, artifact downloads and evidence checks for grouped
+- [x] Record source reads, artifact downloads and evidence checks for grouped
   train/register and compare/decide paths using a bounded local reproduction.
-- [ ] Reuse verified state only within the same invocation/task where safe;
+- [x] Reuse verified state only within the same invocation/task where safe;
   avoid deserializing or reading the same immutable data solely to discard it.
-- [ ] Preserve fresh registry checks at model mutation boundaries and durable
+- [x] Preserve fresh registry checks at model mutation boundaries and durable
   checks across tasks. No cross-run/global cache or removal of digest checks.
-- [ ] Compare operation counts before/after and verify tampered evidence,
+- [x] Compare operation counts before/after and verify tampered evidence,
   changed champion, phase failures and post-promotion output failure still fail safely.
 
 **Acceptance:** Measured redundant work removed with unchanged outcomes. If a
@@ -123,7 +125,7 @@ repeat is necessary, document why and retain it; do not weaken checks for speed.
 
 ### SM-34C4 — Reduce initial setup complexity
 
-**Status:** WAIT in delivery order after C3.
+**Status:** READY.
 
 **Files:** `skyulf-core/templates/databricks/databricks_template_schema.json`,
 `template/{{.project_name}}/config/workflow.json.tmpl`, `examples/*.json`,
