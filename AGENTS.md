@@ -27,26 +27,6 @@ Key flows: job lifecycle (upload → ETL → pipeline run → results), hyperpar
 - `refactor-plan` — before any multi-file refactor.
 - `finishing-a-development-branch` — when work on a branch is complete.
 
-## TOON MCP (token-efficient JSON ingestion)
-
-The `toon` MCP server is registered in user scope (`~/.copilot/mcp-config.json`),
-installed at `~/.local/share/toon-mcp` (own venv, stdio). Tools:
-`encode_toon`, `convert_file_to_toon`, `estimate_token_savings`.
-
-**Trip-wire rule:** before reading any JSON larger than ~5 KB / ~100 lines
-that is an array of objects sharing the same keys, convert it with
-`convert_file_to_toon(file_path=..., output_path=...)` and read the written
-file instead of the raw JSON. For command output (`gh api`, coverage reports,
-lockfiles), write it to a temp file first, then convert — never paste large
-JSON into `encode_toon`. Always pass `output_path` for large files so the
-payload doesn't round-trip through context.
-
-**Do NOT use TOON for:** human-facing output (Markdown tables are only ~12%
-larger and more readable), small payloads (< ~5 KB), irregular/nested
-structures, or anything another program parses (configs, fixtures, API
-bodies). Savings are ~35% vs compact JSON / ~44% vs pretty JSON, only on
-uniform record lists.
-
 ## Repo conventions (short form)
 
 - Python deps: `uv pip` only, never plain pip; keep `requirements-*.txt` in sync with `pyproject.toml`.
