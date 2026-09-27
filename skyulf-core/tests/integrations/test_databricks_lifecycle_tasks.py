@@ -214,6 +214,56 @@ def _call(staged, phase, reference=None, **kwargs):
     )
 
 
+@pytest.mark.parametrize("policy", ["automatic", "manual_approval"])
+def test_quality_gates_survive_durable_training_and_approval(staged, policy):
+    """An additional bound must reach saved evidence, version tags and approval policy checks."""
+    from skyulf.integrations.databricks.local_approval import approve_local_candidate
+
+    _, client, config, _, _ = staged
+    config.update(promotion_policy=policy, quality_gates={"heldout_r2": 0.5})
+    prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
+    trained = _call(staged, "train_register", prepared.reference)
+    decision = _call(staged, "compare_decide", trained.reference)
+    candidate = decision.output["candidate"]
+    assert candidate["comparison"]["quality_gates"] == {"heldout_r2": 0.5}
+    saved = json.loads(
+        Path(client.download_artifacts(candidate["run_id"], "quality_gates.json")).read_text()
+    )
+    assert all(gate["passed"] for gate in saved["gates"])
+    tags = client.get_model_version(config["model_name"], "1").tags
+    assert json.loads(tags["quality_gate.heldout_r2"])["threshold"] == 0.5
+    if policy == "manual_approval":
+        options = {
+            "candidate_version": "1",
+            "comparison_sha256": candidate["comparison_sha256"],
+            "expected_champion_version": None,
+        }
+        with pytest.raises(ValueError, match="policy"):
+            approve_local_candidate(
+                None, {**config, "quality_gates": {"heldout_r2": 0.7}}, **options
+            )
+        receipt = approve_local_candidate(None, config, **options)
+        assert receipt.new_version == "1"
+    assert str(client.get_model_version_by_alias(config["model_name"], "champion").version) == "1"
+
+
+def test_secondary_gate_prevents_automatic_first_champion(staged):
+    """First-model automatic promotion cannot ignore a failing secondary error metric."""
+    _, client, config, _, frame = staged
+    frame["target"] += [0, 2] * 10
+    config.update(quality_threshold=100, quality_gates={"heldout_mae": 0})
+    prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
+    trained = _call(staged, "train_register", prepared.reference)
+    decision = _call(staged, "compare_decide", trained.reference)
+    completed = _call(staged, "complete", prepared.reference, task_states=_TRAIN_TASK_STATES)
+    assert decision.output["alias_change"] is None
+    assert completed.output["score_requested"] is False
+    tags = client.get_model_version(config["model_name"], "1").tags
+    assert json.loads(tags["quality_gate.heldout_mae"])["reason"] == "threshold_not_met"
+    assert tags["validation_status"] == "rejected"
+    assert "champion" not in client.get_registered_model(config["model_name"]).aliases
+
+
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
 @pytest.mark.parametrize("custom_filter", [False, True])
 def test_custom_recipes_restore_before_cv_in_separate_task(
@@ -763,8 +813,9 @@ def test_cv_and_fit_failure_never_reach_registration(staged, monkeypatch, operat
 
 def test_failed_quality_gate_is_successful_training_without_score_handoff(staged):
     """A evaluated candidate that misses policy remains a valid result without scoring."""
-    _, client, config, _, _ = staged
-    config["quality_threshold"] = -1.0
+    _, client, config, _, frame = staged
+    frame["target"] += [0, 2] * 10
+    config["quality_threshold"] = 0.0
     prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
     current = prepared
     for phase in ("train", "evaluate_register", "compare", "decide"):
@@ -892,8 +943,9 @@ def test_grouped_context_rejected_before_external_work(staged, monkeypatch, phas
 
 def test_grouped_quality_rejection_completes_without_handoff(staged):
     """Quality rejection remains successful training with no promotion or score request."""
-    _, client, config, _, _ = staged
-    config["quality_threshold"] = -1.0
+    _, client, config, _, frame = staged
+    frame["target"] += [0, 2] * 10
+    config["quality_threshold"] = 0.0
     prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
     registered = _call(staged, "train_register", prepared.reference)
     decision = _call(staged, "compare_decide", registered.reference)

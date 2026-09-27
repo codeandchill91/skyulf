@@ -11,6 +11,7 @@ import pytest
 
 from skyulf.data.dataset import SplitDataset
 from skyulf.integrations.databricks import local_retraining as retraining
+from skyulf.integrations.mlflow.validation import comparison_payload
 
 
 def _spec(**changes):
@@ -274,7 +275,6 @@ def test_random_candidate_approval_replays_saved_membership_after_config_changes
     """Persisted MLflow evidence must preserve date-free approval after later workflow edits."""
     import hashlib
     import json
-    from dataclasses import asdict
     from pathlib import Path
 
     import mlflow
@@ -333,7 +333,9 @@ def test_random_candidate_approval_replays_saved_membership_after_config_changes
         None, config, "train", experiment_name="random", artifact_path=tmp_path / "artifact"
     )
     digest = hashlib.sha256(
-        json.dumps(asdict(candidate.comparison), sort_keys=True, allow_nan=False).encode()
+        json.dumps(
+            comparison_payload(candidate.comparison), sort_keys=True, allow_nan=False
+        ).encode()
     ).hexdigest()
     assert observed_fit_rows == [16]
     cv_path = client.download_artifacts(candidate.run_id, "cross_validation.json", str(tmp_path))

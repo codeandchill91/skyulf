@@ -7,6 +7,33 @@ import pytest
 from skyulf.integrations.databricks import job_runtime
 
 
+def test_comparison_output_explains_each_quality_gate():
+    """Operators must see every failed bound even when the selected metric passes."""
+    from skyulf.integrations.databricks.job_output import render_lifecycle_output
+
+    html = render_lifecycle_output(
+        "compare_decide",
+        {
+            "candidate": {
+                "comparison": {
+                    "metric": "heldout_rmse",
+                    "eligible": False,
+                    "reason": "quality_gate_failed",
+                    "min_improvement": 0.5,
+                    "quality_threshold": 3,
+                    "quality_gates": {"heldout_mae": 1, "heldout_r2": 0.9},
+                    "candidate_metrics": {"heldout_rmse": 2, "heldout_mae": 2},
+                    "champion_metrics": {"heldout_rmse": 3},
+                }
+            }
+        },
+    )
+    visible = html.split("<details>", 1)[0]
+    assert "Failed: threshold not met" in visible and "metric unavailable or non-finite" in visible
+    assert "heldout_r2" in visible and "0.9" in visible
+    assert "Minimum improvement (absolute)" in visible and "0.5" in visible
+
+
 def test_promotion_summary_separates_handoff_request_from_score_completion():
     """A successful alias change must not claim that prediction already succeeded."""
     from skyulf.integrations.databricks.job_output import render_bundle_output

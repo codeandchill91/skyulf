@@ -12,6 +12,7 @@ import pytest
 from skyulf.integrations.databricks import job_runtime, local_retraining, local_workflow
 from skyulf.integrations.databricks.training_dates import TrainingDateSpec
 from skyulf.integrations.mlflow.promotion import AliasConflictError
+from skyulf.integrations.mlflow.validation import comparison_payload
 
 mlflow = pytest.importorskip("mlflow")
 
@@ -134,7 +135,9 @@ def test_manual_approval_reuses_registered_versions_and_replays_receipt(
     def approve(candidate, expected, **changes):
         """Pin the exact saved comparison instead of accepting a latest-model fallback."""
         digest = hashlib.sha256(
-            json.dumps(asdict(candidate.comparison), sort_keys=True, allow_nan=False).encode()
+            json.dumps(
+                comparison_payload(candidate.comparison), sort_keys=True, allow_nan=False
+            ).encode()
         ).hexdigest()
         options: dict[str, Any] = {
             "candidate_version": candidate.model_version,
@@ -183,7 +186,7 @@ def test_manual_approval_reuses_registered_versions_and_replays_receipt(
     assert str(client.get_registered_model(config["model_name"]).aliases["champion"]) == "1"
     with pytest.raises(ValueError, match="digest"):
         approve(second, "1", comparison_sha256="0" * 64)
-    original_report = asdict(second.comparison)
+    original_report = comparison_payload(second.comparison)
     client.log_dict(
         second.run_id, {**original_report, "quality_threshold": 999.0}, "candidate_comparison.json"
     )
@@ -230,7 +233,7 @@ def test_manual_approval_reuses_registered_versions_and_replays_receipt(
     assert str(client.get_registered_model(config["model_name"]).aliases["champion"]) == "2"
 
     tied_digest = hashlib.sha256(
-        json.dumps(asdict(tied.comparison), sort_keys=True, allow_nan=False).encode()
+        json.dumps(comparison_payload(tied.comparison), sort_keys=True, allow_nan=False).encode()
     ).hexdigest()
     if evidence_mode == "saved":
         tied_digest = ""

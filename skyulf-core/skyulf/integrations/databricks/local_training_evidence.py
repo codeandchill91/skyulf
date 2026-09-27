@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
@@ -14,7 +14,7 @@ import pandas as pd
 
 from ...inference.project_code import load_project_module, project_source_digest
 from ..mlflow.registry import load_registered_local_pipeline, resolve_model
-from ..mlflow.validation import ModelComparisonReport
+from ..mlflow.validation import ModelComparisonReport, comparison_digest
 
 if TYPE_CHECKING:
     from .local_retraining import LocalTrainingSpec
@@ -159,9 +159,7 @@ def _validate_comparison_pin(
     report: ModelComparisonReport, name: str, version: str, digest: str
 ) -> None:
     """Bind comparison contents to the exact requested digest and model version."""
-    actual = hashlib.sha256(
-        json.dumps(asdict(report), sort_keys=True, allow_nan=False).encode()
-    ).hexdigest()
+    actual = comparison_digest(report)
     if actual != digest:
         raise ValueError("Saved comparison digest differs from requested approval evidence.")
     if report.model_name != name or report.candidate_version != version:

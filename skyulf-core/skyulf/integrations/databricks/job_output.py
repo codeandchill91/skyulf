@@ -4,6 +4,8 @@ import json
 from html import escape
 from typing import Any
 
+from ..mlflow.validation import evaluate_quality_gates
+
 
 def _text(value: Any) -> str:
     """Escape dynamic registry, parameter and result values before rendering HTML."""
@@ -41,8 +43,10 @@ def _comparison_summary(candidate: dict[str, Any]) -> list[str]:
         return []
     challenger = comparison.get("candidate_metrics", {})
     champion = comparison.get("champion_metrics") or {}
-    return [
+    sections = [
         f"<p><strong>Decision metric:</strong> {_text(comparison['metric'])}<br>"
+        f"<strong>Minimum improvement (absolute):</strong> "
+        f"{_text(comparison.get('min_improvement', 0))}<br>"
         f"<strong>Eligible:</strong> {_text(comparison['eligible'])}<br>"
         f"<strong>Reason:</strong> {_text(comparison['reason'])}</p>",
         _table(
@@ -50,6 +54,33 @@ def _comparison_summary(candidate: dict[str, Any]) -> list[str]:
             [(key, value, champion.get(key, "No champion")) for key, value in challenger.items()],
         ),
     ]
+    gates = evaluate_quality_gates(
+        challenger,
+        comparison["metric"],
+        comparison.get("quality_threshold"),
+        comparison.get("quality_gates"),
+    )
+    if gates:
+        labels = {
+            "passed": "Passed",
+            "threshold_not_met": "Failed: threshold not met",
+            "metric_unavailable_or_non_finite": "Failed: metric unavailable or non-finite on this holdout",
+        }
+        sections.append(
+            _table(
+                ("Quality metric", "Candidate", "Required", "Result"),
+                [
+                    (
+                        gate["metric"],
+                        gate["value"],
+                        f"{'<=' if gate['direction'] == 'minimize' else '>='} {gate['threshold']}",
+                        labels[gate["reason"]],
+                    )
+                    for gate in gates
+                ],
+            )
+        )
+    return sections
 
 
 def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:

@@ -4,7 +4,6 @@ import json
 import subprocess
 import sys
 from contextlib import contextmanager
-from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +18,7 @@ import pytest
 from skyulf.data.dataset import SplitDataset
 from skyulf.integrations.databricks import local_retraining as retraining
 from skyulf.integrations.databricks.training_dates import TrainingDateSpec
+from skyulf.integrations.mlflow.validation import comparison_payload
 
 
 def _spec(**changes):
@@ -227,7 +227,11 @@ def test_failed_candidate_never_mutates_champion(monkeypatch, tmp_path):
 def test_invalid_comparison_request_fails_before_mlflow_publication(monkeypatch, tmp_path):
     """An unusable metric must not create an orphan candidate version."""
     store = f"sqlite:///{(tmp_path / 'registry.db').as_posix()}"
-    monkeypatch.setattr(retraining, "read_training_snapshot", lambda spark, request: _frame())
+    monkeypatch.setattr(
+        retraining,
+        "read_training_snapshot",
+        lambda *args: pytest.fail("invalid metric must fail before reading training data"),
+    )
     monkeypatch.setattr(
         retraining,
         "fit_local_workflow",
@@ -243,7 +247,7 @@ def test_invalid_comparison_request_fails_before_mlflow_publication(monkeypatch,
         "register_model",
         lambda *args, **kwargs: pytest.fail("invalid comparison must not register"),
     )
-    with pytest.raises(ValueError, match="Selected metric"):
+    with pytest.raises(ValueError, match="supported heldout metric"):
         retraining.train_local_candidate(
             None,
             _spec(),
@@ -394,12 +398,13 @@ def test_saved_filter_evidence_replays_after_project_file_changes(monkeypatch, t
         artifact_path=tmp_path / "artifact",
         metric="heldout_rmse",
         min_improvement=0,
+        quality_gates={"heldout_r2": 0.5},
         engine=engine,
         cv=LocalCVSpec(enabled=True, folds=2),
     )
     source.write_text("def build_preprocessing():\n    return []\n", encoding="utf-8")
     digest = hashlib.sha256(
-        json.dumps(asdict(result.comparison), sort_keys=True, allow_nan=False).encode()
+        json.dumps(comparison_payload(result.comparison), sort_keys=True, allow_nan=False).encode()
     ).hexdigest()
     report, saved, saved_engine, evidence = local_approval._load_evidence(
         client, result.model_name, result.model_version, digest
@@ -410,6 +415,7 @@ def test_saved_filter_evidence_replays_after_project_file_changes(monkeypatch, t
         evidence, saved, project_source_sha256=evidence["project_source_sha256"], heldout=holdout
     )
     artifacts = {item.path for item in client.list_artifacts(result.run_id)}
+    assert report.quality_gates == {"heldout_r2": 0.5}
     assert report.dataset_id == saved.dataset_id
     assert "training_filter_evidence.json" in artifacts
     assert "cross_validation.json" in artifacts

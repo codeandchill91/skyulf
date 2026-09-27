@@ -317,6 +317,157 @@ def test_candidate_must_clear_absolute_quality_gate(tmp_path, monkeypatch) -> No
     assert report.reason == "quality_gate_failed"
 
 
+@pytest.mark.parametrize("champion_present", [False, True])
+def test_secondary_gates_explain_all_failures(tmp_path, monkeypatch, champion_present):
+    """A better selection score must not hide failures of other absolute quality bounds."""
+    candidate = _fitted(tmp_path, 2.0)
+    champion = _fitted(tmp_path, 10.0)
+    monkeypatch.setattr(
+        validation,
+        "load_registered_local_pipeline",
+        lambda ref, **kwargs: candidate if ref.version == "2" else champion,
+    )
+    report = validation.compare_registered_local_models(
+        _reference(candidate, "2"),
+        _reference(champion, "1") if champion_present else None,
+        _holdout(),
+        target_column="target",
+        dataset_id="holdout@1",
+        metric="heldout_rmse",
+        min_improvement=0,
+        quality_threshold=3,
+        quality_gates={"heldout_mae": 1, "heldout_r2": 0.9},
+        max_rows=20,
+        max_bytes=10_000,
+    )
+    assert report.eligible is False
+    outcomes = validation.quality_gate_results(report)
+    assert [gate["metric"] for gate in outcomes if not gate["passed"]] == [
+        "heldout_mae",
+        "heldout_r2",
+    ]
+    assert outcomes[0]["passed"] is True
+    assert all(gate["reason"] == "threshold_not_met" for gate in outcomes[1:])
+
+
+@pytest.mark.parametrize(
+    "gates",
+    [
+        {"heldout_mae": -1},
+        {"heldout_r2": 1.1},
+        {"heldout_accuracy": 0.8},
+        {"heldout_mae": True},
+        {"heldout_mae": float("nan")},
+        {"heldout_mae": "1"},
+        {"unknown": 1},
+        {"heldout_rmse": 2},
+        [],
+    ],
+)
+def test_quality_policy_rejects_invalid_guardrails(gates):
+    """Invalid bounds and contradictory selection gates must fail before training I/O."""
+    with pytest.raises(ValueError):
+        validation.validate_quality_policy("heldout_rmse", 3, gates, task="regression")
+
+
+def test_comparison_payload_preserves_historical_single_gate_digest(tmp_path, monkeypatch):
+    """Adding optional guardrails must not invalidate saved single-gate approval receipts."""
+    candidate = _fitted(tmp_path, 0.0)
+    monkeypatch.setattr(validation, "load_registered_local_pipeline", lambda *a, **k: candidate)
+    report = validation.compare_registered_local_models(
+        _reference(candidate, "1"),
+        None,
+        _holdout(),
+        target_column="target",
+        dataset_id="holdout@1",
+        metric="heldout_rmse",
+        min_improvement=0,
+        quality_threshold=1,
+        max_rows=20,
+        max_bytes=10_000,
+    )
+    historical = asdict(report)
+    historical.pop("quality_gates", None)
+    assert validation.comparison_payload(report) == historical
+    assert validation.ModelComparisonReport(**historical) == report
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_binary_probability_gate_uses_actual_holdout_availability(tmp_path, monkeypatch, missing):
+    """AUC may gate a binary classifier only when both held-out classes are available."""
+    frame = pd.DataFrame({"x": [-4.0, -3.0, -2.0, 2.0, 3.0, 4.0], "target": [0, 0, 0, 1, 1, 1]})
+    artifact = fit_local_workflow(
+        {"preprocessing": [], "modeling": {"type": "logistic_regression"}},
+        SplitDataset(train=frame, test=frame.head(0)),
+        target_column="target",
+        artifact_path=tmp_path / "binary",
+        max_rows=10,
+        max_bytes=10_000,
+    )
+    monkeypatch.setattr(validation, "load_registered_local_pipeline", lambda *a, **k: artifact)
+    heldout = pd.DataFrame({"x": [-1.0, 1.0], "target": [0, 0] if missing else [0, 1]})
+    report = validation.compare_registered_local_models(
+        _reference(artifact, "1"),
+        None,
+        heldout,
+        target_column="target",
+        dataset_id="binary@1",
+        metric="heldout_accuracy",
+        min_improvement=0,
+        quality_threshold=0.4,
+        quality_gates={"heldout_roc_auc": 0.8, "heldout_log_loss": 2},
+        max_rows=10,
+        max_bytes=10_000,
+    )
+    gates = {gate["metric"]: gate for gate in validation.quality_gate_results(report)}
+    assert gates["heldout_accuracy"]["passed"] is True
+    assert gates["heldout_roc_auc"]["passed"] is (not missing)
+    assert gates["heldout_log_loss"]["direction"] == "minimize"
+    assert validation.quality_gates_pass(report) is (not missing)
+
+
+@pytest.mark.parametrize(
+    "metric,threshold,valid",
+    [
+        ("heldout_accuracy", 1.1, False),
+        ("heldout_log_loss", -0.1, False),
+        ("heldout_matthews_corrcoef", -1, True),
+        ("heldout_matthews_corrcoef", -1.1, False),
+        ("heldout_f1", 0.8, True),
+        ("heldout_f1", float("inf"), False),
+    ],
+)
+def test_classification_gate_domains(metric, threshold, valid):
+    """Classification bounds follow metric domains, independently of decision thresholds."""
+    if valid:
+        assert validation.validate_quality_policy(metric, threshold, task="classification") is None
+    else:
+        with pytest.raises(ValueError):
+            validation.validate_quality_policy(metric, threshold, task="classification")
+
+
+def test_passing_secondary_gates_do_not_qualify_a_tie(tmp_path, monkeypatch):
+    """Additional guardrails cannot waive the strict selection-metric improvement rule."""
+    artifact = _fitted(tmp_path, 1)
+    monkeypatch.setattr(validation, "load_registered_local_pipeline", lambda *a, **k: artifact)
+    report = validation.compare_registered_local_models(
+        _reference(artifact, "2"),
+        _reference(artifact, "1"),
+        _holdout(),
+        target_column="target",
+        dataset_id="tie@1",
+        metric="heldout_rmse",
+        min_improvement=0,
+        quality_threshold=3,
+        quality_gates={"heldout_mae": 3},
+        max_rows=10,
+        max_bytes=10_000,
+    )
+    assert validation.quality_gates_pass(report) is True
+    assert report.improvement == 0 and not report.eligible
+    assert report.reason == "insufficient_improvement"
+
+
 def test_malformed_resolved_version_fails_before_registry_load(tmp_path, monkeypatch) -> None:
     """A caller-built reference with a non-string version must fail clearly."""
     candidate = _fitted(tmp_path, 0.0)

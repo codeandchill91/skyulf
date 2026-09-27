@@ -859,6 +859,48 @@ receipts; an ineligible candidate leaves champion unchanged. The train job
 calls the existing score job only after a champion transition when handoff is
 enabled. No third job or control table is added.
 
+### Additional quality gates
+
+Keep one selection `metric`. Optionally add `quality_gates` directly to
+`config/workflow.json`; no extra initializer question is needed. For example,
+merge these regression policy fields into your existing configuration:
+
+```json
+{
+  "metric": "heldout_rmse",
+  "quality_threshold": 5.0,
+  "min_improvement": 0.2,
+  "quality_gates": {"heldout_mae": 3.0, "heldout_r2": 0.7}
+}
+```
+
+These illustrative bounds require RMSE <= 5, MAE <= 3 and R2 >= 0.7.
+Choose bounds appropriate to your target's units and business requirements;
+generated projects keep the quality threshold unset. Every bound must pass.
+For later champions, RMSE must additionally improve by at least **0.2 absolute
+units** on the same holdout. A tie never qualifies, even with minimum improvement 0.
+The first champion still needs an explicit selection-metric quality threshold.
+
+For classification, a policy might select `heldout_f1` with threshold 0.8 and
+add `{"heldout_recall": 0.9, "heldout_log_loss": 0.5}`. Classification score
+bounds are in [0, 1], except Matthews correlation [-1, 1]; error/loss bounds
+are nonnegative, while R2/explained variance may be negative but cannot exceed 1.
+The existing metric definition determines whether a lower or higher value wins.
+Use weighted metrics for multiclass models. An unavailable metric, such as
+binary ROC AUC on a one-class holdout, fails its gate; it is never silently ignored.
+These bounds do **not** set classification probability decision thresholds or tune them.
+
+The comparison/final notebook reports show each bound, observed value and
+failure reason. MLflow retains the policy in `candidate_comparison.json`, all
+gate outcomes in `quality_gates.json`, and per-gate version tags.
+Version tags identify their event; use
+`quality_gate_event` to distinguish current gates from retained older outcomes.
+Approval requires the saved policy unchanged and re-evaluates it before changing aliases.
+Omitting `quality_gates` preserves the single-gate policy and historical receipt
+digests. SDK callers should use the returned `comparison_sha256`; when explicitly
+serializing a report for evidence, use `comparison_payload`/`comparison_digest`
+from `skyulf.integrations.mlflow.validation` instead of hashing `dataclasses.asdict`.
+
 In both modes, registration nominates `@challenger` before comparison. A tied
 or worse candidate retains that alias with `validation_status=rejected` and
 a reason; comparison errors retain it with `validation_status=error`.

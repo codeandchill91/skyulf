@@ -1,8 +1,5 @@
 """Explicit operator rejection of an evaluated, registered challenger."""
 
-import hashlib
-import json
-from dataclasses import asdict
 from uuid import uuid4
 
 from .promotion import (
@@ -20,7 +17,7 @@ from .promotion import (
     alias_resource_id,
 )
 from .registry import _make_client, _require_mlflow
-from .validation import ModelComparisonReport
+from .validation import ModelComparisonReport, comparison_digest
 
 
 def reject_candidate(
@@ -45,9 +42,7 @@ def reject_candidate(
     if expected_champion_version != report.champion_version:
         raise ValueError("Expected champion must match the rejected comparison.")
     _admission(admission, registry_uri)
-    digest = hashlib.sha256(
-        json.dumps(asdict(report), sort_keys=True, allow_nan=False).encode()
-    ).hexdigest()
+    digest = comparison_digest(report)
     client = _make_client(_require_mlflow(), tracking_uri, registry_uri)
     name = report.model_name
     version = report.candidate_version

@@ -31,7 +31,14 @@ from ...preprocessing.split import DataSplitter
 from ...registry import NodeRegistry
 from ..mlflow.registry import ResolvedModel, register_model, resolve_model
 from ..mlflow.tracking import TrackingConfig, track_run
-from ..mlflow.validation import ModelComparisonReport, compare_registered_local_models
+from ..mlflow.validation import (
+    ModelComparisonReport,
+    compare_registered_local_models,
+    comparison_digest,
+    comparison_payload,
+    quality_gate_results,
+    validate_quality_policy,
+)
 from ._contracts import column_name, table_name
 from .local_batch import _frame_bytes, fit_local_workflow
 from .local_cv import CV_FIELDS, LocalCVSpec, evaluate_training_cv
@@ -278,6 +285,122 @@ class LocalTrainingSpec:
         return f"{self.table}@{self.version}/{self.split_strategy}/{digest}"
 
 
+def _missing_row_filter_columns(params: dict[str, Any]) -> list[str]:
+    """Require an explicit subset and bounded missing-value filter thresholds."""
+    subset = params.get("subset")
+    if not isinstance(subset, list) or not subset or any(not isinstance(c, str) for c in subset):
+        raise ValueError("pre_split_steps DropMissingRows requires explicit subset columns.")
+    if params.get("how", "any") not in ("any", "all") or set(params) - {
+        "subset",
+        "how",
+        "threshold",
+        "missing_threshold",
+    }:
+        raise ValueError("pre_split_steps DropMissingRows has invalid row-filter params.")
+    threshold = params.get("threshold")
+    if threshold is not None and (type(threshold) is not int or not 0 <= threshold <= len(subset)):
+        raise ValueError("pre_split_steps threshold must be an integer from 0 to subset size.")
+    missing_threshold = params.get("missing_threshold")
+    if missing_threshold is not None and (
+        type(missing_threshold) not in (int, float)
+        or not math.isfinite(missing_threshold)
+        or not 0 <= missing_threshold <= 100
+    ):
+        raise ValueError("pre_split_steps missing_threshold must be between 0 and 100.")
+    return subset
+
+
+def _validate_manual_limits(limit: dict[str, Any]) -> None:
+    """Reject unknown, non-finite or reversed manual bounds for a named column."""
+    if set(limit) - {"lower", "upper"} or not any(
+        key in limit and limit[key] is not None for key in ("lower", "upper")
+    ):
+        raise ValueError("pre_split_steps ManualBounds requires lower or upper.")
+    for value in limit.values():
+        if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
+            raise ValueError("pre_split_steps ManualBounds requires finite numeric bounds.")
+    if (
+        limit.get("lower") is not None
+        and limit.get("upper") is not None
+        and limit["lower"] > limit["upper"]
+    ):
+        raise ValueError("pre_split_steps ManualBounds lower must not exceed upper.")
+
+
+def _manual_bounds_columns(params: dict[str, Any]) -> list[str]:
+    """Validate each explicit column bound before returning its source dependencies."""
+    bounds = params.get("bounds")
+    if set(params) - {"bounds"}:
+        raise ValueError("pre_split_steps ManualBounds supports only bounds.")
+    if not isinstance(bounds, dict) or not bounds:
+        raise ValueError("pre_split_steps ManualBounds requires explicit bounds.")
+    for column, limit in bounds.items():
+        if not isinstance(column, str) or not isinstance(limit, dict) or not limit:
+            raise ValueError("pre_split_steps ManualBounds requires named column bounds.")
+        _validate_manual_limits(limit)
+    return list(bounds)
+
+
+def _fixed_pre_split_columns(
+    step: dict[str, Any], protected: tuple[str | None, ...]
+) -> tuple[str, ...]:
+    """Admit fixed edits only when they leave record keys and source times intact."""
+    fixed = fixed_columns(step)
+    protected_names = {name.casefold() for name in protected if name is not None}
+    if any(name.casefold() in protected_names for name in fixed):
+        raise ValueError("pre_split_steps cannot write protected record keys or source time.")
+    return fixed
+
+
+def _pre_split_step_columns(
+    step: dict[str, Any],
+    index: int,
+    *,
+    custom_filter: bool,
+    protected: tuple[str | None, ...],
+) -> tuple[str, ...] | list[str]:
+    """Apply the column contract for one admitted fixed edit or row filter."""
+    step_type = step["transformer"]
+    params = step.get("params", {})
+    if step_type in FIXED_TYPES:
+        return _fixed_pre_split_columns(step, protected)
+    if step_type == "DropMissingRows":
+        return _missing_row_filter_columns(params)
+    if step_type == "ManualBounds":
+        return _manual_bounds_columns(params)
+    if step_type == "Deduplicate":
+        return deduplicate_columns(step)
+    if custom_filter:
+        return custom_filter_columns(step)
+    raise ValueError(f"pre_split_steps[{index}] permits only fixed normalization or row filters.")
+
+
+def _validate_pre_split_step(
+    step: Any, index: int, target_column: str, protected: tuple[str | None, ...]
+) -> tuple[str, ...] | list[str]:
+    """Reject learned or malformed steps before accepting their source dependencies."""
+    if not isinstance(step, dict) or not isinstance(step.get("name"), str) or not step["name"]:
+        raise ValueError(f"pre_split_steps[{index}] requires a name.")
+    step_type = step.get("transformer")
+    params = step.get("params", {})
+    if not isinstance(params, dict) or not isinstance(step_type, str):
+        raise ValueError(f"pre_split_steps[{index}] requires a Core transformer and params.")
+    custom_filter = is_registered_project_step(step_type)
+    if (
+        step_type != "Deduplicate"
+        and not custom_filter
+        and step_learns_from_data(step_type, params, target_column=target_column)
+    ):
+        raise ValueError(f"pre_split_steps[{index}] cannot learn from data before split.")
+    columns = _pre_split_step_columns(step, index, custom_filter=custom_filter, protected=protected)
+    allowed_fields = {"name", "transformer", "params"}
+    if custom_filter:
+        allowed_fields.add("pre_split")
+    if set(step) - allowed_fields:
+        raise ValueError(f"pre_split_steps[{index}] contains unsupported step fields.")
+    return columns
+
+
 def _pre_split_columns(
     steps: Any, target_column: str, protected: tuple[str | None, ...] = ()
 ) -> tuple[str, ...]:
@@ -286,99 +409,7 @@ def _pre_split_columns(
         raise ValueError("pre_split_steps must be an ordered sequence of Core steps.")
     columns: list[str] = []
     for index, step in enumerate(steps, 1):
-        if not isinstance(step, dict) or not isinstance(step.get("name"), str) or not step["name"]:
-            raise ValueError(f"pre_split_steps[{index}] requires a name.")
-        step_type = step.get("transformer")
-        params = step.get("params", {})
-        if not isinstance(params, dict) or not isinstance(step_type, str):
-            raise ValueError(f"pre_split_steps[{index}] requires a Core transformer and params.")
-        custom_filter = is_registered_project_step(step_type)
-        if (
-            step_type != "Deduplicate"
-            and not custom_filter
-            and step_learns_from_data(step_type, params, target_column=target_column)
-        ):
-            raise ValueError(f"pre_split_steps[{index}] cannot learn from data before split.")
-        if step_type in FIXED_TYPES:
-            fixed = fixed_columns(step)
-            protected_names = {name.casefold() for name in protected if name is not None}
-            if any(name.casefold() in protected_names for name in fixed):
-                raise ValueError(
-                    "pre_split_steps cannot write protected record keys or source time."
-                )
-            columns.extend(fixed)
-        elif step_type == "DropMissingRows":
-            subset = params.get("subset")
-            if (
-                not isinstance(subset, list)
-                or not subset
-                or any(not isinstance(c, str) for c in subset)
-            ):
-                raise ValueError(
-                    "pre_split_steps DropMissingRows requires explicit subset columns."
-                )
-            if params.get("how", "any") not in ("any", "all") or set(params) - {
-                "subset",
-                "how",
-                "threshold",
-                "missing_threshold",
-            }:
-                raise ValueError("pre_split_steps DropMissingRows has invalid row-filter params.")
-            threshold = params.get("threshold")
-            if threshold is not None and (
-                type(threshold) is not int or not 0 <= threshold <= len(subset)
-            ):
-                raise ValueError(
-                    "pre_split_steps threshold must be an integer from 0 to subset size."
-                )
-            missing_threshold = params.get("missing_threshold")
-            if missing_threshold is not None and (
-                type(missing_threshold) not in (int, float)
-                or not math.isfinite(missing_threshold)
-                or not 0 <= missing_threshold <= 100
-            ):
-                raise ValueError("pre_split_steps missing_threshold must be between 0 and 100.")
-            columns.extend(subset)
-        elif step_type == "ManualBounds":
-            bounds = params.get("bounds")
-            if set(params) - {"bounds"}:
-                raise ValueError("pre_split_steps ManualBounds supports only bounds.")
-            if not isinstance(bounds, dict) or not bounds:
-                raise ValueError("pre_split_steps ManualBounds requires explicit bounds.")
-            for column, limit in bounds.items():
-                if not isinstance(column, str) or not isinstance(limit, dict) or not limit:
-                    raise ValueError("pre_split_steps ManualBounds requires named column bounds.")
-                if set(limit) - {"lower", "upper"} or not any(
-                    key in limit and limit[key] is not None for key in ("lower", "upper")
-                ):
-                    raise ValueError("pre_split_steps ManualBounds requires lower or upper.")
-                for value in limit.values():
-                    if value is not None and (
-                        type(value) not in (int, float) or not math.isfinite(value)
-                    ):
-                        raise ValueError(
-                            "pre_split_steps ManualBounds requires finite numeric bounds."
-                        )
-                if (
-                    limit.get("lower") is not None
-                    and limit.get("upper") is not None
-                    and limit["lower"] > limit["upper"]
-                ):
-                    raise ValueError("pre_split_steps ManualBounds lower must not exceed upper.")
-                columns.append(column)
-        elif step_type == "Deduplicate":
-            columns.extend(deduplicate_columns(step))
-        elif custom_filter:
-            columns.extend(custom_filter_columns(step))
-        else:
-            raise ValueError(
-                f"pre_split_steps[{index}] permits only fixed normalization or row filters."
-            )
-        allowed_fields = {"name", "transformer", "params"}
-        if custom_filter:
-            allowed_fields.add("pre_split")
-        if set(step) - allowed_fields:
-            raise ValueError(f"pre_split_steps[{index}] contains unsupported step fields.")
+        columns.extend(_validate_pre_split_step(step, index, target_column, protected))
     for column in columns:
         column_name(column)
     return tuple(dict.fromkeys(columns))
@@ -864,6 +895,7 @@ def _candidate_config(
     min_improvement: float,
     champion_version: str | None,
     quality_threshold: float | None,
+    quality_gates: dict[str, float] | None = None,
     risk_category: str | None,
 ) -> dict[str, Any]:
     """Validate one training request and derive its effective preprocessing recipe."""
@@ -902,10 +934,12 @@ def _candidate_config(
         or min_improvement < 0
     ):
         raise ValueError("min_improvement must be a finite nonnegative number.")
-    if quality_threshold is not None and (
-        type(quality_threshold) not in (int, float) or not math.isfinite(quality_threshold)
-    ):
-        raise ValueError("quality_threshold must be a finite number or None.")
+    validate_quality_policy(
+        metric,
+        quality_threshold,
+        quality_gates,
+        task=NodeRegistry.get_calculator(config["modeling"]["type"])().problem_type,
+    )
     if champion_version is not None and (
         type(champion_version) is not str
         or not champion_version.isdecimal()
@@ -1112,6 +1146,7 @@ def _compare_candidate(
     metric: str,
     min_improvement: float,
     quality_threshold: float | None,
+    quality_gates: dict[str, float] | None = None,
     tracking_uri: str,
     registry_uri: str,
     engine: str,
@@ -1131,13 +1166,13 @@ def _compare_candidate(
         max_rows=spec.max_rows,
         max_bytes=spec.max_bytes,
         quality_threshold=quality_threshold,
+        quality_gates=quality_gates,
         tracking_uri=tracking_uri,
         registry_uri=registry_uri,
     )
-    run.client.log_dict(run.run_id, asdict(report), "candidate_comparison.json")
-    comparison_sha256 = hashlib.sha256(
-        json.dumps(asdict(report), sort_keys=True, allow_nan=False).encode()
-    ).hexdigest()
+    run.client.log_dict(run.run_id, comparison_payload(report), "candidate_comparison.json")
+    run.client.log_dict(run.run_id, {"gates": quality_gate_results(report)}, "quality_gates.json")
+    comparison_sha256 = comparison_digest(report)
     return LocalCandidateResult(
         run_id=run.run_id,
         model_name=model_name,
@@ -1191,6 +1226,7 @@ def train_local_candidate(
     engine: Literal["pandas", "polars"] = "pandas",
     champion_version: str | None = None,
     quality_threshold: float | None = None,
+    quality_gates: dict[str, float] | None = None,
     on_registered: Callable[[ResolvedModel], None] | None = None,
     risk_category: str | None = None,
     cv: LocalCVSpec | None = None,
@@ -1211,6 +1247,7 @@ def train_local_candidate(
         min_improvement=min_improvement,
         champion_version=champion_version,
         quality_threshold=quality_threshold,
+        quality_gates=quality_gates,
         risk_category=risk_category,
     )
     champion = (
@@ -1277,6 +1314,7 @@ def train_local_candidate(
         metric=metric,
         min_improvement=min_improvement,
         quality_threshold=quality_threshold,
+        quality_gates=quality_gates,
         tracking_uri=tracking_uri,
         registry_uri=registry_uri,
         engine=engine,

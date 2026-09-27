@@ -2,8 +2,10 @@
 
 Date: 2026-09-27. Baseline/HEAD: `d8e4949f`, the user-requested C4/C5 commit.
 That commit has DCO sign-off; applicable hooks and 241 pre-commit tests passed.
-C6 is locally complete and uncommitted. Next: SM-35.
-No cloud run, deployment, push or scheduled automation.
+C6 committed as `d9596763`, with passing hooks and DCO sign-off.
+The later isolated live acceptance and custom registration fix `5c9798b9` are
+recorded in [report75](75-sm34c-live-acceptance.md). The original checks below
+were local; persistent jobs and schedules remain unchanged. No push.
 
 ## Caller audit and compatibility decision
 

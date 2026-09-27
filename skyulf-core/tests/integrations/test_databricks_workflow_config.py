@@ -5,6 +5,18 @@ from copy import deepcopy
 import pytest
 
 
+def test_workflow_accepts_optional_quality_gates(workflow_config):
+    """Additional absolute bounds must survive offline validation without new defaults."""
+    from skyulf.integrations.databricks.workflow_config import validate_workflow_config
+
+    settings = {**workflow_config, "quality_gates": {"heldout_r2": 0.5}}
+    assert validate_workflow_config(settings, action="train") == settings
+    with pytest.raises(ValueError, match="quality_gates"):
+        validate_workflow_config(
+            {**settings, "quality_gates": {"heldout_accuracy": 0.8}}, action="train"
+        )
+
+
 @pytest.mark.parametrize("action", ["train", "score"])
 def test_config_accepts_exact_window_controls_and_rejects_schedule_fields(workflow_config, action):
     """Data policy belongs in workflow JSON while job clock settings stay in the Bundle."""

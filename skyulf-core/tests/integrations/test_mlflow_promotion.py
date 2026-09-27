@@ -992,8 +992,8 @@ def test_first_champion_rejects_missing_or_failed_quality_threshold(case) -> Non
 
     client, uri, name, heldout, _, admission = case
     client.delete_registered_model_alias(name, "champion")
-    candidate = resolve_model(name, version="2", tracking_uri=uri, registry_uri=uri)
-    for threshold in (None, -1.0):
+    candidate = resolve_model(name, version="1", tracking_uri=uri, registry_uri=uri)
+    for threshold in (None, 0.0):
         report = compare_registered_local_models(
             candidate,
             None,
@@ -1021,6 +1021,65 @@ def test_first_champion_rejects_missing_or_failed_quality_threshold(case) -> Non
             )
     with pytest.raises(mlflow.exceptions.MlflowException):
         client.get_model_version_by_alias(name, "champion")
+
+
+def test_first_champion_cannot_bypass_secondary_gate(case):
+    """Bootstrap must honor secondary bounds even when the selected metric passes."""
+    from skyulf.integrations.mlflow.promotion import initialize_champion
+
+    client, uri, name, heldout, _, admission = case
+    client.delete_registered_model_alias(name, "champion")
+    candidate = resolve_model(name, version="1", tracking_uri=uri, registry_uri=uri)
+    report = compare_registered_local_models(
+        candidate,
+        None,
+        heldout,
+        target_column="target",
+        dataset_id="labels@5/heldout",
+        metric="heldout_mse",
+        min_improvement=0,
+        quality_threshold=1000,
+        quality_gates={"heldout_mae": 0},
+        max_rows=10,
+        max_bytes=10_000,
+        tracking_uri=uri,
+        registry_uri=uri,
+    )
+    with pytest.raises(ValueError, match="quality"):
+        initialize_champion(
+            report,
+            heldout,
+            target_column="target",
+            admission=admission,
+            max_rows=10,
+            max_bytes=10_000,
+            tracking_uri=uri,
+            registry_uri=uri,
+        )
+    with pytest.raises(mlflow.exceptions.MlflowException):
+        client.get_model_version_by_alias(name, "champion")
+
+
+def test_restage_gate_evidence_identifies_its_comparison_event(case):
+    """Historical gate tags must not look like current results after a policy is removed."""
+    client, uri, name, heldout, report, admission = case
+    options: dict[str, Any] = {
+        "target_column": "target",
+        "expected_champion_version": "1",
+        "admission": admission,
+        "max_rows": 10,
+        "max_bytes": 10_000,
+        "tracking_uri": uri,
+        "registry_uri": uri,
+    }
+    first = stage_challenger(
+        replace(report, quality_gates={"heldout_mae": 100}), heldout, **options
+    )
+    second = stage_challenger(report, heldout, expected_challenger_version="2", **options)
+    tags = client.get_model_version(name, "2").tags
+    assert tags["quality_gate_event"] == second.event_id
+    assert json.loads(tags["quality_gate.heldout_mae"])["event_id"] == first.event_id
+    assert first.event_id != second.event_id
 
 
 def test_controlled_champion_rejects_alias_without_receipt(case) -> None:

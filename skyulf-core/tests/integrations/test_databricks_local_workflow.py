@@ -512,6 +512,7 @@ def test_auto_champion_bootstraps_first_model_or_rejects_missing_threshold(monke
         metric="heldout_rmse",
         metric_direction="minimize",
         quality_threshold=1.0,
+        quality_gates=None,
     )
     train = Mock(return_value=_saved_candidate(workflow, monkeypatch, config, report))
     monkeypatch.setattr(workflow, "train_local_candidate", train)

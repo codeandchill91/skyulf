@@ -29,7 +29,7 @@ from ..mlflow.registry import (
     resolve_model,
 )
 from ..mlflow.rejection import reject_candidate
-from ..mlflow.validation import ModelComparisonReport
+from ..mlflow.validation import ModelComparisonReport, validate_quality_policy
 from . import local_retraining
 from ._contracts import input_budget_bytes
 from .local_training_evidence import load_candidate_evidence as _load_evidence
@@ -208,11 +208,15 @@ def approve_local_candidate(
     )
     if report.champion_version != expected_champion_version:
         raise ValueError("Expected champion differs from the saved comparison.")
+    validate_quality_policy(
+        config.get("metric", ""), config.get("quality_threshold"), config.get("quality_gates")
+    )
     if (
         any(
             config.get(field) != getattr(report, field)
             for field in ("metric", "min_improvement", "quality_threshold")
         )
+        or (config.get("quality_gates") or None) != report.quality_gates
         or report.quality_threshold is None
     ):
         raise ValueError("Approval policy must match the saved, absolute-quality-gated comparison.")

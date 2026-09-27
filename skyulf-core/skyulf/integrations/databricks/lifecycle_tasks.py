@@ -100,6 +100,7 @@ def _prepare(
             min_improvement=config["min_improvement"],
             champion_version=champion,
             quality_threshold=config.get("quality_threshold"),
+            quality_gates=config.get("quality_gates"),
             risk_category=config.get("risk_category"),
         )
         request.update(
@@ -381,6 +382,7 @@ def _compare(spark: Any, store: _PhaseStore) -> dict[str, Any]:
         metric=config["metric"],
         min_improvement=config["min_improvement"],
         quality_threshold=config.get("quality_threshold"),
+        quality_gates=config.get("quality_gates"),
         tracking_uri=config["tracking_uri"],
         registry_uri=config.get("registry_uri", "databricks-uc"),
         engine=config["engine"],

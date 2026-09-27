@@ -30,6 +30,7 @@ from ..mlflow.registry import (
     _require_mlflow,
     resolve_model,
 )
+from ..mlflow.validation import quality_gates_pass
 from ._contracts import input_budget_bytes
 from .admission import SingleWriterAdmission
 from .local_approval import approve_local_candidate, reject_local_candidate
@@ -482,11 +483,7 @@ def _automatic_promotion(
     if not promote:
         return None
     if report.champion_version is None:
-        value = report.candidate_metrics[report.metric]
-        threshold = report.quality_threshold
-        if threshold is None or not (
-            value <= threshold if report.metric_direction == "minimize" else value >= threshold
-        ):
+        if report.quality_threshold is None or not quality_gates_pass(report):
             return None
         return initialize_champion(report, native, **options)
     if not report.eligible:
@@ -497,6 +494,112 @@ def _automatic_promotion(
         expected_champion_version=report.champion_version,
         **options,
     )
+
+
+def _run_training_action(
+    spark: Any,
+    config: dict[str, Any],
+    *,
+    policy: str,
+    tracking_uri: str,
+    registry_uri: str,
+    experiment_name: str | None,
+    artifact_path: str | Path | None,
+    now: datetime | None,
+) -> LocalCandidateResult | AutoTrainingOutcome:
+    """Train a candidate and preserve failure evidence before applying promotion policy."""
+    if experiment_name is None or artifact_path is None:
+        raise ValueError("Training needs an experiment and temporary artifact path.")
+    spec, cv, champion_version = _prepare_training(spark, config, policy=policy, now=now)
+    expected = config.get("champion_version")
+    # Legacy automatic selection ignored an explicit champion pin. Preserve
+    # that SDK compatibility; current policies and durable tasks check it.
+    if (
+        (policy != "automatic" or "score_model_selection" in config)
+        and expected is not None
+        and str(expected) != champion_version
+    ):
+        raise ValueError("champion_version does not match the current champion.")
+    lifecycle = ChallengerLifecycle(
+        config["model_name"],
+        expected_champion_version=champion_version,
+        admission=ExclusiveAliasWriterAdmission(),
+        tracking_uri=tracking_uri,
+        registry_uri=registry_uri,
+    )
+    try:
+        candidate = train_local_candidate(
+            spark,
+            spec,
+            config["pipeline"],
+            model_name=config["model_name"],
+            tracking_uri=tracking_uri,
+            registry_uri=registry_uri,
+            experiment_name=experiment_name,
+            run_name="candidate_training",
+            artifact_path=artifact_path,
+            metric=config["metric"],
+            min_improvement=config["min_improvement"],
+            engine=config["engine"],
+            champion_version=champion_version,
+            quality_threshold=config.get("quality_threshold"),
+            quality_gates=config.get("quality_gates"),
+            on_registered=lifecycle.registered,
+            risk_category=config.get("risk_category"),
+            cv=cv,
+        )
+        alias_change = _automatic_promotion(
+            spark,
+            config,
+            spec,
+            candidate,
+            promote=policy == "automatic",
+        )
+    except Exception as error:  # noqa: BLE001 - preserve failure and lifecycle evidence
+        try:
+            lifecycle.failed()
+        except Exception as status_error:  # noqa: BLE001 - retain the original failure
+            raise error from status_error
+        raise
+    if policy == "automatic":
+        return AutoTrainingOutcome(
+            candidate=candidate,
+            alias_change=alias_change,
+        )
+    return candidate
+
+
+def _run_scoring_action(
+    spark: Any,
+    config: dict[str, Any],
+    *,
+    selection: str,
+    tracking_uri: str,
+    registry_uri: str,
+) -> Any:
+    """Resolve the scoring pin and activate rebuilt output only after a successful batch."""
+    if selection == "champion":
+        champion_version = controlled_champion_version(
+            config["model_name"], tracking_uri=tracking_uri, registry_uri=registry_uri
+        )
+        if champion_version is None:
+            raise ValueError("Champion scoring requires a committed champion.")
+        config = {**config, "model_version": champion_version}
+    target = _scoring_target(config)
+    if config.get("model_change_mode", "incremental_append") == "full_rebuild":
+        _managed_prediction_view_exists(spark, config["prediction_table"])
+    score_config = {**config, "prediction_table": target}
+    prepared = prepare_local_workflow(_scoring_config(score_config))
+    provision_prediction_table(spark, score_config, prepared)
+    result = run_incremental_local_batch(
+        spark,
+        prepared,
+        record_key_columns=tuple(config["record_key_columns"]),
+        admission=SingleWriterAdmission(),
+    )
+    if config.get("model_change_mode", "incremental_append") == "full_rebuild":
+        _activate_prediction_view(spark, config["prediction_table"], target)
+    return result
 
 
 def run_action(
@@ -552,85 +655,22 @@ def run_action(
             expected_champion_version=expected_champion_version,
         )
     if action == "train":
-        if experiment_name is None or artifact_path is None:
-            raise ValueError("Training needs an experiment and temporary artifact path.")
-        spec, cv, champion_version = _prepare_training(spark, config, policy=policy, now=now)
-        expected = config.get("champion_version")
-        # Legacy automatic selection ignored an explicit champion pin. Preserve
-        # that SDK compatibility; current policies and durable tasks check it.
-        if (
-            (policy != "automatic" or "score_model_selection" in config)
-            and expected is not None
-            and str(expected) != champion_version
-        ):
-            raise ValueError("champion_version does not match the current champion.")
-        lifecycle = ChallengerLifecycle(
-            config["model_name"],
-            expected_champion_version=champion_version,
-            admission=ExclusiveAliasWriterAdmission(),
+        return _run_training_action(
+            spark,
+            config,
+            policy=policy,
+            tracking_uri=tracking_uri,
+            registry_uri=registry_uri,
+            experiment_name=experiment_name,
+            artifact_path=artifact_path,
+            now=now,
+        )
+    if action == "score":
+        return _run_scoring_action(
+            spark,
+            config,
+            selection=selection,
             tracking_uri=tracking_uri,
             registry_uri=registry_uri,
         )
-        try:
-            candidate = train_local_candidate(
-                spark,
-                spec,
-                config["pipeline"],
-                model_name=config["model_name"],
-                tracking_uri=tracking_uri,
-                registry_uri=registry_uri,
-                experiment_name=experiment_name,
-                run_name="candidate_training",
-                artifact_path=artifact_path,
-                metric=config["metric"],
-                min_improvement=config["min_improvement"],
-                engine=config["engine"],
-                champion_version=champion_version,
-                quality_threshold=config.get("quality_threshold"),
-                on_registered=lifecycle.registered,
-                risk_category=config.get("risk_category"),
-                cv=cv,
-            )
-            alias_change = _automatic_promotion(
-                spark,
-                config,
-                spec,
-                candidate,
-                promote=policy == "automatic",
-            )
-        except Exception as error:  # noqa: BLE001 - preserve failure and lifecycle evidence
-            try:
-                lifecycle.failed()
-            except Exception as status_error:  # noqa: BLE001 - retain the original failure
-                raise error from status_error
-            raise
-        if policy == "automatic":
-            return AutoTrainingOutcome(
-                candidate=candidate,
-                alias_change=alias_change,
-            )
-        return candidate
-    if action == "score":
-        if selection == "champion":
-            champion_version = controlled_champion_version(
-                config["model_name"], tracking_uri=tracking_uri, registry_uri=registry_uri
-            )
-            if champion_version is None:
-                raise ValueError("Champion scoring requires a committed champion.")
-            config = {**config, "model_version": champion_version}
-        target = _scoring_target(config)
-        if config.get("model_change_mode", "incremental_append") == "full_rebuild":
-            _managed_prediction_view_exists(spark, config["prediction_table"])
-        score_config = {**config, "prediction_table": target}
-        prepared = prepare_local_workflow(_scoring_config(score_config))
-        provision_prediction_table(spark, score_config, prepared)
-        result = run_incremental_local_batch(
-            spark,
-            prepared,
-            record_key_columns=tuple(config["record_key_columns"]),
-            admission=SingleWriterAdmission(),
-        )
-        if config.get("model_change_mode", "incremental_append") == "full_rebuild":
-            _activate_prediction_view(spark, config["prediction_table"], target)
-        return result
     raise ValueError(f"Unknown workflow action: {action}.")

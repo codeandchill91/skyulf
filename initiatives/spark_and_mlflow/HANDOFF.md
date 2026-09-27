@@ -1,10 +1,26 @@
-# Current handoff: SM-34C1-C5 committed; C6 locally DONE; SM-35 READY
+# Current handoff: SM-34C committed/live-verified; SM-35 locally DONE; SM-36 READY
+
+SM-35 adds optional absolute quality gates through comparison, training, first
+champion and manual approval, plus per-gate run/version/notebook evidence.
+Historical single-gate hashes remain compatible through canonical serialization.
+The requested Sourcery extraction reduced comparison/request bodies to 62/11
+lines. The follow-up also split alias commits, workflow validation/preview,
+training/scoring dispatch and pre-split admission into focused helpers. Sourcery
+scores were not rerun. Latest **578 tests**, Ruff/format, full ty and independent
+review passed; 3,512 before/after offline outcomes matched exactly. The strict
+docs build passed during SM-35 implementation, before this source-only follow-up.
+[Evidence](77-sm35-quality-gates-evidence.md).
+SM-35 is **uncommitted** and was not tested in Databricks; the successful live run
+below tested the prior C6/fix commits. Report-placement discussion did not change
+where split/engine details are rendered. Initiative reports 75-77 and the compact
+live receipt are ignored files; include them explicitly in the next requested
+commit. No push performed.
 
 The user resumed implementation on 2026-09-27. The six slices are in
 [report68](68-integration-template-simplification-plan.md)
 and `OPEN_QUEUE.md`: shared training operations, evidence/result ownership,
 replay reuse, simpler setup, smaller generated docs/examples, and notebook routing.
-**Start SM-35 next session.** C3 removes the discarded decision replay and
+**Continue SM-36 after reviewing the uncommitted SM-35 changes.** C3 removes the discarded decision replay and
 reuses comparison metadata within one phase. Both engines/policies reduced
 compare/decide source reads from 3 to 2 and client artifact downloads from 27
 to 25. The pre-registration receipt reread and fresh decision/mutation checks
@@ -32,7 +48,9 @@ directory. Fixed lifecycle phases and SDK APIs remain unchanged. 204 combined
 tests and 10 final output tests passed (205 distinct), including real CLI
 generation and local MLflow lifecycle integration. Review caught/fixed an output
 publication ordering regression. Ruff/format/full ty and review passed.
-[C6 evidence](74-sm34c6-explicit-notebook-entrypoints.md). C6 is uncommitted.
+[C6 evidence](74-sm34c6-explicit-notebook-entrypoints.md). C6 is committed as `d9596763`. Live custom registration fix: `5c9798b9`.
+Corrected run `1021551603110584` passed: 243 predictions, five HTML reports,
+custom code, CV and durable receipts verified. [Live evidence](75-sm34c-live-acceptance.md).
 
 C1 shares training preparation and registration;
 [C1 verification](69-sm34c1-shared-training-preparation.md). C2 adds shared saved-spec
@@ -45,9 +63,9 @@ into cohesive helpers and applied both dictionary unions. Latest **503 tests
 passed**, scoped Ruff/format and full ty passed; independent review found no issues.
 C1/C2 and review fixes were committed as `e16b27e8`, with DCO sign-off and all
 applicable commit hooks passing. No push was requested or performed.
-SM-35 is ready after this sequence; preserve the later program's existing scope.
+SM-35 is locally complete; SM-36 is ready. Preserve the later program's existing scope.
 
-Current HEAD is `d8e4949f`; the unrelated `454d2dad` gitignore commit is preserved.
+Current HEAD is `5c9798b9`; the unrelated `454d2dad` gitignore commit is preserved.
 SM-34B and its training
 follow-up were committed as `bd49f49e`; the first-candidate HTML report fix and
 runtime helper extraction were committed as `daa1e1c7`. That fix passed 83 local
@@ -56,11 +74,10 @@ The test rendered the two saved Polars payloads and an illustrative rollback
 panel without training or model mutations. Persistent job deployment was rejected
 as outside that test/commit request, so their wheel is still the earlier version.
 
-Resume by verifying Git state and reading the SM-35 scope in `OPEN_QUEUE.md`. Preserve
+Resume by verifying Git state and reading the SM-36 scope in `OPEN_QUEUE.md`. Preserve
 unrelated `.tmp-review-model/` and `.tmp-sm34b-readable-green/` artifacts.
-C1-C6 included no cloud run, deployment or scheduled automation. Reports 68-73
-are committed; report74 is a local ignored initiative file, to include explicitly
-in the later C6 commit. Do not treat the local suites as live acceptance.
+Reports 68-74 are committed. Report75 records the isolated cloud acceptance;
+persistent jobs and schedules were not modified. SM-35 execution map is in report76.
 
 ## Previous SM-34B acceptance checkpoint (historical state)
 

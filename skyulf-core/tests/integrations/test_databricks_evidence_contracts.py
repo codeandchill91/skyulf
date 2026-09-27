@@ -15,7 +15,7 @@ from skyulf.integrations.databricks import local_training_evidence as evidence
 from skyulf.integrations.databricks import local_workflow as workflow
 from skyulf.integrations.databricks.training_dates import TrainingDateSpec
 from skyulf.integrations.mlflow.promotion import AliasChangeReceipt
-from skyulf.integrations.mlflow.validation import ModelComparisonReport
+from skyulf.integrations.mlflow.validation import ModelComparisonReport, comparison_payload
 
 
 def _spec(temporal=False):
@@ -95,12 +95,12 @@ def test_shared_loader_verifies_named_candidate_evidence(tmp_path, change):
     elif change == "holdout":
         spec = replace(spec, holdout_key_sha256=None)
     digest = hashlib.sha256(
-        json.dumps(asdict(report), sort_keys=True, allow_nan=False).encode()
+        json.dumps(comparison_payload(report), sort_keys=True, allow_nan=False).encode()
     ).hexdigest()
     if change == "digest":
         digest = "0" * 64
     (tmp_path / "candidate_comparison.json").write_text(
-        json.dumps(asdict(report)), encoding="utf-8"
+        json.dumps(comparison_payload(report)), encoding="utf-8"
     )
     (tmp_path / "candidate_training_spec.json").write_text(
         json.dumps(training._training_spec_payload(spec, "pandas")), encoding="utf-8"

@@ -9,7 +9,7 @@ import hashlib
 import json
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
@@ -28,7 +28,13 @@ from .registry import (
     _translate_error,
     resolve_model,
 )
-from .validation import ModelComparisonReport, compare_registered_local_models
+from .validation import (
+    ModelComparisonReport,
+    compare_registered_local_models,
+    comparison_digest,
+    quality_gate_results,
+    quality_gates_pass,
+)
 
 _ALIAS = "champion"
 _CHALLENGER = "challenger"
@@ -437,6 +443,17 @@ def _commit_change(
     history = _plan_challenger_history(client, receipt, updates)
     if history is not None:
         updates = [*updates, (_HISTORY, history[1], history[0])]
+    _prepare_alias_change(client, receipt, history)
+    _apply_alias_updates(client, receipt, updates)
+    _finish_alias_change(client, receipt, history, version_tags)
+
+
+def _prepare_alias_change(
+    client: Any,
+    receipt: AliasChangeReceipt,
+    history: tuple[str | None, str | None] | None,
+) -> None:
+    """Persist intent and verify the pending marker before any alias write."""
     try:
         _write_event(client, receipt, "prepared")
     except Exception as exc:  # noqa: BLE001 - registry transport boundary
@@ -457,6 +474,14 @@ def _commit_change(
             raise AliasOutcomeUnknownError(
                 f"History preparation outcome unknown; inspect event {receipt.event_id}."
             ) from exc
+
+
+def _apply_alias_updates(
+    client: Any,
+    receipt: AliasChangeReceipt,
+    updates: list[tuple[str, str | None, str | None]],
+) -> None:
+    """Verify each write and distinguish a refused first write from uncertain mutation."""
     changed = False
     for alias, new_version, old_version in updates:
         try:
@@ -484,17 +509,33 @@ def _commit_change(
             raise AliasOutcomeUnknownError(
                 f"Alias outcome unknown; inspect prepared event {receipt.event_id}."
             ) from exc
+
+
+def _write_version_status(
+    client: Any, receipt: AliasChangeReceipt, version_tags: dict[str, str] | None
+) -> None:
+    """Write and verify version status after the alias updates have succeeded."""
+    if receipt.kind in {"promotion", "initial"}:
+        client.delete_registered_model_tag(receipt.model_name, _CHALLENGER_TAG)
+    tags = dict(version_tags or {})
+    if receipt.kind in {"promotion", "initial"}:
+        tags["promotion_status"] = "promoted"
+    for key, value in tags.items():
+        client.set_model_version_tag(receipt.model_name, receipt.new_version, key, value)
+    stored = client.get_model_version(receipt.model_name, receipt.new_version).tags or {}
+    if any(stored.get(key) != value for key, value in tags.items()):
+        raise AliasOutcomeUnknownError("Model version status was not verified.")
+
+
+def _finish_alias_change(
+    client: Any,
+    receipt: AliasChangeReceipt,
+    history: tuple[str | None, str | None] | None,
+    version_tags: dict[str, str] | None,
+) -> None:
+    """Commit the receipt and clear pending state only after all pointers are verified."""
     try:
-        if receipt.kind in {"promotion", "initial"}:
-            client.delete_registered_model_tag(receipt.model_name, _CHALLENGER_TAG)
-        tags = dict(version_tags or {})
-        if receipt.kind in {"promotion", "initial"}:
-            tags["promotion_status"] = "promoted"
-        for key, value in tags.items():
-            client.set_model_version_tag(receipt.model_name, receipt.new_version, key, value)
-        stored = client.get_model_version(receipt.model_name, receipt.new_version).tags or {}
-        if any(stored.get(key) != value for key, value in tags.items()):
-            raise AliasOutcomeUnknownError("Model version status was not verified.")
+        _write_version_status(client, receipt, version_tags)
         _write_event(client, receipt, "committed")
         if history is not None:
             _write_challenger_history(client, receipt, history, "committed")
@@ -574,6 +615,7 @@ def _validated_report(
         metric=report.metric,
         min_improvement=report.min_improvement,
         quality_threshold=report.quality_threshold,
+        quality_gates=report.quality_gates,
         max_rows=max_rows,
         max_bytes=max_bytes,
         tracking_uri=tracking_uri,
@@ -581,9 +623,7 @@ def _validated_report(
     )
     if fresh != report or (require_eligible and not fresh.eligible):
         raise ValueError("Pinned comparison no longer matches the supplied report.")
-    return hashlib.sha256(
-        json.dumps(asdict(fresh), sort_keys=True, allow_nan=False).encode()
-    ).hexdigest()
+    return comparison_digest(fresh)
 
 
 def initialize_champion(
@@ -619,6 +659,7 @@ def initialize_champion(
         metric=report.metric,
         min_improvement=report.min_improvement,
         quality_threshold=report.quality_threshold,
+        quality_gates=report.quality_gates,
         max_rows=max_rows,
         max_bytes=max_bytes,
         tracking_uri=tracking_uri,
@@ -626,11 +667,9 @@ def initialize_champion(
     )
     if fresh != report:
         raise ValueError("Pinned first-champion comparison changed before initialization.")
-    value = fresh.candidate_metrics[fresh.metric]
-    passed = value <= threshold if fresh.metric_direction == "minimize" else value >= threshold
-    if not passed:
+    if not quality_gates_pass(fresh):
         raise ValueError("First champion failed the absolute quality threshold.")
-    digest = hashlib.sha256(json.dumps(asdict(fresh), sort_keys=True).encode()).hexdigest()
+    digest = comparison_digest(fresh)
     client = _make_client(_require_mlflow(), tracking_uri, registry_uri)
     with admission.hold(alias_resource_id(report.model_name)):
         _assert_not_rejected(client, report.model_name, report.candidate_version)
@@ -722,11 +761,7 @@ def stage_challenger(
         if report.reason == "insufficient_improvement" and (report.improvement or 0) > 0:
             reason = "Improvement below required minimum"
         if report.champion_version is None:
-            value = report.candidate_metrics[report.metric]
-            threshold = report.quality_threshold
-            passed = threshold is not None and (
-                value <= threshold if report.metric_direction == "minimize" else value >= threshold
-            )
+            passed = report.quality_threshold is not None and quality_gates_pass(report)
             reason = (
                 "First model passed quality threshold"
                 if passed
@@ -740,6 +775,13 @@ def stage_challenger(
                 "validation_status": "passed" if passed else "rejected",
                 "validation_reason": reason,
                 "promotion_status": "not_promoted",
+                "quality_gate_event": receipt.event_id,
+                **{
+                    f"quality_gate.{gate['metric']}": json.dumps(
+                        {**gate, "event_id": receipt.event_id}, sort_keys=True
+                    )
+                    for gate in quality_gate_results(report)
+                },
             },
         )
         return receipt

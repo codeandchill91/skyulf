@@ -10,7 +10,7 @@ from typing import Any
 from ...config_validation import validate_pipeline_config
 from ...modeling.base import BaseModelCalculator
 from ...registry import NodeRegistry
-from ..mlflow.validation import _CLASSIFICATION, _MINIMIZE, _REGRESSION
+from ..mlflow.validation import validate_quality_policy
 from ._contracts import PREDICTION_METADATA_COLUMNS, input_budget_bytes
 from .local_cv import CV_FIELDS, LocalCVSpec
 from .local_sdk import ModelSelection
@@ -65,6 +65,7 @@ _FIELDS = {
     "metric",
     "min_improvement",
     "quality_threshold",
+    "quality_gates",
     "pipeline",
     "tracking_uri",
     "registry_uri",
@@ -138,13 +139,8 @@ def _training_contract(config: dict[str, Any], action: str) -> None:
     _training_spec(settings)
 
 
-def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str, Any]:
-    """Validate a resolved project without starting Spark, fitting or accessing MLflow.
-
-    Historical dates and explicit versions allow deliberate snapshot replays.
-    An unset version selects the latest snapshot at invocation. Saved-evidence
-    actions use their own pinned data.
-    """
+def _validate_workflow_fields(config: dict[str, Any], action: str) -> None:
+    """Reject obsolete or unknown settings before checking their values."""
     if not isinstance(config, dict):
         raise ValueError("Workflow configuration must be an object.")
     if (
@@ -160,12 +156,10 @@ def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str
         raise ValueError(f"Unknown workflow settings: {', '.join(sorted(unknown))}.")
     if action not in _ACTIONS:
         raise ValueError("Unknown workflow action.")
-    task = _choice(config, "task", {"regression", "classification"})
-    _choice(config, "engine", {"pandas", "polars"})
-    selection = _choice(config, "score_model_selection", {"champion", "pinned_version"})
-    policy = _choice(config, "promotion_policy", {"automatic", "manual_approval"})
-    _choice(config, "score_handoff", {"disabled", "after_alias_change"})
-    _choice(config, "model_change_mode", {"incremental_append", "full_rebuild"})
+
+
+def _validate_workflow_sources(config: dict[str, Any]) -> None:
+    """Validate source names, input limits and column roles before any reader opens."""
     for key in ("training_table", "score_source_table", "prediction_table", "model_name"):
         value = config.get(key)
         if not isinstance(value, str) or not _TABLE_NAME.fullmatch(value):
@@ -180,6 +174,10 @@ def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str
     _columns(config)
     for field in ("event_time_parsing", "result_time_parsing"):
         training_date_spec(config.get(field) if config.get(field) is not None else {})
+
+
+def _validate_workflow_model_selection(config: dict[str, Any], selection: str) -> None:
+    """Require valid pins, risk metadata and registry selection settings."""
     champion = config.get("champion_version")
     if champion is not None and (
         not isinstance(champion, str) or not re.fullmatch(r"[1-9][0-9]*", champion)
@@ -203,27 +201,24 @@ def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str
         tracking_uri=config.get("tracking_uri"),
         registry_uri=config.get("registry_uri"),
     )
-    metric = config.get("metric")
-    if not isinstance(metric, str) or metric not in (
-        _REGRESSION if task == "regression" else _CLASSIFICATION
-    ):
-        raise ValueError(f"metric must be a supported heldout metric for {task}.")
+
+
+def _validate_workflow_quality(config: dict[str, Any], task: str, policy: str) -> None:
+    """Reject incompatible metric bounds and incomplete automatic promotion policies."""
+    validate_quality_policy(
+        config.get("metric", ""),
+        config.get("quality_threshold"),
+        config.get("quality_gates"),
+        task=task,
+    )
     if _finite(config.get("min_improvement"), "min_improvement") < 0:
         raise ValueError("min_improvement must be nonnegative.")
-    threshold = config.get("quality_threshold")
-    if threshold is None:
-        if policy == "automatic":
-            raise ValueError("Automatic promotion requires quality_threshold.")
-    else:
-        threshold = _finite(threshold, "quality_threshold")
-        if metric in _MINIMIZE and threshold < 0:
-            raise ValueError("quality_threshold must be nonnegative for error/loss metrics.")
-        if task == "classification" and metric != "heldout_log_loss":
-            lower = -1 if metric == "heldout_matthews_corrcoef" else 0
-            if not lower <= threshold <= 1:
-                raise ValueError(f"quality_threshold for {metric} must be between {lower} and 1.")
-        if metric in {"heldout_r2", "heldout_explained_variance"} and threshold > 1:
-            raise ValueError(f"quality_threshold for {metric} must be at most 1.")
+    if config.get("quality_threshold") is None and policy == "automatic":
+        raise ValueError("Automatic promotion requires quality_threshold.")
+
+
+def _validate_workflow_pipeline(config: dict[str, Any], task: str) -> None:
+    """Check the model task and preprocessing types against the Core registry."""
     pipeline = config.get("pipeline")
     if not isinstance(pipeline, dict):
         raise ValueError("pipeline must be a Core pipeline configuration object.")
@@ -237,33 +232,38 @@ def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str
     for step in pipeline.get("preprocessing", []):
         if issubclass(NodeRegistry.get_calculator(step["transformer"]), BaseModelCalculator):
             raise ValueError("pipeline.preprocessing cannot contain a model calculator.")
+
+
+def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str, Any]:
+    """Validate a resolved project without starting Spark, fitting or accessing MLflow.
+
+    Historical dates and explicit versions allow deliberate snapshot replays.
+    An unset version selects the latest snapshot at invocation. Saved-evidence
+    actions use their own pinned data.
+    """
+    _validate_workflow_fields(config, action)
+    task = _choice(config, "task", {"regression", "classification"})
+    _choice(config, "engine", {"pandas", "polars"})
+    selection = _choice(config, "score_model_selection", {"champion", "pinned_version"})
+    policy = _choice(config, "promotion_policy", {"automatic", "manual_approval"})
+    _choice(config, "score_handoff", {"disabled", "after_alias_change"})
+    _choice(config, "model_change_mode", {"incremental_append", "full_rebuild"})
+    _validate_workflow_sources(config)
+    _validate_workflow_model_selection(config, selection)
+    _validate_workflow_quality(config, task, policy)
+    _validate_workflow_pipeline(config, task)
     _training_contract(config, action)
     LocalCVSpec.from_workflow(config).validate_pipeline(
-        pipeline, target_column=config["target_column"], event_column=config.get("event_column")
+        config["pipeline"],
+        target_column=config["target_column"],
+        event_column=config.get("event_column"),
     )
     return deepcopy(config)
 
 
-def preview_workflow_config(config: dict[str, Any], *, action: str = "score") -> str:
-    """Describe resolved settings offline using the same preflight as job execution.
-
-    The default checks the configuration without requiring manual training pins.
-    Pass ``action='train'`` to validate training selection as well.
-    This cannot check source values, installed worker dependencies or permissions.
-    """
-    checked = validate_workflow_config(config, action=action)
-    model = checked["pipeline"]["modeling"]
-    cv = LocalCVSpec.from_workflow(checked)
-    training_status = "configured (source data and permissions not checked)"
-    try:
-        validate_workflow_config(checked, action="train")
-    except ValueError as exc:
-        training_status = f"needs configuration: {exc}"
-    sample = checked.get("training_sample_rows")
+def _preview_window(checked: dict[str, Any]) -> tuple[str, Any, Any]:
+    """Describe runtime and explicit time boundaries without reading source data."""
     window = _training_window_mode(checked)
-    version = checked.get("training_version")
-    if version is None:
-        version = "latest snapshot at invocation"
     observation_window = f"[{checked.get('start')}, {checked.get('cutoff')})"
     holdout_start = checked.get("holdout_start")
     result_cutoff = checked.get("result_cutoff")
@@ -281,7 +281,18 @@ def preview_workflow_config(config: dict[str, Any], *, action: str = "score") ->
             f"invocation time UTC minus {checked.get('result_availability_lag_hours', 0)} "
             "elapsed hours (inclusive)"
         )
-    lines = [
+    return observation_window, holdout_start, result_cutoff
+
+
+def _preview_training_source(checked: dict[str, Any], training_status: str) -> list[str]:
+    """Describe source selection, resource bounds and the final holdout."""
+    sample = checked.get("training_sample_rows")
+    window = _training_window_mode(checked)
+    version = checked.get("training_version")
+    if version is None:
+        version = "latest snapshot at invocation"
+    observation_window, holdout_start, result_cutoff = _preview_window(checked)
+    return [
         "Skyulf workflow preview",
         "No data read, training, registry mutation or deployment.",
         f"Engine: {checked['engine']} | Task: {checked['task']}",
@@ -314,43 +325,68 @@ def preview_workflow_config(config: dict[str, Any], *, action: str = "score") ->
         f"Training: {training_status}",
         "Pre-split cleanup (fixed normalization and training eligibility; edit build_pre_split_steps()):",
     ]
-    for index, step in enumerate(checked.get("pre_split_steps", []), 1):
-        lines.append(
-            f"  {index}. {step['name']} -> {step['transformer']} "
-            f"{json.dumps(step.get('params', {}), sort_keys=True)}"
-        )
-    if not checked.get("pre_split_steps"):
-        lines.append("  No pre-split cleanup steps.")
+
+
+def _preview_steps(steps: list[dict[str, Any]], empty_message: str) -> list[str]:
+    """Render an ordered Core recipe consistently in either preprocessing phase."""
+    if not steps:
+        return [empty_message]
+    return [
+        f"  {index}. {step['name']} -> {step['transformer']} "
+        f"{json.dumps(step.get('params', {}), sort_keys=True)}"
+        for index, step in enumerate(steps, 1)
+    ]
+
+
+def _preview_model_and_scoring(checked: dict[str, Any], cv: LocalCVSpec) -> list[str]:
+    """Describe the model, quality policy and scoring destination."""
+    model = checked["pipeline"]["modeling"]
+    return [
+        f"Model: {model['type']} | Explicit params: {json.dumps(model.get('params', {}))}",
+        "Unspecified model parameters use Core defaults.",
+        f"CV: {cv.method}, {cv.folds} folds, training partition only; "
+        "preprocessing refitted per fold, no parameter search."
+        if cv.enabled
+        else "CV: disabled (final holdout evaluation still runs).",
+        f"Promotion: {checked['promotion_policy']} | Metric: {checked['metric']} | "
+        f"Threshold: {checked.get('quality_threshold')} | "
+        f"Minimum improvement (absolute): {checked['min_improvement']}",
+        f"Additional quality gates: {json.dumps(checked.get('quality_gates') or {}, sort_keys=True)}",
+        f"Scoring source: {checked['score_source_table']}",
+        f"Score model: {checked['model_name']} | {checked['score_model_selection']} | "
+        f"pin={checked.get('model_version')} | handoff={checked['score_handoff']}",
+        f"Prediction output: {checked['prediction_table']} | {checked['model_change_mode']}",
+        "Scoring is never sampled. Validate source values and worker dependencies separately.",
+    ]
+
+
+def preview_workflow_config(config: dict[str, Any], *, action: str = "score") -> str:
+    """Describe resolved settings offline using the same preflight as job execution.
+
+    The default checks the configuration without requiring manual training pins.
+    Pass ``action='train'`` to validate training selection as well.
+    This cannot check source values, installed worker dependencies or permissions.
+    """
+    checked = validate_workflow_config(config, action=action)
+    cv = LocalCVSpec.from_workflow(checked)
+    training_status = "configured (source data and permissions not checked)"
+    try:
+        validate_workflow_config(checked, action="train")
+    except ValueError as exc:
+        training_status = f"needs configuration: {exc}"
+    lines = _preview_training_source(checked, training_status)
+    lines.extend(
+        _preview_steps(checked.get("pre_split_steps", []), "  No pre-split cleanup steps.")
+    )
     lines.append(
         "Fixed feature cleanup is saved as a pipeline prefix and applied once to raw model inputs; "
         "training row exclusions are not repeated during scoring."
     )
     lines.append("Fold-local preprocessing (after final split; edit build_preprocessing()):")
-    for index, step in enumerate(checked["pipeline"].get("preprocessing", []), 1):
-        lines.append(
-            f"  {index}. {step['name']} -> {step['transformer']} "
-            f"{json.dumps(step.get('params', {}), sort_keys=True)}"
-        )
-    if not checked["pipeline"].get("preprocessing"):
-        lines.append("  No preprocessing steps.")
     lines.extend(
-        [
-            f"Model: {model['type']} | Explicit params: {json.dumps(model.get('params', {}))}",
-            "Unspecified model parameters use Core defaults.",
-            f"CV: {cv.method}, {cv.folds} folds, training partition only; "
-            "preprocessing refitted per fold, no parameter search."
-            if cv.enabled
-            else "CV: disabled (final holdout evaluation still runs).",
-            f"Promotion: {checked['promotion_policy']} | Metric: {checked['metric']} | "
-            f"Threshold: {checked.get('quality_threshold')} | "
-            f"Minimum improvement: {checked['min_improvement']}",
-            f"Scoring source: {checked['score_source_table']}",
-            f"Score model: {checked['model_name']} | {checked['score_model_selection']} | "
-            f"pin={checked.get('model_version')} | handoff={checked['score_handoff']}",
-            f"Prediction output: {checked['prediction_table']} | {checked['model_change_mode']}",
-            "Scoring is never sampled. Validate source values and worker dependencies separately.",
-        ]
+        _preview_steps(checked["pipeline"].get("preprocessing", []), "  No preprocessing steps.")
     )
+    lines.extend(_preview_model_and_scoring(checked, cv))
     return "\n".join(lines)
 
 
