@@ -1,7 +1,7 @@
 # Integration and template simplification plan
 
 > Execute one task at a time using `executing-plans`; do not start implementation
-> merely because this plan exists. The user resumed C1-C5 on 2026-09-27.
+> merely because this plan exists. The user resumed C1-C6 on 2026-09-27.
 
 **Goal:** Reduce duplicated decisions, repeated work and setup/documentation bulk
 without changing the supported training, approval, rollback and scoring contracts.
@@ -17,8 +17,8 @@ Use small explicit helpers rather than a new workflow framework or generic base 
 `skyulf-core/templates/`, and the six findings summarized below, 2026-09-27.
 
 **State:** SM-34C1/C2 and the Sourcery follow-up are committed as `e16b27e8`.
-**SM-34C3** is committed as `f4d654cf`; **SM-34C4/C5** are locally complete,
-uncommitted; **SM-34C6** is next.
+**SM-34C3** is committed as `f4d654cf`; **SM-34C4/C5** are committed as
+`d8e4949f`; **SM-34C6** is locally complete, uncommitted. **SM-35** is next.
 Original baseline: `454d2dad`, following `daa1e1c7`
 and graph commit `bd49f49e`. The unrelated gitignore commit is preserved.
 
@@ -126,7 +126,7 @@ repeat is necessary, document why and retain it; do not weaken checks for speed.
 
 ### SM-34C4 — Reduce initial setup complexity
 
-**Status:** DONE locally, uncommitted. 127 local tests and 68 CLI cases verified;
+**Status:** DONE, committed as `d8e4949f`. 127 local tests and 68 CLI cases verified;
 12 before/after generated configurations and previews matched.
 [Evidence](72-sm34c4-initializer-simplification.md).
 
@@ -153,7 +153,7 @@ SM-42 can build on this; this task does not implement its future feature scenari
 
 ### SM-34C5 — Keep generated projects small and documentation consistent
 
-**Status:** DONE locally, uncommitted. 109 local and 68 CLI tests passed;
+**Status:** DONE, committed as `d8e4949f`. 241 combined pre-commit tests passed;
 [starter reduction and saved-code evidence](73-sm34c5-smaller-generated-project.md).
 
 **Files:** `template/{{.project_name}}/README.md.tmpl`, `src/preprocessing.py`,
@@ -177,19 +177,21 @@ instructions, and all current custom preprocessing capabilities documented.
 
 ### SM-34C6 — Retire redundant notebook lifecycle routing carefully
 
-**Status:** READY; C5 passed locally. Relies on the ownership clarified in C2.
+**Status:** DONE locally, uncommitted. 204 combined tests and 10 final output tests
+passed (205 distinct cases), with lint/type checks and independent review.
+[Compatibility decision and evidence](74-sm34c6-explicit-notebook-entrypoints.md).
 
 **Files:** `job_runtime.py`, template `src/score.py`, runtime/notebook tests,
 public docs and exports only where the usage audit requires it.
 
-- [ ] Inventory repository and documented callers of `run_notebook` and
+- [x] Inventory repository and documented callers of `run_notebook` and
   `run_bundle_action`, including tests and direct SDK examples.
-- [ ] Make score and fixed lifecycle notebook entrypoints explicit. Remove the
+- [x] Make score and fixed lifecycle notebook entrypoints explicit. Remove the
   unused lifecycle routing branch only if compatibility allows; otherwise retain
   a small delegating wrapper with a documented compatibility decision.
-- [ ] Preserve `run_action`/`train_local_candidate` SDK APIs and reject role/action
+- [x] Preserve `run_action`/`train_local_candidate` SDK APIs and reject role/action
   overrides, unresolved references and invalid score pins as before.
-- [ ] Run notebook/runtime/output and relevant generated-project suites; update
+- [x] Run notebook/runtime/output and relevant generated-project suites; update
   the queue and handoff with exact checks and remaining deployment limits.
 
 **Acceptance:** One maintained notebook path per responsibility, no duplicated
@@ -205,6 +207,6 @@ format and full ty. Real CLI generation is required for template changes.
 Do not claim a cloud run from a successful local/CLI check. Documentation-only
 queue creation requires link/consistency checks, not ML training or deployment.
 
-For C1, begin with the three test files listed there and compare `_prepare` with
-`run_action(action="train")`; implementation has not started. Update each task's
-status and measured evidence when executed. No scheduled automation was created.
+C1-C6 are locally complete. Resume SM-35 from `OPEN_QUEUE.md` and the
+local Bundle improvement program. C6 remains uncommitted; no scheduled automation
+was created. Preserve the documented cloud deployment limits.

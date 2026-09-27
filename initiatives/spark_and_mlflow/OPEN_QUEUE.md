@@ -31,15 +31,16 @@ SUPERSEDED = replaced by a later user-directed scope; not a completed feature.
 ## Next session: integration/template simplification
 
 The user resumed the six simplification tasks on 2026-09-27. **SM-34C1/C2 are
-committed as `e16b27e8`; C3 is committed as `f4d654cf`. C4/C5 are locally
-complete and uncommitted. Start SM-34C6 next**, then follow C5-C6 before SM-35. [C1 evidence](69-sm34c1-shared-training-preparation.md),
+committed as `e16b27e8`; C3 is committed as `f4d654cf`. C4/C5 are committed
+as `d8e4949f`. C6 is locally complete and uncommitted. Start SM-35 next**. [C1 evidence](69-sm34c1-shared-training-preparation.md),
 [C2 and 503 tests](70-sm34c2-evidence-result-ownership.md), and
 [C3 measured read reduction and 327 tests](71-sm34c3-replay-reuse.md).
 [C4 setup reduction and CLI parity](72-sm34c4-initializer-simplification.md), and
 [C5 starter reduction and saved-code checks](73-sm34c5-smaller-generated-project.md).
+[C6 explicit entrypoints and compatibility](74-sm34c6-explicit-notebook-entrypoints.md).
 See [scope, file map and acceptance checks](68-integration-template-simplification-plan.md).
 
-Current HEAD: `f4d654cf`; graph implementation: `bd49f49e`; readable-output fix:
+Current HEAD: `d8e4949f`; graph implementation: `bd49f49e`; readable-output fix:
 `daa1e1c7`. The latter passed one live rendering test (`6136609106178`), but the
 two persistent jobs were not updated to that wheel. Queue changes do not authorize
 deployment. Preserve existing snapshots, receipts, manual actions and score guards.
@@ -79,7 +80,7 @@ eight tasks/eight edges, preserved durable phases, shared failure cleanup and
 task-state-guarded score handoff. [Evidence](67-sm34b-simplified-lifecycle-graph.md).
 The new graph passed [live acceptance](rehearsals/sm34b_live/README.md), including
 both engines, manual approval, scoring/no-op and two controlled failures.
-SM-34C6 is the next local task; SM-35 follows the C1-C6 simplification sequence.
+SM-35 is the next local task; the C1-C6 simplification sequence is locally complete.
 New generic row predicates, group-aware splitting and data-quality thresholds
 are parked at the user's request.
 See [the operation audit and implementation tasks](62-pre-split-cleaning-and-leakage-plan.md).
@@ -139,10 +140,10 @@ on an existing candidate without retraining or reuploading the model.
 | SM-34C1 | Share training preparation and registration operations | SM-34B | DONE | Shared SDK/task preparation and registration; durable boundaries and compatibility preserved. Local tests, Ruff/type checks and independent review passed; committed as e16b27e8, no cloud run. [Evidence](69-sm34c1-shared-training-preparation.md) |
 | SM-34C2 | Clarify evidence and result ownership | SM-34C1 | DONE | Shared saved-spec conversion, verified evidence owner and workflow result builder; task-to-notebook dependency removed with compatibility imports preserved. 503 tests after Sourcery readability follow-up, lint/type checks and independent review passed; committed as e16b27e8, no cloud run. [Evidence](70-sm34c2-evidence-result-ownership.md) |
 | SM-34C3 | Avoid redundant replay within a task | SM-34C2 | DONE | Both engines/policies: compare/decide source reads 3 to 2, client artifact downloads 27 to 25; registration and mutation guards retained. 327 tests, lint/type checks and review passed; committed as f4d654cf. [Evidence](71-sm34c3-replay-reuse.md) |
-| SM-34C4 | Reduce initial setup complexity | After SM-34C3 in delivery order | DONE | Default prompts 33 to 26; 13 advanced settings retain config-file overrides. 127 local tests, 68 CLI cases verified; 12 before/after configs and previews identical. Uncommitted, no cloud run. [Evidence](72-sm34c4-initializer-simplification.md) |
-| SM-34C5 | Keep generated projects small and docs consistent | SM-34C4 | DONE | README 660 to 154 lines, recipe 113 to 24; central custom example, graph2 docs, fresh-process saved-code tests. 109 local and 68 CLI tests passed; uncommitted. [Evidence](73-sm34c5-smaller-generated-project.md) |
-| SM-34C6 | Retire redundant notebook lifecycle routing carefully | SM-34C5; ownership from C2 | READY | Audit callers, narrow score/fixed-phase adapters, preserve SDK APIs or documented compatibility wrapper; final affected checks |
-| SM-35 | Multi-metric quality gates and clear thresholds | SM-34C6 | WAIT | One selection metric plus optional guardrails; task/domain validation, first-model gate, failed-gate explanations and no probability-threshold confusion |
+| SM-34C4 | Reduce initial setup complexity | After SM-34C3 in delivery order | DONE | Default prompts 33 to 26; 13 advanced settings retain config-file overrides. 127 local tests, 68 CLI cases verified; 12 before/after configs and previews identical. Committed as d8e4949f, no cloud run. [Evidence](72-sm34c4-initializer-simplification.md) |
+| SM-34C5 | Keep generated projects small and docs consistent | SM-34C4 | DONE | README 660 to 154 lines, recipe 113 to 24; central custom example, graph2 docs, fresh-process saved-code tests. 241 combined pre-commit tests and hooks passed; committed as d8e4949f. [Evidence](73-sm34c5-smaller-generated-project.md) |
+| SM-34C6 | Retire redundant notebook lifecycle routing carefully | SM-34C5; ownership from C2 | DONE | Fixed score entrypoint, no training temp directory, retained sequential API adapter; 204 combined tests plus 10 final output tests (205 distinct), lint/type and review passed. Uncommitted. [Evidence](74-sm34c6-explicit-notebook-entrypoints.md) |
+| SM-35 | Multi-metric quality gates and clear thresholds | SM-34C6 | READY | One selection metric plus optional guardrails; task/domain validation, first-model gate, failed-gate explanations and no probability-threshold confusion |
 | SM-36 | Core tuning, model search and optional explainability | SM-35 | WAIT | Guided advanced search on a selected base model; existing hyperparameter_tuner/TuningConfig and shared CV settings; Core spaces/trials/FE, validated budgets, protected holdout and MLflow/inference parity; routing audit in report 58 |
 | SM-36a | Project-owned feature engineering and output rules | SM-33D, SM-33H3 | WAIT | SM-33F delivers single-file custom FE; existing node placement/normalization/dedup moves to H3. Remaining: temporal context/CV policy, keyed scoring exclusions, broader packaging and output rules; optional H3Index/sentence-model execution and custom pre-split value normalization remain open in matrix63. New group-split/predicate/data-quality gates are parked; reports 58/62 |
 | SM-36b | Multiple training branches from one pinned source | SM-36, SM-36a | WAIT | Per-target pipelines/labels/tuning/metrics, linked MLflow runs, reproducible splits and bounded execution; keep multiple models rather than selecting one winner |

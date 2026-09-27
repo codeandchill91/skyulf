@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import pytest
 
 
+@pytest.mark.parametrize("entrypoint", ["run_notebook", "run_score_notebook"])
 @pytest.mark.parametrize(
     "change",
     [
@@ -21,7 +22,7 @@ import pytest
     ],
 )
 def test_notebook_rejects_invalid_project_before_registry_or_writes(
-    tmp_path, monkeypatch, workflow_config, change
+    tmp_path, monkeypatch, workflow_config, change, entrypoint
 ):
     """Config and deployed graph mismatch must fail before any data or alias side effect."""
     from skyulf.integrations.databricks import job_runtime
@@ -41,8 +42,10 @@ def test_notebook_rejects_invalid_project_before_registry_or_writes(
     execute = Mock()
     monkeypatch.setattr(job_runtime, "run_action", execute)
     with pytest.raises(ValueError):
-        job_runtime.run_notebook(
-            None, SimpleNamespace(widgets=SimpleNamespace(getAll=lambda: values)), task_role="score"
+        getattr(job_runtime, entrypoint)(
+            None,
+            SimpleNamespace(widgets=SimpleNamespace(getAll=lambda: values)),
+            **({"task_role": "score"} if entrypoint == "run_notebook" else {}),
         )
     execute.assert_not_called()
 
@@ -134,6 +137,15 @@ def test_notebook_delegates_bound_target_and_selected_action(
         jobs=SimpleNamespace(taskValues=task_values),
     )
     if action == "score":
+        monkeypatch.setattr(
+            job_runtime.tempfile,
+            "TemporaryDirectory",
+            Mock(
+                side_effect=AssertionError(
+                    "Scoring must not allocate a training artifact directory"
+                )
+            ),
+        )
         runpy.run_path(
             str(path), run_name="__main__", init_globals={"spark": spark, "dbutils": dbutils}
         )
@@ -179,8 +191,9 @@ def test_notebook_delegates_bound_target_and_selected_action(
 
 
 @pytest.mark.parametrize("override", ["task_role", "action"])
+@pytest.mark.parametrize("entrypoint", ["run_notebook", "run_score_notebook"])
 def test_score_notebook_retains_override_guards_when_removing_parent_evidence(
-    tmp_path, monkeypatch, workflow_config, override
+    tmp_path, monkeypatch, workflow_config, override, entrypoint
 ):
     """Filtering inherited approval inputs must not hide attempts to override the fixed role."""
     from skyulf.integrations.databricks import job_runtime
@@ -221,7 +234,9 @@ def test_score_notebook_retains_override_guards_when_removing_parent_evidence(
     run = Mock()
     monkeypatch.setattr(job_runtime, "run_action", run)
     with pytest.raises(ValueError, match="cannot be overridden"):
-        job_runtime.run_notebook(
-            None, SimpleNamespace(widgets=SimpleNamespace(getAll=lambda: values)), task_role="score"
+        getattr(job_runtime, entrypoint)(
+            None,
+            SimpleNamespace(widgets=SimpleNamespace(getAll=lambda: values)),
+            **({"task_role": "score"} if entrypoint == "run_notebook" else {}),
         )
     run.assert_not_called()

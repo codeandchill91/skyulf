@@ -633,6 +633,14 @@ Regenerate and deploy the notebook files and job graph together with the
 matching wheel; graph contract 2 deliberately rejects older generated graphs.
 The workflow configuration schema remains version 1.
 
+Notebook entrypoints are explicit: generated `src/score.py` calls
+`job_runtime.run_score_notebook`; lifecycle notebooks call
+`job_runtime.run_lifecycle_notebook` with a fixed phase. Deploy new entrypoints
+with the matching wheel. Existing direct `run_notebook(task_role=...)` callers
+remain supported: score delegates to the score entrypoint, while lifecycle keeps
+its sequential behavior and does not acquire durable phase/retry semantics.
+`run_bundle_action`, `run_action` and `train_local_candidate` retain their APIs.
+
 Edit preprocessing in `src/preprocessing.py` and model/workflow settings in
 `config/workflow.json`. These remain project choices; common workflow fixes ship in the
 Skyulf wheel instead of requiring edits to every generated notebook.

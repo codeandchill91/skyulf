@@ -1,7 +1,7 @@
 # SM-34C4: shorter basic initialization, preserved advanced inputs
 
 Date: 2026-09-27. Baseline/current HEAD: `f4d654cf` (C3 committed with DCO
-sign-off and applicable hooks passing). C4 is locally complete, uncommitted.
+sign-off and applicable hooks passing). C4 was committed with C5 as `d8e4949f`.
 Next: SM-34C5. No cloud run, deployment, push or runtime change.
 
 ## Change and compatibility decision

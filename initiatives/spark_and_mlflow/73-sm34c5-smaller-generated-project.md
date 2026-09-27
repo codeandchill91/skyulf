@@ -1,6 +1,6 @@
 # SM-34C5: smaller generated README and preprocessing recipe
 
-Date: 2026-09-27. HEAD: `f4d654cf`. C4 and C5 remain uncommitted.
+Date: 2026-09-27. HEAD: `f4d654cf`. C4 and C5 were committed as `d8e4949f` (DCO signed; all applicable hooks passed).
 Baseline is the locally completed C4 tree, not the older committed README.
 No cloud run, deployment, push or runtime adapter change. Next: SM-34C6.
 

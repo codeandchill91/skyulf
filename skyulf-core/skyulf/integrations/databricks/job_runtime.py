@@ -338,41 +338,51 @@ def run_lifecycle_notebook(
     )
 
 
-def run_notebook(
+def run_score_notebook(
     spark: Any,
     dbutils: Any,
     *,
-    task_role: str,
     display_html: Callable[[str], Any] | None = None,
     exit_notebook: bool = True,
-    preprocessing_path: str | Path | None = None,
 ) -> str:
-    """Run the fixed role and render results, optionally deferring the notebook exit.
+    """Score with a fixed role, ignoring inherited parent lifecycle evidence.
 
     Generated notebooks defer exit to a separate cell: Databricks otherwise
     replaces the readable report with the exit value in the same cell.
-    A preprocessing path is relative to the config directory and used only for
-    training. Scoring and operator actions retain the saved artifact's code.
+    Scoring uses saved model code and creates no training artifact directory.
     """
     values = dbutils.widgets.getAll()
     # Databricks pushes parent job parameters into Run Job children. The score
     # entrypoint ignores inherited lifecycle evidence and always dispatches score.
     # Keep role/action override guards; only lifecycle fields are discarded here.
-    parameters = (
-        {
-            key: value
-            for key, value in values.items()
-            if key not in _OPERATOR_FIELDS | {"lifecycle_action"}
-        }
-        if task_role == "score"
-        else values
-    )
+    parameters = {
+        key: value
+        for key, value in values.items()
+        if key not in _OPERATOR_FIELDS | {"lifecycle_action"}
+    }
     config = _read_notebook_config(values)
-    if (
-        preprocessing_path is not None
-        and task_role == "lifecycle"
-        and parameters.get("lifecycle_action") == "train"
-    ):
+    outcome = run_bundle_action(spark, config, parameters, task_role="score")
+    return _notebook_output(
+        asdict(outcome),
+        dbutils,
+        render=render_bundle_output,
+        display_html=display_html,
+        exit_notebook=exit_notebook,
+    )
+
+
+def _run_legacy_lifecycle_notebook(
+    spark: Any,
+    dbutils: Any,
+    *,
+    display_html: Callable[[str], Any] | None,
+    exit_notebook: bool,
+    preprocessing_path: str | Path | None,
+) -> str:
+    """Preserve the sequential notebook API for callers outside the phased graph."""
+    values = dbutils.widgets.getAll()
+    config = _read_notebook_config(values)
+    if preprocessing_path is not None and values.get("lifecycle_action") == "train":
         from .project import load_project_workflow  # noqa: PLC0415 - project code is training-only
 
         config = load_project_workflow(
@@ -382,18 +392,48 @@ def run_notebook(
         outcome = run_bundle_action(
             spark,
             config,
-            parameters,
-            task_role=task_role,
+            values,
+            task_role="lifecycle",
             experiment_name=values.get("experiment_name"),
             artifact_path=Path(directory) / "artifact",
         )
     payload = asdict(outcome)
-    if task_role == "lifecycle":
-        dbutils.jobs.taskValues.set(key="score_requested", value=outcome.score_requested)
+    dbutils.jobs.taskValues.set(key="score_requested", value=outcome.score_requested)
     return _notebook_output(
         payload,
         dbutils,
         render=render_bundle_output,
         display_html=display_html,
         exit_notebook=exit_notebook,
+    )
+
+
+def run_notebook(
+    spark: Any,
+    dbutils: Any,
+    *,
+    task_role: str,
+    display_html: Callable[[str], Any] | None = None,
+    exit_notebook: bool = True,
+    preprocessing_path: str | Path | None = None,
+) -> str:
+    """Keep the role-based notebook API compatible for existing direct callers.
+
+    Generated projects use run_score_notebook or run_lifecycle_notebook instead.
+    The lifecycle role here retains sequential execution, not durable phases.
+    preprocessing_path is relative to the config directory and only used for
+    training; scoring and operator actions use the saved model's code.
+    """
+    if task_role == "score":
+        return run_score_notebook(
+            spark, dbutils, display_html=display_html, exit_notebook=exit_notebook
+        )
+    if task_role != "lifecycle":
+        raise ValueError("Notebook task_role must be lifecycle or score.")
+    return _run_legacy_lifecycle_notebook(
+        spark,
+        dbutils,
+        display_html=display_html,
+        exit_notebook=exit_notebook,
+        preprocessing_path=preprocessing_path,
     )

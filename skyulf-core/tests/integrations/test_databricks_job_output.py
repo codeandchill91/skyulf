@@ -100,8 +100,9 @@ def test_manual_training_output_shows_metrics_and_simple_action_fields():
 
 
 @pytest.mark.parametrize("display_fails", [False, True])
+@pytest.mark.parametrize("entrypoint", ["run_notebook", "run_score_notebook"])
 def test_notebook_renders_summary_and_preserves_machine_result(
-    tmp_path, monkeypatch, workflow_config, capsys, display_fails
+    tmp_path, monkeypatch, workflow_config, capsys, display_fails, entrypoint
 ):
     """Readable notebook output must preserve the API exit JSON contract."""
     from types import SimpleNamespace
@@ -124,10 +125,10 @@ def test_notebook_renders_summary_and_preserves_machine_result(
     monkeypatch.setattr(job_runtime, "run_bundle_action", lambda *args, **kwargs: outcome)
     notebook = Mock()
     display = Mock(side_effect=RuntimeError("display unavailable") if display_fails else None)
-    job_runtime.run_notebook(
+    getattr(job_runtime, entrypoint)(
         None,
         SimpleNamespace(widgets=SimpleNamespace(getAll=lambda: values), notebook=notebook),
-        task_role="score",
+        **({"task_role": "score"} if entrypoint == "run_notebook" else {}),
         display_html=display,
     )
     assert "No new predictions written" in display.call_args.args[0]
@@ -148,6 +149,35 @@ def test_generated_notebook_keeps_report_and_exit_in_separate_cells(entrypoint):
     )
     cells = path.read_text().split("# COMMAND ----------")
     assert len(cells) == 2
-    expected_call = "run_lifecycle_notebook(" if entrypoint == "workflow.py" else "run_notebook("
+    expected_call = (
+        "run_lifecycle_notebook(" if entrypoint == "workflow.py" else "run_score_notebook("
+    )
     assert "exit_notebook=False" in cells[0] and expected_call in cells[0]
     assert ".notebook.exit(output)" in cells[1]
+
+
+def test_legacy_notebook_converts_result_before_publishing_score_request(monkeypatch):
+    """A failed result conversion must not publish a success/handoff task value."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from skyulf.integrations.databricks import job_runtime
+
+    class Uncopyable:
+        """Represent a result that fails dataclass conversion before JSON rendering."""
+
+        def __deepcopy__(self, memo):
+            """Expose the ordering boundary without executing lifecycle mutations."""
+            raise RuntimeError("cannot copy result")
+
+    outcome = job_runtime.BundleActionResult("train", {"value": Uncopyable()}, True, {})
+    monkeypatch.setattr(job_runtime, "_read_notebook_config", lambda values: {})
+    monkeypatch.setattr(job_runtime, "run_bundle_action", lambda *args, **kwargs: outcome)
+    task_values = Mock()
+    dbutils = SimpleNamespace(
+        widgets=SimpleNamespace(getAll=lambda: {"lifecycle_action": "train"}),
+        jobs=SimpleNamespace(taskValues=task_values),
+    )
+    with pytest.raises(RuntimeError, match="cannot copy result"):
+        job_runtime.run_notebook(None, dbutils, task_role="lifecycle")
+    task_values.set.assert_not_called()
