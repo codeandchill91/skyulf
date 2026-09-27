@@ -136,6 +136,8 @@ def _training(params: dict[str, Any], *, tuned: bool = False) -> None:
         _finite_candidates(params.get("search_space"))
     if params.get("cv_enabled", tuned):
         _number(params, "cv_folds", 2, integer=True)
+        if params.get("cv_type") == "nested_cv" and params.get("cv_inner_folds") is not None:
+            _number(params, "cv_inner_folds", 2, integer=True)
     for seed in ("random_state", "cv_random_state"):
         if params.get(seed) is not None:
             _number(params, seed, 0, 4294967295, integer=True)

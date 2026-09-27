@@ -135,7 +135,6 @@ def test_temporal_cv_keeps_time_metadata_out_of_features(monkeypatch, engine):
         {"random_state": -1},
         {"random_state": 2**32},
         {"shuffle": 1},
-        {"method": "nested_cv"},
         {"method": "unknown"},
         {"method": "time_series_split", "shuffle": True},
         {"method": "shuffle_split", "shuffle": False},
@@ -150,6 +149,18 @@ def test_invalid_cv_settings_fail_explicitly(changes):
 def test_disabled_cv_does_not_fit_or_validate_data():
     """Leaving CV disabled must add no fold fits to an ordinary training run."""
     assert evaluate_training_cv(pd.DataFrame(), {}, LocalCVSpec(), target_column="target") is None
+
+
+def test_nested_cv_rejects_rare_classes_before_any_fit():
+    """Nested classification must validate its actual stratified inner folds."""
+    frame = pd.DataFrame({"x": range(12), "target": [0] * 10 + [1] * 2})
+    with pytest.raises(ValueError, match="rows per class"):
+        evaluate_training_cv(
+            frame,
+            _pipeline(True),
+            LocalCVSpec(enabled=True, folds=3, method="nested_cv"),
+            target_column="target",
+        )
 
 
 def test_stratified_regression_and_rare_classes_fail_before_fit():

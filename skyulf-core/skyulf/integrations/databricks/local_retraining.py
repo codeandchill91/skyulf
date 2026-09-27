@@ -12,7 +12,6 @@ import json
 import math
 import pickle
 from collections.abc import Callable
-from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from importlib import import_module
@@ -42,6 +41,7 @@ from ..mlflow.validation import (
 from ._contracts import column_name, table_name
 from .local_batch import _frame_bytes, fit_local_workflow
 from .local_cv import CV_FIELDS, LocalCVSpec, evaluate_training_cv
+from .local_explanations import explain_training_artifact, validate_explanation_config
 from .local_pre_split import (
     FIXED_TYPES,
     custom_filter_columns,
@@ -50,6 +50,8 @@ from .local_pre_split import (
     projected_fixed_steps,
     target_contract,
 )
+from .local_search import base_model_config, prepare_search_pipeline
+from .local_search_results import post_selection_cv, tuning_evidence, validate_search_membership
 from .local_training_evidence import build_training_evidence, evidence_digest
 from .training_dates import (
     TrainingDateSpec,
@@ -910,7 +912,10 @@ def _candidate_config(
         spec.target_column,
         (*spec.record_key_columns, spec.event_column, spec.result_available_at_column),
     )
-    pipeline_config = deepcopy(config)
+    validate_explanation_config(config)
+    pipeline_config = prepare_search_pipeline(
+        config, cv, target_column=spec.target_column, event_column=spec.event_column
+    )
     feature_prefix = projected_fixed_steps(spec.pre_split_steps, spec.input_columns)
     pipeline_config["preprocessing"] = [*feature_prefix, *pipeline_config.get("preprocessing", [])]
     contract = target_contract(spec.pre_split_steps, spec.target_column)
@@ -921,7 +926,8 @@ def _candidate_config(
         pipeline_config, target_column=spec.target_column, event_column=spec.event_column
     )
     if spec.stratify and (
-        NodeRegistry.get_calculator(config["modeling"]["type"])().problem_type != "classification"
+        NodeRegistry.get_calculator(base_model_config(config)["type"])().problem_type
+        != "classification"
     ):
         raise ValueError("stratify requires a classification model.")
     if risk_category is not None and (
@@ -938,7 +944,7 @@ def _candidate_config(
         metric,
         quality_threshold,
         quality_gates,
-        task=NodeRegistry.get_calculator(config["modeling"]["type"])().problem_type,
+        task=NodeRegistry.get_calculator(base_model_config(config)["type"])().problem_type,
     )
     if champion_version is not None and (
         type(champion_version) is not str
@@ -962,7 +968,7 @@ def _fit_candidate(
     risk_category: str | None,
 ) -> _FittedCandidate:
     """Fit CV and final training rows, persisting selection and provenance evidence."""
-    run.log_config(pipeline_config, artifact_file="skyulf_pipeline_config.json")
+    run.log_config(pipeline_config, artifact_file="pipeline_config.json")
     run.client.log_dict(run.run_id, config, "training_pipeline_config.json")
     run.log_params({key: getattr(cv, field) for key, field in CV_FIELDS.items()})
     run.client.log_dict(run.run_id, _training_spec_payload(spec, engine), "training_snapshot.json")
@@ -978,14 +984,25 @@ def _fit_candidate(
     )
     native_train = pl.from_pandas(train_frame) if engine == "polars" else train_frame
     native_holdout = pl.from_pandas(holdout) if engine == "polars" else holdout
-    cv_results = evaluate_training_cv(
-        native_train,
-        pipeline_config,
-        cv,
-        target_column=spec.target_column,
-        event_column=spec.event_column if temporal_cv else None,
-    )
-    if temporal_cv:
+    search = pipeline_config["modeling"]["type"] == "hyperparameter_tuner"
+    cv_results = None
+    if search:
+        validate_search_membership(
+            native_train,
+            pipeline_config,
+            cv,
+            target_column=spec.target_column,
+            event_column=spec.event_column,
+        )
+    else:
+        cv_results = evaluate_training_cv(
+            native_train,
+            pipeline_config,
+            cv,
+            target_column=spec.target_column,
+            event_column=spec.event_column if temporal_cv else None,
+        )
+    if temporal_cv and not search:
         model_columns = [*spec.input_columns, spec.target_column]
         native_train = (
             native_train.select(model_columns)
@@ -1000,6 +1017,17 @@ def _fit_candidate(
         max_rows=spec.max_rows,
         max_bytes=spec.max_bytes,
     )
+    if search:
+        cv_results = post_selection_cv(
+            native_train,
+            artifact,
+            cv,
+            target_column=spec.target_column,
+            event_column=spec.event_column,
+        )
+    if pipeline_config.get("explainability"):
+        explanation = explain_training_artifact(artifact, native_train)
+        run.client.log_dict(run.run_id, explanation, "explanations.json")
     evidence = build_training_evidence(
         spec, holdout, project_source_sha256=artifact.manifest.project_source_sha256
     )
@@ -1036,6 +1064,19 @@ def _log_fitted_candidate(
     frame, holdout = fitted.source_frame, fitted.evidence_holdout
     cv_results, evidence = fitted.cv_results, fitted.evidence
     unavailable = fitted.unavailable_labels
+    if config["modeling"]["type"] == "hyperparameter_tuner":
+        search_result = tuning_evidence(artifact)
+        if search_result is None:
+            raise ValueError("Fitted search artifact lacks tuning evidence.")
+        run.client.log_dict(run.run_id, search_result, "tuning.json")
+        run.log_params(
+            {
+                "tuning_strategy": search_result["modeling"]["strategy"],
+                "tuning_metric": search_result["scoring_metric"],
+                "tuning_trials": search_result["n_trials"],
+            }
+        )
+        run.log_metrics({"tuning_best_score": search_result["best_score"]})
     if cv_results is not None:
         cv_results.update(
             dataset_id=spec.dataset_id, training_rows=fitted.training_rows, engine=engine
@@ -1068,7 +1109,7 @@ def _log_fitted_candidate(
         "train_data_version": str(spec.version),
         "test_data_version": str(spec.version),
         "split_strategy": spec.split_strategy,
-        "model_type": str(config["modeling"]["type"]),
+        "model_type": str(base_model_config(config)["type"]),
         "candidate_date_tag": datetime.now(UTC).date().isoformat(),
         "engine": engine,
     }

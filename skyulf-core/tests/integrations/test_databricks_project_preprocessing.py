@@ -119,6 +119,123 @@ def test_project_rejects_two_preprocessing_sources(tmp_path):
         )
 
 
+def test_sibling_tuning_hook_overrides_search_space_and_pins_source(tmp_path):
+    """A selected search may use the project's bounded candidate factory."""
+    from skyulf.integrations.databricks.project import load_project_workflow
+
+    source = tmp_path / "preprocessing.py"
+    source.write_text(SOURCE, encoding="utf-8")
+    hook = tmp_path / "tuning.py"
+    code = (
+        "def build_search_space(*, model_type, strategy, params):\n"
+        "    assert (model_type, strategy, params) == "
+        "('random_forest_regressor', 'grid', {'n_estimators': 3})\n"
+        "    return {'max_depth': [2, 3]}\n"
+    )
+    hook.write_text(code, encoding="utf-8")
+    config = {
+        "pipeline": {
+            "preprocessing": [],
+            "modeling": {
+                "type": "hyperparameter_tuner",
+                "base_model": {"type": "random_forest_regressor", "params": {"n_estimators": 3}},
+                "strategy": "grid",
+                "search_space": {"max_depth": [8]},
+            },
+        }
+    }
+
+    result = load_project_workflow(config, source)
+
+    import hashlib
+
+    assert result["pipeline"]["modeling"]["search_space"] == {"max_depth": [2, 3]}
+    pinned = hook.read_bytes().decode("utf-8")
+    assert result["pipeline"]["search_python_source"] == pinned
+    assert result["pipeline"]["search_python_sha256"] == hashlib.sha256(pinned.encode()).hexdigest()
+    assert config["pipeline"]["modeling"]["search_space"] == {"max_depth": [8]}
+
+
+@pytest.mark.parametrize(
+    "hook_source", [None, "def build_search_space(**kwargs):\n    return None\n"]
+)
+def test_missing_or_none_tuning_hook_preserves_search_space(tmp_path, hook_source):
+    """Projects without a candidate override retain normal Core search selection."""
+    from skyulf.integrations.databricks.project import load_project_workflow
+
+    source = tmp_path / "preprocessing.py"
+    source.write_text(SOURCE, encoding="utf-8")
+    if hook_source is not None:
+        (tmp_path / "tuning.py").write_text(hook_source, encoding="utf-8")
+    config = {
+        "pipeline": {
+            "preprocessing": [],
+            "modeling": {
+                "type": "hyperparameter_tuner",
+                "base_model": {"type": "linear_regression"},
+                "search_space": {"fit_intercept": [True, False]},
+            },
+        }
+    }
+
+    result = load_project_workflow(config, source)
+
+    assert result["pipeline"]["modeling"]["search_space"] == {"fit_intercept": [True, False]}
+    assert ("search_python_source" in result["pipeline"]) is (hook_source is not None)
+
+
+@pytest.mark.parametrize(
+    "hook_source",
+    [
+        "def build_search_space(**kwargs):\n    return []\n",
+        "def build_search_space(**kwargs):\n    return {'bad': [float('nan')]}\n",
+        "answer = 42\n",
+    ],
+)
+def test_invalid_tuning_hook_fails_before_training(tmp_path, hook_source):
+    """Malformed custom search output cannot silently enter Core search."""
+    from skyulf.integrations.databricks.project import load_project_workflow
+
+    source = tmp_path / "preprocessing.py"
+    source.write_text(SOURCE, encoding="utf-8")
+    (tmp_path / "tuning.py").write_text(hook_source, encoding="utf-8")
+    config = {
+        "pipeline": {
+            "preprocessing": [],
+            "modeling": {
+                "type": "hyperparameter_tuner",
+                "base_model": {"type": "linear_regression"},
+            },
+        }
+    }
+
+    with pytest.raises(ValueError, match="tuning.py|search_space"):
+        load_project_workflow(config, source)
+
+
+def test_tuning_hook_is_bounded_and_ignored_for_ordinary_model(tmp_path):
+    """Only new searches read the optional sibling and its full source budget."""
+    from skyulf.integrations.databricks.project import load_project_workflow
+
+    source = tmp_path / "preprocessing.py"
+    source.write_text(SOURCE, encoding="utf-8")
+    (tmp_path / "tuning.py").write_bytes(b"#" * (64 * 1024 + 1))
+    ordinary = {"pipeline": {"preprocessing": [], "modeling": {"type": "linear_regression"}}}
+    search = {
+        "pipeline": {
+            "preprocessing": [],
+            "modeling": {
+                "type": "hyperparameter_tuner",
+                "base_model": {"type": "linear_regression"},
+            },
+        }
+    }
+
+    assert "search_python_source" not in load_project_workflow(ordinary, source)["pipeline"]
+    with pytest.raises(ValueError, match="tuning.py source exceeds 64 KiB"):
+        load_project_workflow(search, source)
+
+
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
 def test_project_custom_fit_is_repeated_inside_cv_folds(tmp_path, monkeypatch, engine):
     """Custom learned preprocessing must never reuse a full-data mean inside CV."""

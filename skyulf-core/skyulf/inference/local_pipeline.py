@@ -44,6 +44,7 @@ class LocalPipelineManifest(BaseModel):
     execution_scope: Literal["whole_frame_local"] = "whole_frame_local"
     task: Literal["regression", "classification"]
     classes: tuple[str | int | float | bool, ...] = ()
+    classification_probabilities: bool = True
     use_tuned_thresholds: bool = False
     project_source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
@@ -80,8 +81,11 @@ def _manifest(
         raise ValueError("Local artifact requires a recorded pandas or Polars fit engine.")
     classification = is_classifier(model)
     classes = tuple(np.asarray(model.classes_).tolist()) if classification else ()
-    if classification and not callable(getattr(model, "predict_proba", None)):
-        raise ValueError("Local classification artifact requires predict_proba().")
+    classification_probabilities = not classification or callable(
+        getattr(model, "predict_proba", None)
+    )
+    if use_tuned_thresholds and not classification_probabilities:
+        raise ValueError("Tuned thresholds require classification probabilities.")
     if use_tuned_thresholds and (not classification or pipeline._tuned_thresholds is None):
         raise ValueError("Tuned thresholds require fitted classification thresholds.")
     return LocalPipelineManifest(
@@ -95,6 +99,7 @@ def _manifest(
         model_class=f"{type(model).__module__}.{type(model).__qualname__}",
         task="classification" if classification else "regression",
         classes=classes,
+        classification_probabilities=classification_probabilities,
         use_tuned_thresholds=use_tuned_thresholds,
         project_source_sha256=(
             project_source_digest(pipeline.config["project_python_source"])
@@ -234,7 +239,10 @@ def predict_local_pipeline(
         raise ValueError("Local pipeline prediction shape disagrees with input rows.")
     index = frame.index if isinstance(frame, pd.DataFrame) else pd.RangeIndex(len(frame))
     result = pd.DataFrame({"prediction": pd.Series(prediction, index=index)})
-    if artifact.manifest.task == "classification":
+    if (
+        artifact.manifest.task == "classification"
+        and artifact.manifest.classification_probabilities
+    ):
         transformed = artifact.pipeline.feature_engineer.transform(native, preserve_rows=True)
         probabilities = np.asarray(artifact.pipeline._predict_proba_transformed(transformed))
         if probabilities.shape != (len(frame), len(artifact.manifest.classes)):

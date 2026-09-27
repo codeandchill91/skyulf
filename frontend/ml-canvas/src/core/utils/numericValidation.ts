@@ -24,6 +24,10 @@ export function modelNumericIssue(config: object): ValidationResult | undefined 
   const checks: (ValidationResult | undefined)[] = [];
   if (data.run_mode === 'advanced') checks.push(numericIssue('n_trials', data.n_trials, 1, true));
   if (data.cv_enabled !== false) checks.push(numericIssue('cv_folds', data.cv_folds, 2, true));
+  if (data.cv_enabled !== false && data.cv_type === 'nested_cv') {
+    checks.push(numericIssue('cv_inner_folds', data.cv_inner_folds, 2, true));
+    if (data.tune_threshold === true) checks.push({ isValid: false, field: 'tune_threshold', message: 'Disable threshold tuning when using nested CV.' });
+  }
   if (data.strategy === 'stacking') checks.push(numericIssue('cv', data.cv, 2, true));
   if (data.task === 'classification' && data.calibrate_base_models === true) checks.push(numericIssue('calibration_cv', data.calibration_cv, 2, true));
   checks.push(parallelJobsIssue(data));

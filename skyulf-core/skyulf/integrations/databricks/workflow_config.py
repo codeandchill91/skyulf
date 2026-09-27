@@ -13,7 +13,9 @@ from ...registry import NodeRegistry
 from ..mlflow.validation import validate_quality_policy
 from ._contracts import PREDICTION_METADATA_COLUMNS, input_budget_bytes
 from .local_cv import CV_FIELDS, LocalCVSpec
+from .local_explanations import validate_explanation_config
 from .local_sdk import ModelSelection
+from .local_search import base_model_config, prepare_search_pipeline
 from .local_workflow import _training_settings, _training_spec, _training_window_mode
 from .prediction_output import _IDENTIFIER, _TABLE_NAME
 from .training_dates import training_date_spec
@@ -226,12 +228,13 @@ def _validate_workflow_pipeline(config: dict[str, Any], task: str) -> None:
     model = pipeline.get("modeling")
     if not isinstance(model, dict) or not isinstance(model.get("type"), str):
         raise ValueError("pipeline.modeling.type must identify a registered Core model.")
-    calculator = NodeRegistry.get_calculator(model["type"])
+    calculator = NodeRegistry.get_calculator(base_model_config(pipeline)["type"])
     if not issubclass(calculator, BaseModelCalculator) or calculator().problem_type != task:
         raise ValueError("Configured model does not match the declared task.")
     for step in pipeline.get("preprocessing", []):
         if issubclass(NodeRegistry.get_calculator(step["transformer"]), BaseModelCalculator):
             raise ValueError("pipeline.preprocessing cannot contain a model calculator.")
+    validate_explanation_config(pipeline)
 
 
 def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str, Any]:
@@ -253,11 +256,14 @@ def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str
     _validate_workflow_quality(config, task, policy)
     _validate_workflow_pipeline(config, task)
     _training_contract(config, action)
-    LocalCVSpec.from_workflow(config).validate_pipeline(
-        config["pipeline"],
-        target_column=config["target_column"],
-        event_column=config.get("event_column"),
-    )
+    cv = LocalCVSpec.from_workflow(config)
+    if action == "train":
+        # Saved-model actions never execute the editable project training hooks.
+        cv.validate_pipeline(
+            config["pipeline"],
+            target_column=config["target_column"],
+            event_column=config.get("event_column"),
+        )
     return deepcopy(config)
 
 
@@ -341,13 +347,20 @@ def _preview_steps(steps: list[dict[str, Any]], empty_message: str) -> list[str]
 def _preview_model_and_scoring(checked: dict[str, Any], cv: LocalCVSpec) -> list[str]:
     """Describe the model, quality policy and scoring destination."""
     model = checked["pipeline"]["modeling"]
+    if model["type"] == "hyperparameter_tuner":
+        model_lines = _preview_search(checked, cv)
+    else:
+        model_lines = [
+            f"Model: {model['type']} | Explicit params: {json.dumps(model.get('params', {}))}",
+            "Unspecified model parameters use Core defaults.",
+            f"CV: {cv.method}, {cv.folds} folds, training partition only; "
+            "preprocessing refitted per fold, no parameter search."
+            if cv.enabled
+            else "CV: disabled (final holdout evaluation still runs).",
+        ]
     return [
-        f"Model: {model['type']} | Explicit params: {json.dumps(model.get('params', {}))}",
-        "Unspecified model parameters use Core defaults.",
-        f"CV: {cv.method}, {cv.folds} folds, training partition only; "
-        "preprocessing refitted per fold, no parameter search."
-        if cv.enabled
-        else "CV: disabled (final holdout evaluation still runs).",
+        *model_lines,
+        *_preview_explanations(checked["pipeline"]),
         f"Promotion: {checked['promotion_policy']} | Metric: {checked['metric']} | "
         f"Threshold: {checked.get('quality_threshold')} | "
         f"Minimum improvement (absolute): {checked['min_improvement']}",
@@ -357,6 +370,69 @@ def _preview_model_and_scoring(checked: dict[str, Any], cv: LocalCVSpec) -> list
         f"pin={checked.get('model_version')} | handoff={checked['score_handoff']}",
         f"Prediction output: {checked['prediction_table']} | {checked['model_change_mode']}",
         "Scoring is never sampled. Validate source values and worker dependencies separately.",
+    ]
+
+
+def _preview_search(checked: dict[str, Any], cv: LocalCVSpec) -> list[str]:
+    """Describe the validated effective search without claiming fitted results."""
+    pipeline = checked["pipeline"]
+    model = pipeline["modeling"]
+    effective = prepare_search_pipeline(
+        pipeline,
+        cv,
+        target_column=checked["target_column"],
+        event_column=checked.get("event_column"),
+    )["modeling"]
+    base = model["base_model"]
+    strategy = model.get("strategy", "random")
+    source = (
+        "Core default search space" if not model.get("search_space") else "explicit search space"
+    )
+    space = effective["search_space"]
+    count = math.prod(len(values) for values in space.values())
+    budget = (
+        f"{count} candidates | max_candidates={effective.get('max_candidates', 1000)}"
+        if strategy in {"grid", "halving_grid"}
+        else f"n_trials={effective.get('n_trials', 10)} | {len(space)} search axes"
+    )
+    lines = [
+        f"Model: {base['type']} | Explicit params: {json.dumps(base.get('params', {}), sort_keys=True)}",
+        "Unspecified model parameters use Core defaults.",
+        f"Search: {strategy} | {source} | {budget}; preprocessing refitted per candidate fold.",
+        f"Search objective: {model['metric']} (Core tuning on training partition only). "
+        f"Final holdout and promotion metric: {checked['metric']}.",
+        f"Search random_state={effective.get('random_state', 42)} | "
+        f"cv_random_state={cv.random_state} (independent seeds).",
+    ]
+    if cv.enabled:
+        lines.append(f"Search CV: {cv.method}, {cv.folds} folds, training partition only.")
+    else:
+        lines.append("Search CV: disabled; Core uses one single training-only shuffle split.")
+    if cv.method == "nested_cv" and cv.enabled:
+        inner = cv.inner_folds or (min(3, cv.folds - 1) if cv.folds > 2 else 2)
+        lines.append(
+            f"Nested CV: independent {inner}-fold inner search inside each of {cv.folds} outer folds, "
+            "then a separate final training search. Search budgets apply to each search."
+        )
+    if strategy == "optuna" and effective.get("timeout") is not None:
+        lines.append(
+            f"Optuna timeout: {effective['timeout']} seconds is a soft study limit; "
+            "it does not interrupt an in-flight fit."
+        )
+    return lines
+
+
+def _preview_explanations(pipeline: dict[str, Any]) -> list[str]:
+    """Report the opted-in SHAP sample, feature and display budgets."""
+    settings = pipeline.get("explainability")
+    if settings is None:
+        return ["Explanations: disabled."]
+    samples = settings.get("max_samples", 100)
+    features = settings.get("max_features", 30)
+    display = settings.get("max_display_samples", min(10, samples))
+    return [
+        f"Explanations: SHAP, max_samples={samples}, max_features={features}, "
+        f"max_display_samples={display}; computed from the fitted training artifact when available."
     ]
 
 

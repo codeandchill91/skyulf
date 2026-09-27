@@ -55,7 +55,7 @@ Advanced settings use defaults without additional questions. Set them with
 | `training_window_mode` | `auto`: full snapshot for random, rolling calendar for temporal |
 | `test_size`, `random_state`, `stratify` | `0.2`, `42`, `false` |
 | `training_sample_rows`, `training_sample_seed` | `null` (all eligible rows within limits), `42` |
-| `cv_folds`, `cv_type`, `cv_shuffle`, `cv_random_state` | `5`, `k_fold`, `true`, `42`; the CV enable question remains |
+| `cv_folds`, `cv_type`, `cv_shuffle`, `cv_random_state` | `5`, `k_fold`, `true`, `42`; prompted when CV is enabled |
 | `min_improvement`, `risk_category` | `0.0`, empty (generated as `null`) |
 
 Existing init-file names, values and validation remain supported. Most init
@@ -108,7 +108,7 @@ schema, with any target resource suffix. Blank uses `<project_name>_predictions`
 | Source timezone | For values such as `2026-08-10 14:30` with no offset, specify where that clock time belongs, e.g. `Europe/Copenhagen`. Offset-bearing values such as `2026-08-10T14:30:00+02:00` identify their offset already. |
 | Date-only policy | `reject` stops on values without clock time. `midnight` interprets `2026-08-10` as 00:00 in the explicitly selected source timezone. |
 | Training sample | `10000` selects up to 10,000 eligible rows before splitting; with a 20% test split this usually means 8,000 train and 2,000 test. `null` uses all eligible rows within read limits. Prediction never samples. |
-| CV | With five folds, train/evaluate five fold-specific copies using training rows only. Learned preprocessing is fitted within each fold. The final test set remains separate; this does not search for better model settings. |
+| CV | With five folds, score each search candidate using five training folds. Learned preprocessing is fitted within each fold. The final test set remains separate. |
 | Cron timezone | The timezone of the job clock. A 03:00 schedule with `Europe/Copenhagen` uses Copenhagen time, including daylight saving. This does not interpret source dates or change the selected data window. |
 
 For training every six months on January 1 and July 1 at 03:00, choose
@@ -122,7 +122,7 @@ months of data a rolling window reads. Independent score scheduling is SM-34.
 | --- | --- |
 | Basics/data | Engine/task, UC names, keys/features/target, split strategy, availability/date parsing and input limits; advanced snapshot/window/sampling settings use config |
 | Model | A menu containing only models for the selected regression/classification task; defaults remain editable in the generated file |
-| Evaluation CV | Enable evaluation with fold-local preprocessing; folds, method, shuffle and seed use config |
+| Evaluation CV | Enable evaluation with fold-local preprocessing; select folds, method, shuffle and seed |
 | Lifecycle | Metric/gates, manual/automatic promotion, score selector/handoff and enabled retraining cron |
 | Compute | Serverless or approved policy cluster and cost tags |
 
@@ -340,10 +340,39 @@ instants; edit parsing rules for other source types. In initializer JSON,
 `test_size`, `random_state`, `stratify` and `filter_unavailable_results` are
 strings; generated workflow JSON stores numbers and booleans.
 
-### Optional Basic-model cross-validation
+<a id="optional-basic-model-cross-validation"></a>
 
-Edit the generated `config/workflow.json`. These are runtime settings; the
-guided initializer sections remain separate work.
+### Search and cross-validation
+
+The initializer selects a task, its model (including voting/stacking ensembles),
+then a tuning strategy and default or custom strategy settings. There is no
+Basic/Advanced mode flag. The generated `config/workflow.json` uses Core's
+`hyperparameter_tuner` with the selected `base_model`.
+
+| Strategy | Budget and custom settings |
+| --- | --- |
+| `grid` | `max_candidates` bounds the full parameter combination count |
+| `random` | `n_trials` bounds sampled candidates; separate search seed |
+| `halving_grid` | Candidate limit, factor, resource, minimum/maximum resource |
+| `halving_random` | Sampled candidate limit and the same halving controls |
+| `optuna` | Trial limit, sampler, pruner, pruning and optional soft timeout |
+
+Search spaces come from Core's model/strategy catalog or ensemble builder.
+Override them in `src/tuning.py::build_search_space(model_type, strategy, params)`;
+return `None` to preserve an explicit JSON space or use Core defaults. A returned
+dictionary of finite candidate lists takes precedence over the JSON space.
+The resolved space and exact Python source are saved with the trained artifact.
+Changing the file affects future training; scoring uses the saved fitted model.
+Fixed scalar model parameters remain fixed during search. Ensemble structural
+settings stay on the base model. Estimator-specific value compatibility is checked
+when Core fits the model; offline preview validates structure and budgets.
+
+Training is sequential (`n_jobs=1`). Grid admission fails if the full space exceeds
+the configured limit; it does not truncate it. Optuna requires its optional sklearn
+integration. Its timeout is a soft search deadline and cannot interrupt an active
+model fit. Decision-threshold tuning is not enabled by this adapter.
+
+Edit shared CV settings in the generated configuration:
 
 ```json
 {
@@ -355,33 +384,123 @@ guided initializer sections remain separate work.
 }
 ```
 
-This matches Basic training with fixed model parameters. CV trains independent
-fold models using Core `StatefulEstimator.cross_validate`; it neither searches
-hyperparameters nor changes the model saved for scoring. The final pipeline is
-fitted independently on the complete training partition. Preprocessing is learned
-again inside each fold using Core `FeatureEngineerFoldAdapter`. The outer holdout
-is never passed to CV or preprocessing fit. pandas and Polars both use this path.
+For a tuner these settings control candidate evaluation. Preprocessing is fitted
+inside each fold, then the selected pipeline is fitted on the complete training
+partition. The final holdout never enters search or preprocessing fit. pandas
+and Polars both use this path. Existing ordinary model configurations remain
+supported; their CV evaluates independent fixed-parameter models.
 
 - Default: CV disabled, five folds, K-fold, shuffle enabled, seed 42.
 - `cv_folds` supports 2 through 20; each fold needs at least two training and
   validation rows. Stratified CV requires classification and at least as many
   training rows per class as folds.
-- Methods: `k_fold`, `stratified_k_fold`, `shuffle_split`, `time_series_split`.
+- Methods: `k_fold`, `stratified_k_fold`, `shuffle_split`, `time_series_split`, `nested_cv`.
   Shuffle Split uses Core's 20% validation proportion and requires shuffle.
 - Time-series CV requires an explicit selected window with `event_column` and
   `cv_shuffle: false`. Its normalized timestamps order the folds and are removed
   before preprocessing/model fit. Equal timestamps across a fold boundary fail;
   choose appropriate folds or aggregate observations rather than leaking time.
 - Splitter nodes inside preprocessing are rejected when Bundle CV owns the split.
-  Unsupported methods fail instead of falling back. Core's diagnostic `nested_cv`
-  is not offered as nested hyperparameter search.
+  Unsupported methods fail instead of falling back.
+- `nested_cv` repeats the chosen strategy inside every outer training fold and
+  scores that fold's selected model on untouched outer rows. `cv_folds` selects
+  outer folds; optional `cv_inner_folds` selects inner folds (2-20). When omitted,
+  inner folds are `min(3, cv_folds - 1)`, or 2 for two outer folds. A separate
+  search on all training rows selects the saved model. Trial budgets and Optuna
+  timeouts apply per search, so five outer folds require six searches in total.
+  `tuning.json` and `cross_validation.json` retain the outer scores, per-fold
+  selected parameters and aggregate mean/std separately from the final search
+  score. Ordinary fixed-model configurations retain Core's stability diagnostics;
+  historical artifacts without nested search evidence remain labeled diagnostic.
+  Nested tuning uses stratified folds for classification and K-fold for regression;
+  temporal/group nested splitters are not included. Combining it with
+  `tune_threshold: true` fails explicitly because threshold selection is not yet
+  evaluated independently within the outer folds.
 
-MLflow stores `cross_validation.json` with each fold's metrics, aggregate metrics,
-fold-refit counts, source/split dataset identity and engine. Experiment metrics
-include `cv_rmse_mean`, `cv_rmse_std` and equivalent supported metrics. The
+MLflow stores `cross_validation.json` with fold results, aggregate metrics,
+source/split dataset identity and engine. Ordinary CV includes fold-refit counts
+and metrics such as `cv_rmse_mean` and `cv_rmse_std`. Nested search reports its
+selection scorer, for example `cv_neg_mean_squared_error_mean`; negative loss
+scores remain negative, with larger scores better. The
 `heldout_*` metrics remain the separate candidate/champion promotion evidence.
-CV disabled means no additional fold fits. Advanced search/Optuna integration is
-still SM-36; enabling this section does not enable tuning.
+With CV disabled, search uses one training-only 80/20 validation split; an ordinary
+model adds no fold fits. Search runs save `tuning.json` with effective settings,
+trials, best parameters and the actual scorer. Negative loss scores remain negative
+and higher is better. `train_and_register` displays a compact search summary.
+
+Optional `pipeline.explainability` accepts `{"method": "shap", "max_samples": 100,
+"max_features": 30, "max_display_samples": 10}`. It uses bounded training rows and
+already fitted preprocessing, without fitting again. `explanations.json` records
+results or an explicit unavailable reason. Limits are 200 samples, 50 transformed
+features and 50 displayed samples; explanations are disabled when this field is absent.
+
+To enable SHAP in a generated project, add this entry inside the existing
+`pipeline` object in `config/workflow.json` (alongside `modeling` and
+`preprocessing`):
+
+```json
+"explainability": {
+  "method": "shap",
+  "max_samples": 100,
+  "max_features": 30,
+  "max_display_samples": 10
+}
+```
+
+The training runtime also needs the optional `shap>=0.46.0,<1.0.0` dependency
+declared by Core's `explainability` extra. The generated wheel/MLflow dependency
+list does not install this extra automatically. For serverless training, add SHAP
+to the training environment's `dependencies` in `resources/workflow.jobs.yml`;
+for classic compute, include it in the training task's PyPI libraries.
+
+Run the normal training job; do not execute `local_explanations.py` directly.
+`train_and_register` reports the explanation status, sample count and artifact name.
+Open that training run in MLflow and read **Artifacts > explanations.json** for
+global feature importance and the bounded per-row explanations. The Bundle
+currently publishes JSON evidence and a status summary, not SHAP charts.
+`max_features` is a guard on the transformed feature count, not a top-feature
+selector. Exceeding it, missing SHAP or an unsupported explanation returns an
+explicit `unavailable` reason.
+
+### Ensemble recipes
+
+Select `voting_classifier`, `stacking_classifier`, `voting_regressor` or
+`stacking_regressor` for your task. Edit the generated **`src/ensemble.py`** to
+choose the component models and their settings. Set `USE_EXAMPLES = True` to
+activate its four example recipes, then edit the recipe for your selected model.
+Returning `None` keeps the parameters already configured in JSON and Core defaults.
+Returned keys override matching `pipeline.modeling.base_model.params` keys before
+`src/tuning.py` resolves the search space. Both recipes are pinned for future replay.
+
+| Setting from Canvas | Bundle ensemble recipe |
+| --- | --- |
+| Base Models | `base_estimators`: Core member keys such as `random_forest`, `ridge`, `sgd_classifier` |
+| Voting Type | Classifier `voting`: `soft` or `hard` |
+| Model Weights | `weights`: a model-name map or an ordered list; missing map entries use 1 |
+| Base Model Hyperparameters | `base_estimator_params`: model-name maps of fixed parameters |
+| Calibrate base models | Classification `calibrate_base_models`, `calibration_method`, `calibration_cv` |
+| Stacking meta-learner | `final_estimator`, `final_estimator_params`, `passthrough` |
+| Stacking OOF folds | Ensemble `cv`, independent of the shared search `cv_*` settings |
+| Tune component hyperparameters | Defaults to `true` for all four ensembles in Bundle search; `false` opts out of automatic component spaces |
+| Search strategy / search CV | Existing workflow settings and optional `src/tuning.py`; no second tuning engine |
+
+Use task-compatible member keys from Core; optional XGBoost/LightGBM require the
+corresponding runtime dependency. Invalid members, duplicates, weights, parameter
+names and inapplicable family settings fail explicitly. Fixed component parameters
+remain fixed even with automatic component tuning. Conflicting manual search axes
+are rejected. Search and estimator workers remain sequential.
+
+With an empty `search_space`, the selected component models determine the automatic
+search axes, including when `USE_EXAMPLES = False`. That flag only controls the
+example overrides. Explicit nonempty search spaces remain user-owned. Grid searches
+still enforce the configured candidate limit when combining component spaces.
+
+Soft voting predicts probabilities. Hard voting predicts class labels only;
+use label-based metrics such as accuracy/F1. Probability metrics and probability
+thresholds are unavailable for hard voting. Artifact metadata, MLflow signatures
+and the local SDK output schema record that difference. Existing artifacts remain
+loadable. The GUI's auto task inference and connected-node selection are represented
+by explicit task/model/member selections in a generated project.
 
 ### Explicit training sampling
 

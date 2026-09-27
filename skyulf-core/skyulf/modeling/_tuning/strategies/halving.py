@@ -32,7 +32,37 @@ def build_halving_searcher(
     strategy_params = getattr(config, "strategy_params", {})
     factor = strategy_params.get("factor", 3)
     resource = strategy_params.get("resource", "n_samples")
+    requested_resource = resource
     min_resources = strategy_params.get("min_resources", "exhaust")
+    max_resources = strategy_params.get("max_resources", "auto")
+    if type(resource) is not str or not resource:
+        raise ValueError("Halving resource must name n_samples or an estimator parameter.")
+    if isinstance(min_resources, str) and min_resources.isdigit():
+        min_resources = int(min_resources)
+    if isinstance(max_resources, str) and max_resources.isdigit():
+        max_resources = int(max_resources)
+    if resource == "n_samples":
+        if min_resources not in ("exhaust", "smallest") and (
+            type(min_resources) is not int or min_resources <= 0
+        ):
+            raise ValueError("Halving min_resources must be positive or exhaust/smallest.")
+        if max_resources != "auto" and (type(max_resources) is not int or max_resources <= 0):
+            raise ValueError("Halving max_resources must be auto or a positive integer.")
+    else:
+        if type(max_resources) is not int or max_resources <= 0:
+            raise ValueError("Halving estimator resource requires explicit positive max_resources.")
+        if type(min_resources) is not int or min_resources <= 0:
+            raise ValueError("Halving estimator resource requires positive integer min_resources.")
+        params = base_estimator.get_params(deep=True)
+        routed = f"model__estimator__{resource}"
+        resource = routed if routed in params else resource
+        if resource not in params:
+            raise ValueError("Halving resource is not an available estimator parameter.")
+    if type(min_resources) is int and type(max_resources) is int and min_resources > max_resources:
+        raise ValueError("Halving min_resources cannot exceed max_resources.")
+    space = clean_search_space(config.search_space)
+    if resource in space or requested_resource in space:
+        raise ValueError("Halving resource cannot also appear in search_space.")
     scoring = wrap_fold_scorer(base_estimator, scoring)
 
     # Halving search uses sklearn's internal scheduler and does NOT
@@ -41,13 +71,12 @@ def build_halving_searcher(
     # while the search is running. Per-iteration progress is not
     # available without monkey-patching sklearn internals.
     if log_callback:
-        space = clean_search_space(config.search_space)
         if config.strategy == "halving_grid":
             grid_size = int(np.prod([len(v) for v in space.values()] or [0]))
             log_callback(
                 f"Starting halving_grid search "
                 f"(grid_size={grid_size}, factor={factor}, "
-                f"resource={resource}, min_resources={min_resources}). "
+                f"resource={resource}, min_resources={min_resources}, max_resources={max_resources}). "
                 f"sklearn HalvingGridSearchCV runs without per-trial callbacks; "
                 f"this may take a while."
             )
@@ -55,13 +84,10 @@ def build_halving_searcher(
             log_callback(
                 f"Starting halving_random search "
                 f"(n_candidates={config.n_trials}, factor={factor}, "
-                f"resource={resource}, min_resources={min_resources}). "
+                f"resource={resource}, min_resources={min_resources}, max_resources={max_resources}). "
                 f"sklearn HalvingRandomSearchCV runs without per-trial callbacks; "
                 f"this may take a while."
             )
-
-    if isinstance(min_resources, str) and min_resources.isdigit():
-        min_resources = int(min_resources)
 
     if config.strategy == "halving_grid":
         return HalvingGridSearchCV(
@@ -76,6 +102,7 @@ def build_halving_searcher(
             factor=factor,
             resource=resource,
             min_resources=min_resources,
+            max_resources=max_resources,
         )
     return HalvingRandomSearchCV(
         estimator=base_estimator,
@@ -90,4 +117,5 @@ def build_halving_searcher(
         factor=factor,
         resource=resource,
         min_resources=min_resources,
+        max_resources=max_resources,
     )

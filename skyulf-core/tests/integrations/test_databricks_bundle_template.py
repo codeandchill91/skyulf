@@ -122,8 +122,8 @@ def test_optional_setup_sections_hide_their_details_until_selected(enabled):
 
 
 @pytest.mark.parametrize("task", ["regression", "classification"])
-def test_advanced_settings_use_defaults_without_extra_prompts(task):
-    """Enabling CV must not restore tuning questions to the basic setup."""
+def test_data_settings_use_defaults_without_extra_prompts(task):
+    """Enabling CV should expose folds while keeping unrelated data details quiet."""
     from jsonschema import Draft7Validator
 
     properties = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())[
@@ -139,10 +139,6 @@ def test_advanced_settings_use_defaults_without_extra_prompts(task):
         "training_window_mode",
         "training_sample_rows",
         "training_sample_seed",
-        "cv_folds",
-        "cv_type",
-        "cv_shuffle",
-        "cv_random_state",
         "min_improvement",
         "risk_category",
     ):
@@ -234,6 +230,18 @@ def _render_default_config(record_key="entity_id", risk_category=""):
     content = template.read_text(encoding="utf-8")
     content = content[content.index("{\n") :].replace("{{$window}}", "full_snapshot")
     content = content.replace(
+        '{{if eq .cv_type "time_series_split"}}false{{else if eq .cv_type "shuffle_split"}}true{{else}}{{.cv_shuffle}}{{end}}',
+        "true",
+    )
+    # This lightweight resolver checks non-model defaults. The actual Go CLI
+    # exercises the conditional Basic/Advanced modeling block separately.
+    content = re.sub(
+        r'    "modeling": .*?(?=\n  }\n}\s*$)',
+        '    "modeling": {"type": "linear_regression", "params": {}}',
+        content,
+        flags=re.DOTALL,
+    )
+    content = content.replace(
         '{{if and (eq $window "rolling_calendar") (eq .split_strategy "temporal")}}'
         "{{.holdout_months}}{{else}}null{{end}}",
         "null",
@@ -298,6 +306,10 @@ def _render_default_config(record_key="entity_id", risk_category=""):
         content = content.replace(
             expression, json.dumps([v.strip() for v in values[name].split(",")])
         )
+    content = content.replace(
+        '{{if .cv_inner_folds}}  "cv_inner_folds": {{.cv_inner_folds}},\n{{end}}',
+        f'  "cv_inner_folds": {values["cv_inner_folds"]},' if values["cv_inner_folds"] else "",
+    )
     for name, value in values.items():
         content = content.replace("{{." + name + "}}", str(value))
     return json.loads(content)

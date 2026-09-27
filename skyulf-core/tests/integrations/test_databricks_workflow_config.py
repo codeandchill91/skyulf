@@ -327,3 +327,21 @@ def test_input_megabytes_reject_invalid_units_before_execution(workflow_config, 
     config["max_input_mb"] = value
     with pytest.raises(ValueError, match="max_input_mb"):
         validate_workflow_config(config, action="train")
+
+
+@pytest.mark.parametrize("action", ["score", "approve", "reject", "rollback"])
+def test_saved_model_actions_do_not_expand_editable_training_search(workflow_config, action):
+    """Saved model replay must not depend on unexecuted project ensemble overrides."""
+    from skyulf.integrations.databricks.workflow_config import validate_workflow_config
+
+    workflow_config["pipeline"]["modeling"] = {
+        "type": "hyperparameter_tuner",
+        "base_model": {"type": "voting_regressor", "params": {}},
+        "strategy": "grid",
+        "metric": "rmse",
+        "max_candidates": 10,
+        "search_space": {},
+    }
+    with pytest.raises(ValueError, match="above max_candidates"):
+        validate_workflow_config(workflow_config, action="train")
+    assert validate_workflow_config(workflow_config, action=action) == workflow_config

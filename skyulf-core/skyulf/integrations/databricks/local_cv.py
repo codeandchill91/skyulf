@@ -1,6 +1,6 @@
 """Optional training-only CV using Core estimators and fold-local feature engineering."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -16,6 +16,7 @@ from ...preprocessing.fold_adapter import (
     FeatureEngineerFoldAdapter,
 )
 from ...registry import NodeRegistry
+from .local_search import base_model_config, prepare_search_pipeline
 
 CV_FIELDS = {
     "cv_enabled": "enabled",
@@ -23,18 +24,20 @@ CV_FIELDS = {
     "cv_type": "method",
     "cv_shuffle": "shuffle",
     "cv_random_state": "random_state",
+    "cv_inner_folds": "inner_folds",
 }
 
 
 @dataclass(frozen=True, slots=True)
 class LocalCVSpec:
-    """Bound optional fixed-parameter evaluation without changing the final model."""
+    """Bound shared training-only folds for fixed models and parameter search."""
 
     enabled: bool = False
     folds: int = 5
     method: str = "k_fold"
     shuffle: bool = True
     random_state: int = 42
+    inner_folds: int | None = None
 
     def __post_init__(self) -> None:
         """Reject mistyped settings and splitter fallbacks before any source access."""
@@ -42,11 +45,21 @@ class LocalCVSpec:
             raise ValueError("cv_enabled and cv_shuffle must be boolean.")
         if type(self.folds) is not int or not 2 <= self.folds <= 20:
             raise ValueError("cv_folds must be an integer from 2 to 20.")
+        if self.inner_folds is not None and (
+            type(self.inner_folds) is not int or not 2 <= self.inner_folds <= 20
+        ):
+            raise ValueError("cv_inner_folds must be an integer from 2 to 20, or null.")
         if type(self.random_state) is not int or not 0 <= self.random_state < 2**32:
             raise ValueError("cv_random_state must be an integer from 0 to 2**32 - 1.")
-        if self.method not in ("k_fold", "stratified_k_fold", "time_series_split", "shuffle_split"):
+        if self.method not in (
+            "k_fold",
+            "stratified_k_fold",
+            "time_series_split",
+            "shuffle_split",
+            "nested_cv",
+        ):
             raise ValueError(
-                "cv_type must be k_fold, stratified_k_fold, time_series_split or shuffle_split."
+                "cv_type must be k_fold, stratified_k_fold, time_series_split, shuffle_split or nested_cv."
             )
         if self.method == "time_series_split" and self.shuffle:
             raise ValueError("Time-series CV requires cv_shuffle=false.")
@@ -61,10 +74,19 @@ class LocalCVSpec:
     def validate_pipeline(
         self, config: dict[str, Any], *, target_column: str, event_column: str | None = None
     ) -> None:
-        """Validate the fixed estimator and fold chain before training or remote work."""
+        """Validate the selected model and fold chain before training or remote work."""
+        prepare_search_pipeline(
+            config, self, target_column=target_column, event_column=event_column
+        )
         if not self.enabled:
             return
-        calculator = NodeRegistry.get_calculator(config["modeling"]["type"])()
+        if (
+            self.method == "nested_cv"
+            and self.inner_folds is not None
+            and config.get("modeling", {}).get("type") != "hyperparameter_tuner"
+        ):
+            raise ValueError("Explicit cv_inner_folds requires a nested tuning pipeline.")
+        calculator = NodeRegistry.get_calculator(base_model_config(config)["type"])()
         if not isinstance(calculator, BaseModelCalculator) or calculator.problem_type not in (
             "classification",
             "regression",
@@ -90,6 +112,9 @@ def _validate_fold_membership(
     event_column: str | None,
 ) -> None:
     """Reject undersized folds and ambiguous time boundaries before fitting any model."""
+    if spec.method == "nested_cv":
+        _validate_nested_membership(frame, spec, target_column, problem_type)
+        return
     labels = frame[target_column].to_numpy()
     if spec.method == "stratified_k_fold":
         counts = pd.Series(labels).value_counts()
@@ -122,6 +147,26 @@ def _validate_fold_membership(
             raise ValueError(
                 "A shared timestamp crosses a CV fold boundary; use different folds or aggregate observations."
             )
+
+
+def _validate_nested_membership(
+    frame: pd.DataFrame | pl.DataFrame,
+    spec: LocalCVSpec,
+    target_column: str,
+    problem_type: str,
+) -> None:
+    """Check every outer training partition has viable inner search folds."""
+    method = "stratified_k_fold" if problem_type == "classification" else "k_fold"
+    outer = replace(spec, method=method)
+    _validate_fold_membership(frame, outer, target_column, problem_type, None)
+    inner_count = spec.inner_folds or (min(3, spec.folds - 1) if spec.folds > 2 else 2)
+    inner = replace(outer, folds=inner_count)
+    splitter = _build_splitter(method, spec.folds, problem_type, spec.shuffle, spec.random_state)
+    for train, _validation in splitter.split(
+        np.arange(len(frame)), frame[target_column].to_numpy()
+    ):
+        subset = frame.iloc[train] if isinstance(frame, pd.DataFrame) else frame[train]
+        _validate_fold_membership(subset, inner, target_column, problem_type, None)
 
 
 def evaluate_training_cv(

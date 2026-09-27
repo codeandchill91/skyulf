@@ -1,4 +1,105 @@
-# Current handoff: SM-34C committed/live-verified; SM-35 locally DONE; SM-36 READY
+# Current handoff: SM-36/SM-36f verified; follow-ups queued for next work
+
+2026-09-27 user direction: commit the completed work and queue the missing nested
+capabilities. SM-36g temporal CV, SM-36h group CV and SM-36i threshold tuning are
+READY, not implemented; detailed scopes and acceptance are in reports 90-92.
+Commit gates: 166 frontend tests; broad Python run 773 passed/14 failed/69 CLI
+skipped, then all affected modules passed 176 tests after correcting stale test
+expectations/helpers and stdout-log isolation. No product change was needed; all
+255 modules still match the cloud-tested wheel. Strict documentation build passed.
+
+2026-09-27: Core/backend/Canvas/Databricks now connect independent inner searches
+within outer training folds, fold-local preprocessing, untouched outer evaluation
+and a separate final full-training search. Outer/inner controls and persisted
+results are available. Prior artifacts retain explicit diagnostics.
+
+Local gates: 499 Python regression tests, 12 output tests, 113 final frontend tests,
+3 actual CLI bundle generation cases, Ruff/full ty/frontend lint/build passed.
+User follow-up: 24 real backend PipelineEngine scenarios passed across Basic and
+Advanced, ordinary and nested CV, regression/classification and all four ensemble
+families; fixed parameters, weights, stacking CV/passthrough, saved model predictions
+and CV results were asserted. This did not exercise HTTP/Celery scheduling.
+
+Approved cloud runs succeeded: nested matrix `199364385609013` (66 cases, 198 outer
+fold evaluations, 552 search trials, 24 reference tests) and fixed-model run
+`997025503004339` (12 cases). Both pandas/Polars paths passed; 1,872 saved-artifact
+replay predictions and MLflow JSON round trips verified. Wheel `df533394` matched
+all 255 installed source modules. Initial approval rejection was resolved by
+explicit user target/payload approval. Initial notebook/directory name collision
+was fixed in the acceptance harness before submission; no product fix was needed.
+
+See [evidence](88-sm36f-nested-tuning-evidence.md) and
+[receipt](89-sm36f-nested-tuning-receipt.json). Completed SM-36/SM-36f source, rebuilt Canvas assets and reports 78-92 are
+included in this local delivery commit. No push, registry alias changes or production
+deployment. Generated rehearsal environments, wheels and raw logs remain local. Segmentation SM-36d and SHAP setup SM-36e remain waiting.
+No nested temporal/group splitters or nested threshold selection were added.
+
+## Historical SM-36 acceptance before true nested tuning
+
+Latest follow-up: **34 models x 5 strategies = 170/170** passed in Databricks,
+with 3,756 completed trials, 254 setting scenarios, 143 Logistic Regression
+regression tests, 90 pruning tests and 45 local CLI-generated projects. An older
+sklearn runtime silently losing explicit Logistic Regression penalties was
+reproduced and fixed; independent coefficients/CV scores now pass on cloud 1.6.1
+and local 1.8.0. Final wheel starts `4cdab08d`; all 254 source hashes verified.
+Nested CV is already diagnostic in Core/backend; Databricks matches that
+contract. Full per-outer-fold tuning was not added. The final matrix run is
+`970243762859545`; [report](85-sm36-full-strategy-acceptance.md),
+[verified receipt](86-sm36-full-strategy-receipt.json). These files/rehearsals are
+ignored and require explicit selection at commit. No commit or push this turn.
+Earlier model versions remain unchanged; affected models need retraining to
+receive the penalty fix. Prior acceptance below remains historical evidence.
+
+
+2026-09-27 user-requested Databricks acceptance is complete for its bounded scope:
+34 models / 68 successful trials, 306 cloud tests, eight generated lifecycle
+scenarios with 1,440 Spark predictions matching saved-model replay, eight no-ops,
+and manual approval/promotion/rollback/rejection/failed-gate checks with 180+3
+incremental scoring. Regression/classification SHAP artifacts completed. Four
+defects were reproduced and fixed: UC quality tag names, nested ensemble CV's
+tuning flag, automatic halving resource axes and saved-model search preflight.
+Ruff/format/full ty and focused local suites passed. Final scoring run
+`121620744439351`, matrix `891103093718639`, operator `246227439879614` succeeded.
+[Report and limits](83-sm36-databricks-live-acceptance.md),
+[verified receipt](84-sm36-live-receipt.json). No commit, push or persistent-job
+deployment. Earlier failed/canceled attempts remain documented; do not call their
+overall runs successful. Existing source snapshots and model versions were reused
+for score recovery without retrying alias changes.
+
+SHAP setup/dependency/readable-results integration is queued as **SM-36e**;
+segmentation stays SM-36d. Neither follow-up is implemented. New reports 82-84
+and rehearsal evidence are ignored and need explicit selection in a later commit.
+The older local-only checkpoints below describe evidence available at that time.
+
+SHAP readability/usage follow-up: 25-line public explanation coordinator,
+preserved unavailable reasons and sampling/engine behavior; union update applied
+to ensemble fixed axes. 51 SHAP/ensemble checks (including real SHAP), two local
+MLflow lifecycle cases and Ruff/format/full ty passed. Runtime dependency and
+configuration instructions are in the Bundle guide. No cloud run or commit.
+
+Latest default follow-up: all four Bundle ensemble tuning families now enable
+automatic selected-component spaces when `tune_base_models` is omitted, even
+with `USE_EXAMPLES=False`. Explicit false/manual spaces remain honored. All four
+editable examples show true. 167 focused tests, scoped Ruff/format and full ty
+passed. Segmentation is queued as SM-36d, not implemented; see
+[task scope](81-sm36d-segmentation-task.md).
+
+Latest user follow-up separates ensemble admission into `local_ensemble.py` and
+editable project composition into `src/ensemble.py`. Fixed nested parameters,
+weights/calibration/stacking, hard-voting prediction-only artifacts and the
+frontend's SGD member are now covered. Latest 287 combined tests, 77 Core checks,
+one real local MLflow hard-voting lifecycle test, Ruff/full ty and review passed
+(overlapping suites). No new cloud run or commit. [Follow-up evidence](80-sm36-ensemble-followup.md).
+
+SM-36 now directly selects a tuning strategy, without a Basic/Advanced mode.
+Core automatic spaces, optional pinned `src/tuning.py`, ensembles, shared CV,
+bounded SHAP and readable training evidence are integrated. The 323-test broad
+suite, 94 focused tests, 144 Core/halving tests, 69 template tests, 68 actual CLI
+generation cases and final 83 search checks passed; suites overlap. Ruff/format,
+full ty and independent review passed. No SM-36 cloud run or commit occurred.
+[Current evidence](79-sm36-local-search-evidence.md), [plan](78-sm36-search-plan.md).
+Reports 78/79/80/81 are ignored files and need explicit inclusion in a future commit.
+Later SM-36a/b/c/d scope and readiness remain governed by OPEN_QUEUE.md.
 
 SM-35 adds optional absolute quality gates through comparison, training, first
 champion and manual approval, plus per-gate run/version/notebook evidence.
@@ -10,17 +111,15 @@ scores were not rerun. Latest **578 tests**, Ruff/format, full ty and independen
 review passed; 3,512 before/after offline outcomes matched exactly. The strict
 docs build passed during SM-35 implementation, before this source-only follow-up.
 [Evidence](77-sm35-quality-gates-evidence.md).
-SM-35 is **uncommitted** and was not tested in Databricks; the successful live run
+SM-35 is committed as **b67594b7** with DCO and passing hooks and was not tested in Databricks; the successful live run
 below tested the prior C6/fix commits. Report-placement discussion did not change
-where split/engine details are rendered. Initiative reports 75-77 and the compact
-live receipt are ignored files; include them explicitly in the next requested
-commit. No push performed.
+where split/engine details are rendered. Initiative reports 75-77 and the compact live receipt are included in that commit. No push performed.
 
 The user resumed implementation on 2026-09-27. The six slices are in
 [report68](68-integration-template-simplification-plan.md)
 and `OPEN_QUEUE.md`: shared training operations, evidence/result ownership,
 replay reuse, simpler setup, smaller generated docs/examples, and notebook routing.
-**Continue SM-36 after reviewing the uncommitted SM-35 changes.** C3 removes the discarded decision replay and
+**SM-36 is locally complete; see report79 for evidence and limitations.** C3 removes the discarded decision replay and
 reuses comparison metadata within one phase. Both engines/policies reduced
 compare/decide source reads from 3 to 2 and client artifact downloads from 27
 to 25. The pre-registration receipt reread and fresh decision/mutation checks
@@ -63,9 +162,9 @@ into cohesive helpers and applied both dictionary unions. Latest **503 tests
 passed**, scoped Ruff/format and full ty passed; independent review found no issues.
 C1/C2 and review fixes were committed as `e16b27e8`, with DCO sign-off and all
 applicable commit hooks passing. No push was requested or performed.
-SM-35 is locally complete; SM-36 is ready. Preserve the later program's existing scope.
+SM-35 is committed; SM-36 is locally complete. Preserve the later program's existing scope.
 
-Current HEAD is `5c9798b9`; the unrelated `454d2dad` gitignore commit is preserved.
+Current HEAD is `b67594b7`; the unrelated `454d2dad` gitignore commit is preserved.
 SM-34B and its training
 follow-up were committed as `bd49f49e`; the first-candidate HTML report fix and
 runtime helper extraction were committed as `daa1e1c7`. That fix passed 83 local

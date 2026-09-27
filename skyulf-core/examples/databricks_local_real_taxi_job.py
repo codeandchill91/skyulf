@@ -189,7 +189,7 @@ def train(spark: Any) -> dict[str, Any]:
                 }
             )
             mlflow.log_metrics(metrics)
-            mlflow.log_dict(MODEL_CONFIG, "skyulf_pipeline_config.json")
+            mlflow.log_dict(MODEL_CONFIG, "pipeline_config.json")
             mlflow.log_dict(
                 {
                     "sample": SAMPLE,

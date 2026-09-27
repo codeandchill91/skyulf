@@ -494,9 +494,14 @@ def test_basic_training_with_cross_validation(pipeline_data_csv, tmp_path):
     assert cv_keys, f"expected cv_ metrics, got: {train_res.metrics.keys()}"
 
 
-def test_advanced_tuning_with_cross_validation_nested(pipeline_data_csv, tmp_path):
-    """cv_enabled + cv_type='nested_cv' on tuning exercises the post-tuning CV downgrade path."""
+@pytest.mark.parametrize("fallback", [None, "unsupported_graph"])
+def test_advanced_tuning_with_cross_validation_nested(
+    pipeline_data_csv, tmp_path, monkeypatch, fallback
+):
+    """The backend must expose independent outer scores from the Core nested searches."""
     engine = _make_engine(tmp_path, "artifacts_cv_tuning")
+    if fallback:
+        monkeypatch.setattr(engine, "_resolve_fold_preprocessing", lambda *args: (None, fallback))
     config = PipelineConfig(
         pipeline_id="p_cv_tuning",
         nodes=[
@@ -520,15 +525,27 @@ def test_advanced_tuning_with_cross_validation_nested(pipeline_data_csv, tmp_pat
                         "search_space": {"C": [0.1, 1.0]},
                         "cv_enabled": True,
                         "cv_type": "nested_cv",
+                        "cv_inner_folds": 3,
                     },
                 },
             ),
         ],
     )
     result = engine.run(config)
+    if fallback:
+        assert result.status != "success"
+        assert (
+            "Nested CV requires fold-local preprocessing"
+            in result.node_results["node_tuning"].error
+        )
+        return
     assert result.status == "success"
     tuning_res = result.node_results["node_tuning"]
     assert tuning_res.status == "success"
+    nested = tuning_res.metrics["nested_cv"]
+    assert nested["inner_folds"] == 3
+    assert len(nested["folds"]) == 2
+    assert tuning_res.metrics["cv_accuracy_mean"] == nested["mean_score"]
     cv_keys = [k for k in tuning_res.metrics if k.startswith("cv_")]
     assert cv_keys, f"expected cv_ metrics, got: {tuning_res.metrics.keys()}"
 

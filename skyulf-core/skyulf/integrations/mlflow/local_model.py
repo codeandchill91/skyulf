@@ -123,7 +123,7 @@ def _signature(artifact: LocalPipelineArtifact) -> Any:
     )
     prediction_dtype = "float64" if manifest.task == "regression" else label_dtype(manifest.classes)
     outputs = [ColSpec(_mlflow_dtype(prediction_dtype), name="prediction")]
-    if manifest.task == "classification":
+    if manifest.task == "classification" and manifest.classification_probabilities:
         outputs.extend(
             ColSpec(_mlflow_dtype("float64"), name=f"probability_{position}")
             for position in range(len(manifest.classes))

@@ -50,6 +50,16 @@ beforeEach(() => {
 
 afterEach(() => vi.unstubAllGlobals());
 
+/** Nested tuning needs independent inner/outer controls and an honest cost explanation. */
+it('exposes nested inner folds and blocks an invalid inner budget', async () => {
+  await renderSettings({ run_mode: 'advanced', cv_enabled: true, cv_type: 'nested_cv', cv_inner_folds: 1, search_space: { max_depth: [2] } });
+  fireEvent.click(screen.getByRole('button', { name: 'Cross Validation' }));
+  expect(screen.getByRole('spinbutton', { name: 'Outer folds' })).toHaveValue(5);
+  expect(screen.getByRole('spinbutton', { name: 'Inner folds' })).toHaveValue(1);
+  expect(screen.getByText(/Search budgets apply to each inner search/)).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Tune model' })).toBeDisabled();
+});
+
 /** Invalid numeric drafts must disable the direct Tune button as well as global Run. */
 it('blocks tuning with an invalid trial budget and explains how to recover', async () => {
   await renderSettings({ run_mode: 'advanced', n_trials: Number.NaN, search_space: { max_depth: [2] } });

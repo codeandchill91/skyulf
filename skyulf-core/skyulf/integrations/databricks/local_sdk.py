@@ -328,8 +328,12 @@ def preflight_local(
         output = (
             ColumnSpec(name="prediction", dtype=label),
             *(
-                ColumnSpec(name=f"probability_{i}", dtype="float64")
-                for i in range(len(manifest.classes))
+                tuple(
+                    ColumnSpec(name=f"probability_{i}", dtype="float64")
+                    for i in range(len(manifest.classes))
+                )
+                if manifest.task == "classification" and manifest.classification_probabilities
+                else ()
             ),
         )
         if config.engine != manifest.fitted_engine:

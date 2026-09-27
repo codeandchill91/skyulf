@@ -117,7 +117,7 @@ def main() -> None:
         raise AssertionError("SM-28a must not set promotion aliases.")
     for result in (baseline, candidate):
         artifacts = {item.path for item in client.list_artifacts(result.run_id)}
-        if not {"model", "candidate_comparison.json", "skyulf_pipeline_config.json"} <= artifacts:
+        if not {"model", "candidate_comparison.json", "pipeline_config.json"} <= artifacts:
             raise AssertionError("Candidate run is missing required evidence artifacts.")
     print(
         json.dumps(

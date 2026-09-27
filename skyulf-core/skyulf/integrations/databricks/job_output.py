@@ -83,6 +83,41 @@ def _comparison_summary(candidate: dict[str, Any]) -> list[str]:
     return sections
 
 
+def _nested_search_output(tuning: dict[str, Any]) -> list[str]:
+    """Display independent outer evaluation beside the separate final search score."""
+    nested = tuning.get("nested_cv")
+    if not isinstance(nested, dict) or nested.get("status") != "nested_cv":
+        return []
+    return [
+        "<h3>Nested CV evaluation</h3>",
+        _table(
+            ("Setting", "Value"),
+            [
+                ("Outer folds", nested["outer_folds"]),
+                ("Inner folds", nested["inner_folds"]),
+                ("Outer mean score", nested["mean_score"]),
+                ("Outer score std", nested["std_score"]),
+                ("Metric", nested["scoring_metric"]),
+                ("Total search trials", nested["total_trials"]),
+            ],
+        ),
+        _table(
+            ("Fold", "Inner best score", "Outer score", "Selected parameters"),
+            [
+                (
+                    fold["fold"],
+                    fold["inner_best_score"],
+                    fold["outer_score"],
+                    json.dumps(fold["best_params"], sort_keys=True),
+                )
+                for fold in nested["folds"]
+            ],
+        ),
+        "<p>Each outer score evaluates an independent search on untouched rows. "
+        "The saved model comes from a separate final search on all training rows.</p>",
+    ]
+
+
 def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
     """Show a completed phase's useful values while keeping technical receipts folded."""
     titles = {
@@ -105,6 +140,33 @@ def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
     metrics = payload.get("metrics")
     if isinstance(metrics, dict):
         sections.append(_table(("Metric", "Value"), list(metrics.items())))
+    tuning = payload.get("tuning")
+    if isinstance(tuning, dict):
+        sections.append("<h3>Training search</h3>")
+        sections.append(
+            _table(
+                ("Setting", "Value"),
+                [
+                    ("Strategy", tuning.get("strategy")),
+                    ("Trials", tuning.get("n_trials")),
+                    ("Search metric", tuning.get("scoring_metric")),
+                    ("Best search score", tuning.get("best_score")),
+                    (
+                        "Selected parameters",
+                        json.dumps(tuning.get("best_params", {}), sort_keys=True),
+                    ),
+                    ("MLflow artifact", tuning.get("artifact")),
+                ],
+            )
+        )
+        sections.append(
+            "<p>Search uses training rows only. Negative loss scores remain negative; higher is better.</p>"
+        )
+        sections.extend(_nested_search_output(tuning))
+    explanation = payload.get("explanations")
+    if isinstance(explanation, dict):
+        sections.append("<h3>Model explanations</h3>")
+        sections.append(_table(("Result", "Value"), list(explanation.items())))
     candidate = payload.get("candidate", payload)
     if "candidate" in payload:
         sections.append(

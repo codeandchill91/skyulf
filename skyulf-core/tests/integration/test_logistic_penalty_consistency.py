@@ -16,6 +16,16 @@ from skyulf.modeling._tuning.engine import TuningCalculator
 from skyulf.modeling._tuning.schemas import TuningConfig
 from skyulf.modeling.classification import LogisticRegressionCalculator
 from skyulf.preprocessing.fold_adapter import FeatureEngineerFoldAdapter
+from skyulf.registry import NodeRegistry
+
+
+def _native_penalty(penalty: str | None, ratio: float = 0.5) -> dict[str, Any]:
+    """Build independent sklearn expectations for both supported penalty APIs."""
+    if LogisticRegression().get_params().get("penalty", "deprecated") != "deprecated":
+        return {"penalty": penalty, "l1_ratio": ratio if penalty == "elasticnet" else None}
+    if penalty is None:
+        return {"C": np.inf}
+    return {"l1_ratio": {"l1": 1.0, "l2": 0.0}.get(penalty, ratio)}
 
 
 @pytest.fixture
@@ -36,11 +46,53 @@ def test_explicit_penalty_controls_direct_fit(
     params = {**settings, "penalty": penalty, "l1_ratio": supplied_ratio}
     before = deepcopy(params)
     actual = LogisticRegressionCalculator().fit(X, y, {"params": params})
-    expected = LogisticRegression(**settings, l1_ratio=ratio).fit(X, y)
+    expected = LogisticRegression(**settings, **_native_penalty(penalty, ratio)).fit(X, y)
 
     assert params == before
     np.testing.assert_allclose(actual.coef_, expected.coef_, atol=1e-12)
     np.testing.assert_allclose(actual.predict_proba(X), expected.predict_proba(X), atol=1e-12)
+
+
+@pytest.mark.parametrize("penalty", ["elasticnet", None])
+def test_other_penalties_match_native_fit(classification_data, penalty: str | None) -> None:
+    """Elastic Net and unpenalized requests must retain their native fitted meaning."""
+    X, y = classification_data
+    settings = {"solver": "saga", "C": 0.1, "random_state": 2, "max_iter": 5000}
+    actual = LogisticRegressionCalculator().fit(
+        X, y, {"params": settings | {"penalty": penalty, "l1_ratio": 0.3}}
+    )
+    expected = LogisticRegression(**(settings | _native_penalty(penalty, 0.3))).fit(X, y)
+    np.testing.assert_allclose(actual.coef_, expected.coef_, atol=1e-12)
+
+
+@pytest.mark.parametrize("model_type", ["voting_classifier", "stacking_classifier"])
+@pytest.mark.parametrize("penalty", ["l1", "l2", "elasticnet", None])
+def test_ensemble_components_keep_selected_penalty(
+    classification_data, model_type: str, penalty: str | None
+) -> None:
+    """Both ensemble base learners and stacking meta-learners must retain explicit penalties."""
+    X, y = classification_data
+    settings = {"solver": "saga", "C": 0.1, "max_iter": 5000, "random_state": 2}
+    logistic = settings | {"penalty": penalty, "l1_ratio": 0.3}
+    params: dict[str, Any] = {
+        "base_estimators": ["logistic_regression", "gaussian_nb"],
+        "base_estimator_params": {"logistic_regression": logistic},
+        "n_jobs": 1,
+    }
+    if model_type == "stacking_classifier":
+        params |= {
+            "final_estimator": "logistic_regression",
+            "final_estimator_params": logistic,
+            "cv": 2,
+        }
+    model = NodeRegistry.get_calculator(model_type)().fit(X, y, {"params": params})
+    base = model.estimators_[0]
+    expected = LogisticRegression(**(settings | _native_penalty(penalty, 0.3))).fit(X, y)
+    np.testing.assert_allclose(base.coef_, expected.coef_, atol=1e-12)
+    if model_type == "stacking_classifier":
+        for key, value in _native_penalty(penalty, 0.3).items():
+            assert model.final_estimator_.get_params()[key] == value
+    assert np.isfinite(model.predict_proba(X)).all()
 
 
 @pytest.mark.parametrize(
@@ -96,7 +148,7 @@ def test_search_scores_and_refit_match_selected_penalty(
         else None
     )
     original = deepcopy(config), deepcopy(calculator.default_params)
-    expected = LogisticRegression(**settings, l1_ratio=ratio, random_state=2)
+    expected = LogisticRegression(**settings, **_native_penalty(penalty, ratio), random_state=2)
     reference = make_pipeline(StandardScaler(), expected) if wrapped else expected
     score = cross_val_score(
         reference,
@@ -138,7 +190,7 @@ def test_search_can_leave_an_unpenalized_fixed_default(classification_data, stra
             strategy_params={"min_resources": 80},
         ),
     )
-    expected = LogisticRegression(**settings, l1_ratio=0.0, random_state=2)
+    expected = LogisticRegression(**settings, **_native_penalty("l2"), random_state=2)
     scores = cross_val_score(
         expected, X, y, scoring="neg_log_loss", cv=StratifiedKFold(2, shuffle=True, random_state=3)
     )
@@ -213,10 +265,7 @@ def test_mixed_penalty_candidates_keep_independent_scores(strategy: Any) -> None
     )
     expected_scores = {}
     for penalty, ratio in [(p, r) for p in ("l1", "l2", "elasticnet", None) for r in (0.25, 0.75)]:
-        effective_ratio = {"l1": 1.0, "l2": 0.0}.get(penalty, ratio)
-        params = {**settings, "l1_ratio": effective_ratio, "random_state": 2}
-        if penalty is None:
-            params["C"] = np.inf
+        params = {**settings, **_native_penalty(penalty, ratio), "random_state": 2}
         expected_scores[penalty, ratio] = cross_val_score(
             LogisticRegression(**params),
             X,
@@ -257,7 +306,7 @@ def test_search_restores_configured_ratio_when_entering_elasticnet(
             strategy_params={"min_resources": 80},
         ),
     )
-    expected = LogisticRegression(**settings, random_state=2)
+    expected = LogisticRegression(**(settings | _native_penalty("elasticnet", 0.3)), random_state=2)
     score = cross_val_score(
         expected, X, y, scoring="neg_log_loss", cv=StratifiedKFold(2, shuffle=True, random_state=3)
     ).mean()

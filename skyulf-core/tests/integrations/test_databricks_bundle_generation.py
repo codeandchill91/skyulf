@@ -260,10 +260,11 @@ def test_cli_plain_column_lists_preserve_order_and_empty_preprocessing(tmp_path)
     config = _read_validated_config(project)
     assert config["record_key_columns"] == ["customer_id", "observation_id"]
     assert config["input_columns"] == ["income", "age", "balance"]
-    assert config["pipeline"] == {
-        "preprocessing": [],
-        "modeling": {"type": "random_forest_regressor", "params": {}},
-    }
+    assert config["pipeline"]["preprocessing"] == []
+    modeling = config["pipeline"]["modeling"]
+    assert modeling["type"] == "hyperparameter_tuner"
+    assert modeling["base_model"] == {"type": "random_forest_regressor", "params": {}}
+    assert modeling["search_space"] == {}
     assert config["metric"] == "heldout_mae"
 
 
@@ -342,6 +343,7 @@ def test_cli_guided_pipeline_cv_and_offline_preview(tmp_path, engine, task):
         cv_enabled="true",
         cv_folds="3",
         cv_type="k_fold",
+        search_n_trials="2",
         training_sample_rows="500",
         training_sample_seed="19",
     )
@@ -354,7 +356,10 @@ def test_cli_guided_pipeline_cv_and_offline_preview(tmp_path, engine, task):
             if "notebook_task" in entry:
                 assert entry["max_retries"] == 0
                 assert entry["disable_auto_optimization"] is True
-    assert config["pipeline"]["modeling"] == {"type": model, "params": {}}
+    modeling = config["pipeline"]["modeling"]
+    assert modeling["type"] == "hyperparameter_tuner"
+    assert modeling["base_model"] == {"type": model, "params": {}}
+    assert modeling["n_trials"] == 2
     assert config["pipeline"]["preprocessing"] == []
     # Operators add their own steps after initialization; test that edited path.
     steps = [
@@ -459,7 +464,8 @@ def test_cli_initializes_task_without_stale_training_inputs(tmp_path, task, mode
     config = _read_validated_config(project)
     assert config["config_version"] == 1
     assert config["task"] == task
-    assert config["pipeline"]["modeling"]["type"] == model
+    assert config["pipeline"]["modeling"]["type"] == "hyperparameter_tuner"
+    assert config["pipeline"]["modeling"]["base_model"] == {"type": model, "params": {}}
     assert config["metric"] == metric
     assert config["training_version"] is None
     assert all(config[key] is None for key in ("start", "holdout_start", "cutoff"))
@@ -767,3 +773,20 @@ def test_cli_training_examples_pass_manual_preflight(tmp_path, filename):
     )
     assert preview.returncode == 0, preview.stdout + preview.stderr
     assert f"Engine: {inputs['engine']}" in preview.stdout
+
+
+def test_generated_nested_search_preserves_separate_inner_folds(tmp_path):
+    """The real CLI must carry inner and outer fold counts into the effective recipe."""
+    project = _generate_project(
+        tmp_path, cv_enabled="true", cv_type="nested_cv", cv_folds="4", cv_inner_folds="2"
+    )
+    config = json.loads((project / "config/workflow.json").read_text(encoding="utf-8"))
+    from skyulf.integrations.databricks.local_cv import LocalCVSpec
+    from skyulf.integrations.databricks.local_search import prepare_search_pipeline
+
+    cv = LocalCVSpec.from_workflow(config)
+    recipe = prepare_search_pipeline(
+        config["pipeline"], cv, target_column=config["target_column"], event_column=None
+    )
+    assert recipe["modeling"]["cv_folds"] == 4
+    assert recipe["modeling"]["cv_inner_folds"] == 2

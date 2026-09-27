@@ -777,7 +777,7 @@ def stage_challenger(
                 "promotion_status": "not_promoted",
                 "quality_gate_event": receipt.event_id,
                 **{
-                    f"quality_gate.{gate['metric']}": json.dumps(
+                    f"quality_gate_{gate['metric']}": json.dumps(
                         {**gate, "event_id": receipt.event_id}, sort_keys=True
                     )
                     for gate in quality_gate_results(report)

@@ -177,6 +177,7 @@ class SkyulfPipeline:
 
         base_calc, base_applier = self._resolve_from_registry(base_model_type)
         if base_calc and base_applier:
+            base_calc.prepare_tuning_params(base_model_config)
             return TuningCalculator(base_calc), TuningApplier(base_applier)
 
         raise ValueError(f"Unknown base model type for tuner: {base_model_type}")
@@ -379,6 +380,14 @@ class SkyulfPipeline:
         )
         if is_tuning:
             transformed_data, fe_metrics = self._fit_tuning_pipeline(data, target_column)
+            if input_schema is not None:
+                ordering_columns = (
+                    column
+                    for step in self.feature_engineer.fitted_steps
+                    if isinstance(step.get("applier"), _TuningColumnDropApplier)
+                    for column in step["artifact"]["columns"]
+                )
+                input_schema = input_schema.drop(ordering_columns)
         else:
             transformed_data, fe_metrics = self.feature_engineer.fit_transform(
                 data, target_column=target_column

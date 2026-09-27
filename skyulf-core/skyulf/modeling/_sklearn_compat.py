@@ -8,17 +8,18 @@ argument entirely in sklearn 1.10.
 We keep ``penalty`` (``"l1"``/``"l2"``/``"elasticnet"``/``None``) as *our*
 public config/UI field everywhere (hyperparameter registry, tuning search
 spaces, node params) since it's the familiar, well-documented concept users
-expect to configure — but translate it to the newer kwargs right before
-construction, so we never pass a bare ``penalty=`` to sklearn and never
-trigger the deprecation warning, on any sklearn version.
+expect to configure. Older sklearn versions still require that field;
+translate it only when the installed estimator exposes the newer API.
 """
 
 import math
 from typing import Any
 
+from sklearn.linear_model import LogisticRegression
+
 
 def normalize_logistic_regression_params(params: dict[str, Any]) -> dict[str, Any]:
-    """Translates a ``penalty`` key into sklearn's newer ``l1_ratio``/``C`` kwargs.
+    """Preserve a public penalty using the installed sklearn estimator's API.
 
     No-op if ``penalty`` isn't present. Returns a new dict — never mutates
     *params* in place. Explicit L1/L2 penalties determine the ratio, including
@@ -37,18 +38,22 @@ def normalize_logistic_regression_params(params: dict[str, Any]) -> dict[str, An
         return params
     params = dict(params)
     penalty = params.pop("penalty")
-    if penalty == "l2":
-        params["l1_ratio"] = 0.0
-    elif penalty == "l1":
-        params["l1_ratio"] = 1.0
-    elif penalty == "elasticnet":
-        if params.get("l1_ratio") is None:
-            params["l1_ratio"] = 0.5
-    elif penalty is None:
-        params["C"] = math.inf
-    else:
+    if penalty not in ("l1", "l2", "elasticnet", None):
         raise ValueError(
             f"Invalid Logistic Regression penalty: {penalty!r}. "
             "Expected 'l1', 'l2', 'elasticnet', or None."
         )
+    if penalty == "elasticnet" and params.get("l1_ratio") is None:
+        params["l1_ratio"] = 0.5
+    if LogisticRegression().get_params().get("penalty", "deprecated") != "deprecated":
+        params["penalty"] = penalty
+        if penalty != "elasticnet":
+            params.pop("l1_ratio", None)
+        return params
+    if penalty == "l2":
+        params["l1_ratio"] = 0.0
+    elif penalty == "l1":
+        params["l1_ratio"] = 1.0
+    elif penalty is None:
+        params["C"] = math.inf
     return params

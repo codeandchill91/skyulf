@@ -152,6 +152,9 @@ def test_notebook_renders_summary_and_preserves_machine_result(
     monkeypatch.setattr(job_runtime, "run_bundle_action", lambda *args, **kwargs: outcome)
     notebook = Mock()
     display = Mock(side_effect=RuntimeError("display unavailable") if display_fails else None)
+    warning = Mock()
+    # Other suites install stdout log handlers; logging layout is not the exit JSON contract.
+    monkeypatch.setattr(job_runtime.logging.getLogger(job_runtime.__name__), "warning", warning)
     getattr(job_runtime, entrypoint)(
         None,
         SimpleNamespace(widgets=SimpleNamespace(getAll=lambda: values), notebook=notebook),
@@ -160,7 +163,10 @@ def test_notebook_renders_summary_and_preserves_machine_result(
     )
     assert "No new predictions written" in display.call_args.args[0]
     if display_fails:
+        warning.assert_called_once_with("Readable output unavailable; see JSON result.")
         assert json.loads(capsys.readouterr().out)["result"] == {"noop": True}
+    else:
+        warning.assert_not_called()
     assert json.loads(notebook.exit.call_args.args[0])["result"] == {"noop": True}
 
 
@@ -208,3 +214,25 @@ def test_legacy_notebook_converts_result_before_publishing_score_request(monkeyp
     with pytest.raises(RuntimeError, match="cannot copy result"):
         job_runtime.run_notebook(None, dbutils, task_role="lifecycle")
     task_values.set.assert_not_called()
+
+
+def test_nested_search_output_explains_independent_outer_scores():
+    """Notebook summaries must distinguish outer evaluation from final search scores."""
+    from skyulf.integrations.databricks.job_output import render_lifecycle_output
+
+    report = {
+        "status": "nested_cv",
+        "outer_folds": 2,
+        "inner_folds": 3,
+        "mean_score": -0.25,
+        "std_score": 0.05,
+        "scoring_metric": "neg_mean_squared_error",
+        "total_trials": 6,
+        "folds": [
+            {"fold": 1, "inner_best_score": -0.1, "outer_score": -0.2, "best_params": {"alpha": 2}}
+        ],
+    }
+    html = render_lifecycle_output("train", {"tuning": {"nested_cv": report, "best_score": -0.1}})
+    assert "Nested CV evaluation" in html and "Outer mean score" in html
+    assert "Inner folds" in html and "neg_mean_squared_error" in html
+    assert "separate final search" in html

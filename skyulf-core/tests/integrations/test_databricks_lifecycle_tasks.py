@@ -214,12 +214,106 @@ def _call(staged, phase, reference=None, **kwargs):
     )
 
 
+@pytest.mark.parametrize("engine", ["pandas", "polars"])
+def test_search_result_survives_durable_registration_and_comparison(staged, engine):
+    """The registered artifact and notebook report must retain the actual selected search."""
+    from skyulf.integrations.databricks.job_output import render_lifecycle_output
+
+    _, client, config, _, _ = staged
+    config.update(engine=engine, cv_enabled=True, cv_folds=2, promotion_policy="manual_approval")
+    config["pipeline"]["modeling"] = {
+        "type": "hyperparameter_tuner",
+        "base_model": {"type": "ridge_regression"},
+        "strategy": "grid",
+        "search_space": {"alpha": [0.01, 0.1]},
+        "metric": "rmse",
+    }
+    config["pipeline"]["explainability"] = {
+        "method": "shap",
+        "max_samples": 4,
+        "max_features": 2,
+        "max_display_samples": 2,
+    }
+    prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
+    trained = _call(staged, "train_register", prepared.reference)
+    result = _call(staged, "compare_decide", trained.reference)
+    run_id = prepared.reference["run_id"]
+    evidence = json.loads(Path(client.download_artifacts(run_id, "tuning.json")).read_text())
+    assert evidence["n_trials"] == 2
+    assert evidence["best_params"]["alpha"] in [0.01, 0.1]
+    assert result.output["candidate"]["comparison"]["row_count"] == 4
+    assert result.output["candidate"]["comparison"]["candidate_metrics"]["heldout_rmse"] < 1
+    assert trained.output["tuning"]["best_params"] == evidence["best_params"]
+    assert "Selected parameters" in render_lifecycle_output("train_register", trained.output)
+    explanation = json.loads(
+        Path(client.download_artifacts(run_id, "explanations.json")).read_text()
+    )
+    assert explanation["sample_count"] == 4
+    assert explanation["status"] in {"completed", "unavailable"}
+    assert trained.output["explanations"]["status"] == explanation["status"]
+    assert "Model explanations" in render_lifecycle_output("train_register", trained.output)
+
+
+def test_hard_voting_search_survives_registry_and_heldout_comparison(staged):
+    """Prediction-only classifiers must complete the same durable candidate lifecycle."""
+    from skyulf.inference.local_pipeline import predict_local_pipeline
+    from skyulf.integrations.mlflow.registry import load_run_local_pipeline
+
+    _, client, config, _, frame = staged
+    frame["target"] = frame["x"] % 2
+    config.update(
+        metric="heldout_accuracy",
+        quality_threshold=0,
+        cv_enabled=True,
+        cv_folds=2,
+        cv_type="stratified_k_fold",
+        promotion_policy="manual_approval",
+    )
+    config["pipeline"]["modeling"] = {
+        "type": "hyperparameter_tuner",
+        "base_model": {
+            "type": "voting_classifier",
+            "params": {
+                "base_estimators": ["logistic_regression", "gaussian_nb"],
+                "voting": "hard",
+                "weights": {"logistic_regression": 2, "gaussian_nb": 1},
+            },
+        },
+        "strategy": "grid",
+        "search_space": {"logistic_regression__C": [0.1, 1]},
+        "metric": "accuracy",
+    }
+    prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
+    trained = _call(staged, "train_register", prepared.reference)
+    compared = _call(staged, "compare_decide", trained.reference)
+    candidate = compared.output["candidate"]
+    artifact = load_run_local_pipeline(
+        f"runs:/{candidate['run_id']}/model",
+        digest=candidate["model_digest"],
+        tracking_uri=config["tracking_uri"],
+    )
+    assert artifact.manifest.classification_probabilities is False
+    assert list(predict_local_pipeline(frame[["x"]], artifact).columns) == ["prediction"]
+    assert "heldout_accuracy" in candidate["comparison"]["candidate_metrics"]
+    assert "heldout_roc_auc" not in candidate["comparison"]["candidate_metrics"]
+    assert client.get_model_version(config["model_name"], "1").version == 1
+
+
 @pytest.mark.parametrize("policy", ["automatic", "manual_approval"])
-def test_quality_gates_survive_durable_training_and_approval(staged, policy):
+def test_quality_gates_survive_durable_training_and_approval(staged, policy, monkeypatch):
     """An additional bound must reach saved evidence, version tags and approval policy checks."""
     from skyulf.integrations.databricks.local_approval import approve_local_candidate
 
     _, client, config, _, _ = staged
+    original = type(client).set_model_version_tag
+
+    def set_uc_compatible_tag(self, name, version, key, value):
+        """Apply Unity Catalog's reserved-character rule to the local registry transport."""
+        if any(character in key for character in ".=><%&?\\"):
+            raise ValueError("Tag key contains reserved characters")
+        return original(self, name, version, key, value)
+
+    monkeypatch.setattr(type(client), "set_model_version_tag", set_uc_compatible_tag)
     config.update(promotion_policy=policy, quality_gates={"heldout_r2": 0.5})
     prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
     trained = _call(staged, "train_register", prepared.reference)
@@ -231,7 +325,7 @@ def test_quality_gates_survive_durable_training_and_approval(staged, policy):
     )
     assert all(gate["passed"] for gate in saved["gates"])
     tags = client.get_model_version(config["model_name"], "1").tags
-    assert json.loads(tags["quality_gate.heldout_r2"])["threshold"] == 0.5
+    assert json.loads(tags["quality_gate_heldout_r2"])["threshold"] == 0.5
     if policy == "manual_approval":
         options = {
             "candidate_version": "1",
@@ -259,7 +353,7 @@ def test_secondary_gate_prevents_automatic_first_champion(staged):
     assert decision.output["alias_change"] is None
     assert completed.output["score_requested"] is False
     tags = client.get_model_version(config["model_name"], "1").tags
-    assert json.loads(tags["quality_gate.heldout_mae"])["reason"] == "threshold_not_met"
+    assert json.loads(tags["quality_gate_heldout_mae"])["reason"] == "threshold_not_met"
     assert tags["validation_status"] == "rejected"
     assert "champion" not in client.get_registered_model(config["model_name"]).aliases
 

@@ -57,14 +57,18 @@ def evaluate_local_holdout(
             model, features, heldout[target_column], **scoring_args
         )
     else:
-        probability_columns = [
-            f"probability_{position}" for position in range(len(artifact.manifest.classes))
-        ]
+        probability_columns = (
+            [f"probability_{position}" for position in range(len(artifact.manifest.classes))]
+            if artifact.manifest.classification_probabilities
+            else []
+        )
         raw_metrics = calculate_classification_metrics(
             model,
             features,
             heldout[target_column],
-            proba=predictions.loc[:, probability_columns].to_numpy(),
+            proba=(
+                predictions.loc[:, probability_columns].to_numpy() if probability_columns else None
+            ),
             **scoring_args,
         )
     return {f"heldout_{name}": value for name, value in sanitize_metrics(raw_metrics).items()}

@@ -1078,7 +1078,7 @@ def test_restage_gate_evidence_identifies_its_comparison_event(case):
     second = stage_challenger(report, heldout, expected_challenger_version="2", **options)
     tags = client.get_model_version(name, "2").tags
     assert tags["quality_gate_event"] == second.event_id
-    assert json.loads(tags["quality_gate.heldout_mae"])["event_id"] == first.event_id
+    assert json.loads(tags["quality_gate_heldout_mae"])["event_id"] == first.event_id
     assert first.event_id != second.event_id
 
 

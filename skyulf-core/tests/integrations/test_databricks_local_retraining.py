@@ -429,7 +429,7 @@ def test_saved_filter_evidence_replays_after_project_file_changes(monkeypatch, t
     assert snapshot["engine"] == engine
     assert snapshot["holdout_key_sha256"] is None
     assert snapshot["training_evidence_sha256"] is None
-    config_path = client.download_artifacts(result.run_id, "skyulf_pipeline_config.json")
+    config_path = client.download_artifacts(result.run_id, "pipeline_config.json")
     saved_config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     assert saved_config["project_python_source"] == project["pipeline"]["project_python_source"]
 
@@ -584,7 +584,7 @@ def test_failed_training_retains_pin_before_risky_work(monkeypatch, tmp_path, en
     artifacts = {item.path for item in client.list_artifacts(runs[0].info.run_id)}
     assert artifacts == {
         "training_snapshot.json",
-        "skyulf_pipeline_config.json",
+        "pipeline_config.json",
         "training_pipeline_config.json",
     }
     assert not client.search_registered_models()
@@ -692,7 +692,7 @@ def test_snapshot_replay_uses_original_config_without_duplicate_fixed_steps(
     )
     replay = retraining.train_local_candidate(None, replay_spec, saved_config, **settings)
     effective = json.loads(
-        Path(client.download_artifacts(replay.run_id, "skyulf_pipeline_config.json")).read_text(
+        Path(client.download_artifacts(replay.run_id, "pipeline_config.json")).read_text(
             encoding="utf-8"
         )
     )

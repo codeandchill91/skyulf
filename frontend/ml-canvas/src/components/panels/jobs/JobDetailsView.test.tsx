@@ -248,6 +248,24 @@ describe('JobDetailsView', () => {
     expect(screen.getByText(/"max_depth": 3/)).toBeInTheDocument();
   });
 
+  it('separates outer nested scores from the final model search score', () => {
+    // Fold evidence must be visible without treating the final search optimum as outer evaluation.
+    renderDetails(makeJob({ job_type: 'tuning', status: 'completed', result: {
+      best_score: 0.95, scoring_metric: 'accuracy', metrics: { nested_cv: {
+        status: 'nested_cv', outer_folds: 2, inner_folds: 3, scoring_metric: 'accuracy',
+        mean_score: 0.8, std_score: 0.1, total_trials: 6,
+        folds: [
+          { fold: 1, inner_best_score: 0.9, outer_score: 0.7, best_params: { max_depth: 2 } },
+          { fold: 2, inner_best_score: 0.85, outer_score: 0.9, best_params: { max_depth: 4 } },
+        ],
+      } },
+    } }));
+    expect(screen.getByRole('heading', { name: 'Nested CV evaluation' })).toBeInTheDocument();
+    expect(screen.getByText(/Final search score/)).toBeInTheDocument();
+    expect(screen.getByText(/0.8000/)).toBeInTheDocument();
+    expect(screen.getByText('{"max_depth":2}')).toBeInTheDocument();
+  });
+
   it('falls back to the matching graph node when the persisted tuning configuration is empty', () => {
     // Legacy jobs retain their graph settings and strategy defaults when no submitted configuration was saved.
     renderDetails(makeJob({

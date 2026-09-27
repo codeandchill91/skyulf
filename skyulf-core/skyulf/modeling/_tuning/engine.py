@@ -40,6 +40,7 @@ from . import splitters
 from .fold_pipeline import FoldAwareModelStep
 from .grid_random import fit_and_score_candidate_fold, run_grid_or_random_search
 from .metrics import is_multiclass_target, resolve_metric, resolve_scorer
+from .nested import run_nested_search
 from .params import (
     clean_search_space,
     instantiate_model,
@@ -869,6 +870,17 @@ class TuningCalculator(BaseModelCalculator):
         validation_frames: tuple[Any, Any] | None = None,
     ) -> TuningResult:
         """Runs hyperparameter tuning."""
+        if config.cv_enabled and config.cv_type == "nested_cv":
+            raw_x, raw_y = preprocessing_frames if preprocessing_frames is not None else (X, y)
+            return run_nested_search(
+                self,
+                raw_x,
+                raw_y,
+                config,
+                preprocessing=preprocessing,
+                progress_callback=progress_callback,
+                log_callback=log_callback,
+            )
         # 1. Prepare Estimator
         # We need a base estimator. Since our Calculator wraps the class,
         # we need to instantiate the underlying sklearn model with default params.

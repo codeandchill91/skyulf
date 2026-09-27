@@ -54,7 +54,7 @@ before source read, split, CV, fit or heldout evaluation. `training_snapshot.jso
 records the concrete Delta table/version, input/target/key columns, ISO window
 and result cutoffs, parsing rules, split/sample/filter settings, budgets and
 engine. `training_pipeline_config.json` saves the original pipeline input with
-the existing self-contained `project_python_source`; `skyulf_pipeline_config.json`
+the existing self-contained `project_python_source`; `pipeline_config.json`
 saves the effective config after fixed preprocessing is projected into it.
 CV settings are recorded as run parameters.
 
@@ -71,7 +71,7 @@ For manual replay through the generated project:
    saved contents. Restore its pipeline modeling/settings in workflow JSON with
    `pipeline.preprocessing=[]` and top-level `pre_split_steps=[]`; the project
    loader rebuilds both hooks from the saved source. The effective
-   `skyulf_pipeline_config.json` already contains
+   `pipeline_config.json` already contains
    projected fixed steps and must not be supplied as the original input.
 2. Set `training_table` and `training_version` from snapshot `table` and `version`.
    Copy the saved input/target/key columns, engine, split/sample settings,

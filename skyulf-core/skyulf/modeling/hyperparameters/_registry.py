@@ -570,6 +570,7 @@ def get_default_search_space(model_key: str, strategy: str = "random") -> dict[s
 # ---------------------------------------------------------------------------
 _BASE_KEY_TO_REGISTRY_CLF: dict[str, str] = {
     "logistic_regression": "logistic_regression",
+    "sgd_classifier": "sgd_classifier",
     "random_forest": "random_forest_classifier",
     "extra_trees": "extra_trees_classifier",
     "gradient_boosting": "gradient_boosting_classifier",

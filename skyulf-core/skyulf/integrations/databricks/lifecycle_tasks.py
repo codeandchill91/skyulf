@@ -346,12 +346,30 @@ def _evaluate_register(spark: Any, store: _PhaseStore) -> dict[str, Any]:
     store.client.set_tag(store.run_id, "skyulf.lifecycle.registration", evidence_digest(receipt))
     candidate = _registered(store)
     _lifecycle(store).registered(candidate)
-    return {
+    output = {
         "candidate_version": candidate.version,
         "model_digest": candidate.digest,
         "metrics": metrics,
         "dataset_id": spec.dataset_id,
     }
+    if config["pipeline"]["modeling"]["type"] == "hyperparameter_tuner":
+        evidence = training.tuning_evidence(verified.artifact)
+        if evidence is None:
+            raise ValueError("Registered search artifact lacks tuning evidence.")
+        output["tuning"] = {
+            key: value for key, value in evidence.items() if key not in {"trials", "modeling"}
+        }
+        output["tuning"]["strategy"] = verified.artifact.pipeline.config["modeling"]["strategy"]
+        output["tuning"]["artifact"] = "tuning.json"
+    if config["pipeline"].get("explainability"):
+        explanation = store.read("explanations.json")
+        output["explanations"] = {
+            key: explanation[key]
+            for key in ("status", "reason", "sample_count")
+            if key in explanation
+        }
+        output["explanations"]["artifact"] = "explanations.json"
+    return output
 
 
 def _compare(spark: Any, store: _PhaseStore) -> dict[str, Any]:

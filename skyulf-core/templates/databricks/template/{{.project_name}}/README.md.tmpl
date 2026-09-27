@@ -8,8 +8,10 @@ and model fitting run locally on the selected compute.
 
 | File | Edit here |
 | --- | --- |
-| `config/workflow.json` | Existing input tables, record keys, features/target, model parameters, data selection, limits and promotion/scoring policies |
+| `config/workflow.json` | Existing input tables, record keys, features/target, model parameters, validation/search, data selection, limits and promotion/scoring policies |
 | `src/preprocessing.py` | `build_pre_split_steps()` for fixed cleanup/eligibility; `build_preprocessing()` for learned transformations |
+| `src/tuning.py` | Optional `build_search_space()` override; returning `None` uses Core defaults |
+| `src/ensemble.py` | Optional voting/stacking composition; returning `None` keeps JSON parameters and Core defaults |
 | `databricks.yml` | Workspace/UC bindings for `dev`, `test`, `syst`, `prod`; schedule and compute variables |
 | `resources/workflow.jobs.yml` | Generated task definitions; keep them aligned with the installed wheel |
 
@@ -17,13 +19,75 @@ Review source column names and positive `max_rows`/`max_input_mb` budgets.
 Overflow fails. `training_version: null` pins the latest snapshot at run start;
 an explicit integer pins that Delta version. Random full-snapshot training needs
 no dates; temporal training needs an event column and a valid window.
-Advanced snapshot/split, sampling and CV settings use defaults without setup
+Snapshot/split, sampling and CV details use defaults without setup
 questions. Override them in init JSON or the generated config; preview after edits.
 
-Both Python recipes start empty, with commented examples to adapt. Keep
+The generated project searches parameters for the selected model, then refits
+the winner. To set fixed base parameters, edit
+`pipeline.modeling.base_model.params` in `config/workflow.json`, or provide
+`model_params` as a JSON object in an init file. Voting and stacking
+models require composition settings such as `base_estimators`; setup asks for
+`model_params` when one is selected. Use `--list-models` to inspect available
+models and their parameter metadata.
+
+For voting or stacking, `src/ensemble.py:build_ensemble_params(model_type)`
+receives the selected registered model type and can return a JSON object of
+ensemble parameters. Its keys override matching keys in
+`pipeline.modeling.base_model.params`; other JSON parameters remain. The default
+returns `None`. Set `USE_EXAMPLES = True` in that file to try its four editable
+classification/regression voting/stacking recipes. Training and preview capture
+the exact recipe source and digest before the tuning hook runs; scoring loads the
+saved fitted artifact. Existing projects without `ensemble.py` still work.
+
+For example, a voting regression model can use
+`{"base_estimators":["linear_regression","ridge"],"base_estimator_params":{"ridge":{"alpha":2.0}}}`
+as `model_params`. A stacking model can additionally set `final_estimator`,
+`final_estimator_params`, `cv` and `passthrough` in the same object. Choose
+component keys valid for the selected classification or regression model.
+Optional classifier calibration uses `calibrate_base_models`,
+`calibration_method` (`sigmoid` or `isotonic`) and `calibration_cv`. Stacking also
+has its own internal `cv` for the final learner; this is separate from the
+workflow's candidate-scoring `cv_*` settings. Keep `n_jobs: 1` to avoid nested
+parallel fits. `tune_base_models` opts into the selected base learners' search
+axes; leave it off to search only the ensemble's own parameters.
+
+The generated config uses Core's `hyperparameter_tuner` wrapper. The Core model
+registry supplies a search space for the selected model and strategy. For a project
+override, edit `src/tuning.py:build_search_space()` and return finite candidate
+lists, or provide `search_space` as a JSON object in an init file. The generated
+`pipeline.modeling.search_space: {}` requests Core defaults. The checked-in
+`skyulf-core/templates/databricks/examples/tuning-init.example.json` shows a
+bounded random search using the model's default axes. After selecting a strategy,
+choose **Default** for Core controls or **Custom** for its relevant controls.
+Grid and halving-grid evaluate the full Cartesian space and fail preflight when
+it exceeds `max_candidates` (default 1000, maximum 10000); raise that limit or
+narrow the space. Random, halving-random and Optuna use `n_trials` (maximum 1000)
+as a candidate budget. Halving supports `factor`, `min_resources`,
+and `resource`; `n_estimators` resource also needs numeric starting and maximum
+budgets and a compatible estimator. The resource cannot also be a search axis;
+remove `n_estimators` from the search space with `src/tuning.py` when using that
+resource. Optuna needs `optuna` and `optuna-integration` in the
+training environment; its timeout is a soft stop between fits, not a hard
+interruption of a running estimator.
+
+The top-level `cv_*` fields are the only fold settings. They score search
+candidates; `cv_enabled: false` uses an internal training-only validation split. There is
+no second post-search CV report. The search objective (`rmse`, `accuracy`, etc.)
+is separate from the final holdout comparison metric (`heldout_rmse`,
+`heldout_accuracy`, etc.). `search_random_state`, `cv_random_state`, and the
+top-level split `random_state` control different randomness. Core's `nested_cv`
+option repeats tuning independently inside each outer training fold. `cv_folds`
+sets outer folds; optional `cv_inner_folds` sets inner folds. A separate final
+search selects the saved model. Each search gets the configured trial/time
+budget. Outer evaluation and final-search scores are reported separately.
+The final holdout is reserved for model comparison.
+
+The preprocessing and tuning recipes start empty; `ensemble.py` has disabled
+examples to adapt. Keep
 `pipeline.preprocessing` empty in JSON. Put custom classes in the same Python
-file: training saves its source and fitted state; sibling modules are not
-packaged. Approval and scoring use the saved code, even if this file later changes.
+file: training saves its source and fitted state; imported sibling modules are
+not packaged with that custom class. Approval and scoring use the saved code,
+even if this file later changes.
 See [setup and advanced inputs][setup] and [custom recipes][recipes].
 
 Install the matching Skyulf wheel in your local environment, then from this project:

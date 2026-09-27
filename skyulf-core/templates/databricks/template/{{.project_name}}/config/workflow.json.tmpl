@@ -16,8 +16,10 @@
   "stratify": {{.stratify}},
   "cv_enabled": {{.cv_enabled}},
   "cv_folds": {{.cv_folds}},
+{{if .cv_inner_folds}}  "cv_inner_folds": {{.cv_inner_folds}},
+{{end}}
   "cv_type": "{{.cv_type}}",
-  "cv_shuffle": {{.cv_shuffle}},
+  "cv_shuffle": {{if eq .cv_type "time_series_split"}}false{{else if eq .cv_type "shuffle_split"}}true{{else}}{{.cv_shuffle}}{{end}},
   "cv_random_state": {{.cv_random_state}},
   "training_sample_rows": {{.training_sample_rows}},
   "training_sample_seed": {{.training_sample_seed}},
@@ -53,6 +55,18 @@
   "quality_threshold": {{.quality_threshold}},
   "pipeline": {
     "preprocessing": [],
-    "modeling": {"type": "{{if eq .task "classification"}}{{.classification_model}}{{else}}{{.regression_model}}{{end}}", "params": {}}
+    "modeling": {
+      "type": "hyperparameter_tuner",
+      "base_model": {"type": "{{if eq .task "classification"}}{{.classification_model}}{{else}}{{.regression_model}}{{end}}", "params": {{.model_params}}},
+      "strategy": "{{.search_strategy}}",
+      "metric": "{{if eq .task "classification"}}{{.classification_search_metric}}{{else}}{{.regression_search_metric}}{{end}}",
+      "n_trials": {{.search_n_trials}},
+      {{if or (eq .search_strategy "grid") (eq .search_strategy "halving_grid")}}"max_candidates": {{.search_max_candidates}},
+      {{end}}
+      "timeout": {{if and (eq .search_strategy "optuna") (eq .search_settings "custom")}}{{.search_timeout}}{{else}}null{{end}},
+      "random_state": {{.search_random_state}},
+      "search_space": {{.search_space}},
+      "strategy_params": {{if eq .search_settings "custom"}}{{if or (eq .search_strategy "halving_grid") (eq .search_strategy "halving_random")}}{"factor": {{.search_factor}}, "resource": "{{.search_resource}}", "min_resources": "{{if eq .search_resource "n_estimators"}}{{.search_estimator_min_resources}}{{else}}{{.search_min_resources}}{{end}}"{{if eq .search_resource "n_estimators"}}, "max_resources": {{.search_max_resources}}{{end}}}{{else if eq .search_strategy "optuna"}}{"sampler": "{{.search_sampler}}", "pruner": "{{.search_pruner}}", "pruning": {{.search_pruning}}}{{else}}{}{{end}}{{else}}{}{{end}}
+    }
   }
 }

@@ -11,6 +11,7 @@ type TuningConfig = {
   cv_enabled?: boolean;
   cv_type?: string;
   cv_folds?: number;
+  cv_inner_folds?: number;
   cv_shuffle?: boolean;
 };
 
@@ -164,9 +165,15 @@ function TuningCrossValidation({ config }: { config: TuningConfig }) {
             <span className="ml-2 font-mono text-gray-700 dark:text-gray-300">{config.cv_type || 'Unknown'}</span>
           </div>
           <div>
-            <span className="text-gray-500">Folds:</span>
+            <span className="text-gray-500">{config.cv_type === 'nested_cv' ? 'Outer folds:' : 'Folds:'}</span>
             <span className="ml-2 font-mono text-gray-700 dark:text-gray-300">{config.cv_folds}</span>
           </div>
+          {config.cv_type === 'nested_cv' && (
+            <div>
+              <span className="text-gray-500">Inner folds:</span>
+              <span className="ml-2 font-mono text-gray-700 dark:text-gray-300">{config.cv_inner_folds ?? ((config.cv_folds ?? 5) > 2 ? Math.min(3, (config.cv_folds ?? 5) - 1) : 2)}</span>
+            </div>
+          )}
           <div>
             <span className="text-gray-500">Shuffle:</span>
             <span className="ml-2 font-mono text-gray-700 dark:text-gray-300">{config.cv_shuffle ? 'Yes' : 'No'}</span>

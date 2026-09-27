@@ -35,6 +35,7 @@ from ._contracts import input_budget_bytes
 from .admission import SingleWriterAdmission
 from .local_approval import approve_local_candidate, reject_local_candidate
 from .local_cv import LocalCVSpec
+from .local_explanations import validate_explanation_config
 from .local_incremental import run_incremental_local_batch
 from .local_retraining import (
     LocalCandidateResult,
@@ -413,6 +414,7 @@ def _prepare_training(
     if policy == "automatic" and config.get("quality_threshold") is None:
         raise ValueError("Automatic promotion requires an absolute quality_threshold.")
     cv = LocalCVSpec.from_workflow(config)
+    validate_explanation_config(config["pipeline"])
     cv.validate_pipeline(
         config["pipeline"],
         target_column=config["target_column"],

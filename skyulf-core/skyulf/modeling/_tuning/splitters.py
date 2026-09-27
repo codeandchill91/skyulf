@@ -140,9 +140,8 @@ def select_cv_by_type(config: TuningConfig, problem_type: str) -> Any:
         return build_holdout_cv(config)
 
     if config.cv_type == "nested_cv":
-        # Nested CV during tuning: use fewer inner folds for
-        # candidate scoring. The outer evaluation loop runs
-        # post-tuning in engine.py (as stratified_k_fold).
+        # Capability callers inspect the inner splitter. Actual nested
+        # execution owns both levels in nested.run_nested_search.
         return build_nested_inner_cv(config, problem_type)
 
     if config.cv_type == "time_series_split":
@@ -158,9 +157,19 @@ def select_cv_by_type(config: TuningConfig, problem_type: str) -> Any:
     return build_kfold_cv(config)
 
 
+def nested_inner_folds(config: TuningConfig) -> int:
+    """Resolve explicit inner folds or preserve the historical nested default."""
+    inner = config.cv_inner_folds
+    if inner is None:
+        inner = min(3, config.cv_folds - 1) if config.cv_folds > 2 else 2
+    if type(inner) is not int or inner < 2:
+        raise ValueError("cv_inner_folds must be an integer of at least 2.")
+    return inner
+
+
 def build_nested_inner_cv(config: TuningConfig, problem_type: str) -> Any:
     """Builds the inner-fold CV splitter used for candidate scoring during nested CV tuning."""
-    inner_folds = min(3, config.cv_folds - 1) if config.cv_folds > 2 else 2
+    inner_folds = nested_inner_folds(config)
     inner_cv_random_state = config.cv_random_state if config.cv_shuffle else None
     if problem_type == "classification":
         return StratifiedKFold(
