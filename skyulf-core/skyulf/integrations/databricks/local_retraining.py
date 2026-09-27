@@ -50,6 +50,7 @@ from .training_dates import (
     instant_microseconds,
     normalize_training_dates,
     parse_training_date,
+    training_date_spec,
 )
 
 
@@ -85,6 +86,25 @@ class LocalTrainingSpec:
     survivor_key_sha256: str | None = None
     training_evidence_sha256: str | None = None
 
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> LocalTrainingSpec:
+        """Restore a saved spec without mutating its JSON or interpreting engine metadata.
+
+        Callers load verified custom source before construction so custom steps
+        are registered. Older evidence may omit the empty pre-split recipe.
+        """
+        values = dict(payload)
+        values.pop("engine", None)
+        for field in ("start", "holdout_start", "cutoff", "result_cutoff"):
+            value = values[field]
+            values[field] = None if value is None else datetime.fromisoformat(value)
+        for field in ("record_key_columns", "input_columns"):
+            values[field] = tuple(values[field])
+        values["pre_split_steps"] = tuple(values.get("pre_split_steps", ()))
+        for field in ("event_time_parsing", "result_time_parsing"):
+            values[field] = training_date_spec(values[field])
+        return cls(**values)
+
     def __post_init__(self) -> None:
         """Reject incomplete or contradictory policies before opening a Spark reader."""
         table_name(self.table)
@@ -98,46 +118,61 @@ class LocalTrainingSpec:
         if type(self.filter_unavailable_results) is not bool:
             raise ValueError("filter_unavailable_results must be boolean.")
         if self.split_strategy == "random":
-            if self.holdout_start is not None:
-                raise ValueError("Random split requires inactive holdout_start to be null.")
-            if self.event_column is None and (
-                self.start is not None
-                or self.cutoff is not None
-                or self.event_time_parsing != TrainingDateSpec()
-            ):
-                raise ValueError("Random split requires inactive event/date fields to be null.")
-            if self.event_column is not None:
-                start = _validate_instant(self.start, "start")
-                cutoff = _validate_instant(self.cutoff, "cutoff")
-                if start >= cutoff:
-                    raise ValueError("Require start < cutoff for event selection.")
-            if (
-                self.test_size is None
-                or type(self.test_size) not in (int, float)
-                or not 0 < self.test_size < 1
-            ):
-                raise ValueError("test_size must be a proportion strictly between zero and one.")
-            if type(self.random_state) is not int or not 0 <= self.random_state < 2**32:
-                raise ValueError("random_state must be an integer from 0 to 2**32 - 1.")
-            if type(self.stratify) is not bool:
-                raise ValueError("stratify must be boolean.")
+            self._validate_random_split()
         else:
-            if self.event_column is None:
-                raise ValueError("Temporal split requires event_column.")
-            boundaries = [
-                _validate_instant(getattr(self, name), name)
-                for name in ("start", "holdout_start", "cutoff")
-            ]
-            if not boundaries[0] < boundaries[1] < boundaries[2]:
-                raise ValueError("Require start < holdout_start < cutoff.")
-            if (
-                self.test_size not in (None, 0.2)
-                or self.random_state not in (None, 42)
-                or self.stratify not in (None, False)
-                or (self.random_state is not None and type(self.random_state) is not int)
-                or (self.stratify is not None and type(self.stratify) is not bool)
-            ):
-                raise ValueError("Temporal split cannot use active random split settings.")
+            self._validate_temporal_split()
+        self._validate_result_filter()
+        self._validate_columns()
+        self._validate_budgets_and_sampling()
+        self._validate_evidence_digests()
+
+    def _validate_random_split(self) -> None:
+        """Check the random split and its optional event-selection window."""
+        if self.holdout_start is not None:
+            raise ValueError("Random split requires inactive holdout_start to be null.")
+        if self.event_column is None and (
+            self.start is not None
+            or self.cutoff is not None
+            or self.event_time_parsing != TrainingDateSpec()
+        ):
+            raise ValueError("Random split requires inactive event/date fields to be null.")
+        if self.event_column is not None:
+            start = _validate_instant(self.start, "start")
+            cutoff = _validate_instant(self.cutoff, "cutoff")
+            if start >= cutoff:
+                raise ValueError("Require start < cutoff for event selection.")
+        if (
+            self.test_size is None
+            or type(self.test_size) not in (int, float)
+            or not 0 < self.test_size < 1
+        ):
+            raise ValueError("test_size must be a proportion strictly between zero and one.")
+        if type(self.random_state) is not int or not 0 <= self.random_state < 2**32:
+            raise ValueError("random_state must be an integer from 0 to 2**32 - 1.")
+        if type(self.stratify) is not bool:
+            raise ValueError("stratify must be boolean.")
+
+    def _validate_temporal_split(self) -> None:
+        """Require ordered temporal boundaries and inactive random split settings."""
+        if self.event_column is None:
+            raise ValueError("Temporal split requires event_column.")
+        boundaries = [
+            _validate_instant(getattr(self, name), name)
+            for name in ("start", "holdout_start", "cutoff")
+        ]
+        if not boundaries[0] < boundaries[1] < boundaries[2]:
+            raise ValueError("Require start < holdout_start < cutoff.")
+        if (
+            self.test_size not in (None, 0.2)
+            or self.random_state not in (None, 42)
+            or self.stratify not in (None, False)
+            or (self.random_state is not None and type(self.random_state) is not int)
+            or (self.stratify is not None and type(self.stratify) is not bool)
+        ):
+            raise ValueError("Temporal split cannot use active random split settings.")
+
+    def _validate_result_filter(self) -> None:
+        """Require a cutoff only when result-availability filtering is enabled."""
         if self.filter_unavailable_results:
             if self.result_available_at_column is None:
                 raise ValueError("Result filtering requires result_available_at_column.")
@@ -150,6 +185,9 @@ class LocalTrainingSpec:
             raise ValueError(
                 "Disabled result filtering requires inactive result fields to be null."
             )
+
+    def _validate_columns(self) -> None:
+        """Validate projected columns, pre-split steps and protected identities."""
         if not self.record_key_columns or not self.input_columns:
             raise ValueError("record_key_columns and input_columns must be nonempty.")
         _pre_split_columns(
@@ -170,6 +208,9 @@ class LocalTrainingSpec:
         base_names = tuple(name for name in base_names if name is not None)
         if len({name.lower() for name in base_names}) != len(base_names):
             raise ValueError("Training columns must be distinct.")
+
+    def _validate_budgets_and_sampling(self) -> None:
+        """Keep sampling within the local read budget with a reproducible seed."""
         if type(self.max_rows) is not int or self.max_rows <= 0:
             raise ValueError("max_rows must be positive.")
         if type(self.max_bytes) is not int or self.max_bytes <= 0:
@@ -181,6 +222,9 @@ class LocalTrainingSpec:
             raise ValueError("training_sample_rows must be null or an integer from 4 to max_rows.")
         if type(self.training_sample_seed) is not int or not 0 <= self.training_sample_seed < 2**32:
             raise ValueError("training_sample_seed must be an integer from 0 to 2**32 - 1.")
+
+    def _validate_evidence_digests(self) -> None:
+        """Accept only concrete membership digests with their required policies."""
         for field in (
             "holdout_key_sha256",
             "sample_key_sha256",
@@ -1110,6 +1154,27 @@ def _compare_candidate(
     )
 
 
+def _register_candidate(
+    model_uri: str,
+    model_name: str,
+    *,
+    tracking_uri: str,
+    registry_uri: str,
+    tags: dict[str, str],
+) -> Any:
+    """Register with bounded tags, leaving receipt persistence and resolution to callers."""
+    return register_model(
+        model_uri,
+        model_name,
+        tracking_uri=tracking_uri,
+        registry_uri=registry_uri,
+        tags={
+            key: value if len(value.encode("utf-8")) <= 256 else "See training_data.json"
+            for key, value in tags.items()
+        },
+    )
+
+
 def train_local_candidate(
     spark: Any,
     spec: LocalTrainingSpec,
@@ -1187,15 +1252,12 @@ def train_local_candidate(
         _log_fitted_candidate(run, fitted, config, engine=engine, risk_category=risk_category)
         run.log_metrics(metrics)
         model_uri = _log_local_model(artifact_path, run_id=run.run_id, tracking_uri=tracking_uri)
-    registered = register_model(
+    registered = _register_candidate(
         model_uri,
         model_name,
         tracking_uri=tracking_uri,
         registry_uri=registry_uri,
-        tags={
-            key: value if len(value.encode("utf-8")) <= 256 else "See training_data.json"
-            for key, value in fitted.tags.items()
-        },
+        tags=fitted.tags,
     )
     candidate = resolve_model(
         model_name,

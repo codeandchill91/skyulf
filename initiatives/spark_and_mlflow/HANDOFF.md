@@ -1,4 +1,37 @@
-# Current handoff: SM-34B DONE; SM-35 READY
+# Current handoff: SM-34C1/C2 locally DONE; SM-34C3 READY
+
+The user resumed implementation on 2026-09-27. The six slices are in
+[report68](68-integration-template-simplification-plan.md)
+and `OPEN_QUEUE.md`: shared training operations, evidence/result ownership,
+replay reuse, simpler setup, smaller generated docs/examples, and notebook routing.
+**Start SM-34C3 next session.** C1 shares training preparation and registration;
+[C1 verification](69-sm34c1-shared-training-preparation.md). C2 adds shared saved-spec
+conversion and verified evidence loading, and moves common Bundle results into
+the workflow layer. Durable tasks no longer import the notebook runtime.
+Existing import aliases and validation/receipt ordering are preserved.
+[C2 evidence](70-sm34c2-evidence-result-ownership.md): initial **496 tests passed**;
+the user-requested Sourcery follow-up split evidence/spec/lifecycle validation
+into cohesive helpers and applied both dictionary unions. Latest **503 tests
+passed**, scoped Ruff/format and full ty passed; independent review found no issues.
+C1/C2 and review fixes remain uncommitted, with staged and unstaged changes;
+verify the current index before any later commit.
+SM-35 waits for this sequence; preserve the later program's existing scope.
+
+Current HEAD is `454d2dad` (unrelated gitignore commit). SM-34B and its training
+follow-up were committed as `bd49f49e`; the first-candidate HTML report fix and
+runtime helper extraction were committed as `daa1e1c7`. That fix passed 83 local
+tests, applicable hooks and one real Databricks report test `6136609106178`.
+The test rendered the two saved Polars payloads and an illustrative rollback
+panel without training or model mutations. Persistent job deployment was rejected
+as outside that test/commit request, so their wheel is still the earlier version.
+
+Resume by verifying Git state and reading report68's C3 file/test map. Preserve
+unrelated `.tmp-review-model/` and `.tmp-sm34b-readable-green/` artifacts.
+C1/C2 included no cloud run, deployment, commit or scheduled automation.
+Reports 68-70 are local ignored initiative files; include them explicitly if a
+later commit is requested. Do not treat the local suites as live acceptance.
+
+## Previous SM-34B acceptance checkpoint (historical state)
 
 SM-34B passed user-authorized live acceptance on 2026-09-26/27; the user also
 requested its commit. The work on `090` is based on `3e92d14a` and includes the

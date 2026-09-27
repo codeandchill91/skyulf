@@ -3,6 +3,7 @@
 import importlib
 import importlib.util
 import json
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -136,6 +137,7 @@ def test_phases_roundtrip_and_only_finalize_completed_training(staged, engine, m
     assert client.get_run(run_id).info.status == "RUNNING"
     finalized = _call(staged, "finalize", reference)
     assert finalized.output["status"] == "FINISHED"
+    monkeypatch.setitem(sys.modules, "skyulf.integrations.databricks.job_runtime", None)
     result = _call(staged, "result", reference)
     assert result.output["result"]["alias_change"] == decided.output["alias_change"]
     assert client.get_run(run_id).info.status == "FINISHED"
@@ -225,6 +227,49 @@ def test_lost_registration_response_cannot_register_twice(staged, monkeypatch):
     finalized = _call(staged, "finalize", prepared.reference)
     assert finalized.output["status"] == "FAILED"
     assert finalized.output["registration_outcome"] == "unknown"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_task_prepare_rejects_stale_champion_before_creating_run(staged, monkeypatch, legacy):
+    """Durable tasks must retain stricter champion admission even for legacy automatic input."""
+    from skyulf.integrations.databricks import local_workflow
+
+    _, client, config, _, _ = staged
+    config["champion_version"] = "99"
+    if legacy:
+        config.pop("score_model_selection")
+        config.pop("promotion_policy")
+        config["model_selection_mode"] = "auto_champion"
+    monkeypatch.setattr(local_workflow, "controlled_champion_version", Mock(return_value="2"))
+    with pytest.raises(ValueError, match="champion_version"):
+        _call(staged, "prepare", config=config, action="train", experiment_name="staged")
+    experiment = client.get_experiment_by_name("staged")
+    assert not client.search_runs([experiment.experiment_id])
+
+
+def test_registration_receipt_survives_candidate_resolution_failure(staged, monkeypatch):
+    """A committed version must retain its receipt even if the next registry read fails."""
+    from skyulf.integrations.databricks import local_retraining
+    from skyulf.integrations.databricks.local_training_evidence import evidence_digest
+
+    _, client, config, _, _ = staged
+    prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
+    trained = _call(staged, "train", prepared.reference)
+    failure = RuntimeError("candidate resolution failed")
+    monkeypatch.setattr(local_retraining, "resolve_model", Mock(side_effect=failure))
+    with pytest.raises(RuntimeError) as caught:
+        _call(staged, "evaluate_register", trained.reference)
+    assert caught.value is failure
+    run_id = prepared.reference["run_id"]
+    saved = client.download_artifacts(run_id, "lifecycle/registration.json")
+    receipt = json.loads(Path(saved).read_text(encoding="utf-8"))
+    tags = client.get_run(run_id).data.tags
+    assert tags["skyulf.lifecycle.registration"] == evidence_digest(receipt)
+    assert receipt["model_version"] == "1" and receipt["run_id"] == run_id
+    assert tags["skyulf.lifecycle.evaluate_register.attempt"] == "failed"
+    assert "skyulf.lifecycle.evaluate_register.receipt" not in tags
+    assert len(client.search_model_versions(f"name='{config['model_name']}'")) == 1
+    assert not client.get_registered_model(config["model_name"]).aliases
 
 
 def test_registration_accepts_verified_normalized_artifact_source(staged, monkeypatch):

@@ -5,20 +5,21 @@ import logging
 import re
 import tempfile
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from ..mlflow.promotion import AliasChangeReceipt
 from .job_output import render_bundle_output, render_lifecycle_output
 from .local_approval import resolve_candidate_comparison_digest
-from .local_retraining import LocalCandidateResult
+from .local_workflow import BundleActionResult as BundleActionResult
+from .local_workflow import _next_actions as _next_actions
 from .local_workflow import (
-    AutoTrainingOutcome,
     _workflow_policies,
     resolve_target_config,
     run_action,
 )
+from .local_workflow import build_bundle_result as _bundle_result
 from .workflow_config import validate_deployed_contract, validate_workflow_config
 
 _OPERATOR_FIELDS = {
@@ -28,16 +29,6 @@ _OPERATOR_FIELDS = {
     "rejection_reason",
     "promotion_receipt_json",
 }
-
-
-@dataclass(frozen=True, slots=True)
-class BundleActionResult:
-    """Expose Core output, optional score handoff and copyable operator inputs."""
-
-    action: str
-    result: Any
-    score_requested: bool
-    next_actions: dict[str, dict[str, str]]
 
 
 def _version(value: str, *, allow_none: bool = False) -> str | None:
@@ -99,29 +90,6 @@ def _operator_options(action: str, values: dict[str, str]) -> dict[str, Any]:
             raise ValueError("Rejection needs a reason of at most 256 UTF-8 bytes.")
         options["rejection_reason"] = reason
     return options
-
-
-def _next_actions(result: Any, policy: str) -> dict[str, dict[str, str]]:
-    """Expose the exact evidence accepted by existing Core approval and rollback APIs."""
-    actions: dict[str, dict[str, str]] = {}
-    candidate = result.candidate if isinstance(result, AutoTrainingOutcome) else result
-    if isinstance(candidate, LocalCandidateResult) and policy == "manual_approval":
-        for action in ("approve", "reject"):
-            actions[action] = {
-                "lifecycle_action": action,
-                "candidate_version": candidate.model_version,
-                "expected_champion_version": candidate.comparison.champion_version or "none",
-            }
-    receipt = result.alias_change if isinstance(result, AutoTrainingOutcome) else result
-    if isinstance(receipt, AliasChangeReceipt) and receipt.kind == "promotion":
-        actions["rollback"] = {
-            "lifecycle_action": "rollback",
-            "expected_champion_version": receipt.new_version,
-            "promotion_receipt_json": json.dumps(
-                asdict(receipt), sort_keys=True, separators=(",", ":")
-            ),
-        }
-    return actions
 
 
 def run_bundle_action(
@@ -186,19 +154,6 @@ def run_bundle_action(
         options.update(experiment_name=experiment_name, artifact_path=artifact_path)
     result = run_action(spark, config, action, **options)
     return _bundle_result(config, action, result)
-
-
-def _bundle_result(config: dict[str, Any], action: str, result: Any) -> BundleActionResult:
-    """Derive operator inputs and score handoff only from a completed typed outcome."""
-    _, policy = _workflow_policies(config)
-    receipt = result.alias_change if isinstance(result, AutoTrainingOutcome) else result
-    score_requested = (
-        config["score_handoff"] == "after_alias_change"
-        and action in {"train", "approve", "rollback"}
-        and isinstance(receipt, AliasChangeReceipt)
-        and receipt.kind in {"initial", "promotion", "rollback"}
-    )
-    return BundleActionResult(action, result, score_requested, _next_actions(result, policy))
 
 
 def _read_notebook_config(values: dict[str, str]) -> dict[str, Any]:

@@ -8,7 +8,7 @@ Repairs and retries are rejected; uncertain outcomes require operator inspection
 import json
 from contextlib import suppress
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -26,7 +26,6 @@ from . import local_workflow as workflow
 from ._lifecycle_state import _PREDECESSORS, LifecycleContext, LifecyclePhaseResult, _PhaseStore
 from .local_cv import LocalCVSpec
 from .local_training_evidence import evidence_digest, validate_training_evidence
-from .training_dates import training_date_spec
 
 __all__ = ["LifecycleContext", "LifecyclePhaseResult", "run_lifecycle_phase"]
 
@@ -40,15 +39,7 @@ def _spec(payload: dict[str, Any], source: str | None) -> training.LocalTraining
     """Restore pinned source settings after loading the saved custom-step identities."""
     if source is not None:
         load_project_module(source)
-    values = dict(payload)
-    values.pop("engine", None)
-    for field in ("start", "holdout_start", "cutoff", "result_cutoff"):
-        values[field] = None if values[field] is None else datetime.fromisoformat(values[field])
-    for field in ("record_key_columns", "input_columns", "pre_split_steps"):
-        values[field] = tuple(values[field])
-    for field in ("event_time_parsing", "result_time_parsing"):
-        values[field] = training_date_spec(values[field])
-    return training.LocalTrainingSpec(**values)
+    return training.LocalTrainingSpec.from_payload(payload)
 
 
 def _prepare(
@@ -78,18 +69,7 @@ def _prepare(
     if action == "train":
         if options:
             raise ValueError("Training cannot accept operator options.")
-        if policy == "automatic" and config.get("quality_threshold") is None:
-            raise ValueError("Automatic promotion requires an absolute quality_threshold.")
-        spec = workflow._resolve_training_spec(spark, config, now or datetime.now(UTC))
-        champion = (
-            workflow.controlled_champion_version(
-                config["model_name"],
-                tracking_uri=config["tracking_uri"],
-                registry_uri=config.get("registry_uri", "databricks-uc"),
-            )
-            if policy == "automatic" or "score_model_selection" in config
-            else workflow._current_champion_version(config)
-        )
+        spec, cv, champion = workflow._prepare_training(spark, config, policy=policy, now=now)
         if (
             config.get("champion_version") is not None
             and str(config["champion_version"]) != champion
@@ -99,7 +79,7 @@ def _prepare(
             spec,
             config["pipeline"],
             engine=config["engine"],
-            cv=LocalCVSpec.from_workflow(config),
+            cv=cv,
             metric=config["metric"],
             min_improvement=config["min_improvement"],
             champion_version=champion,
@@ -156,21 +136,17 @@ def _prepare(
                 split_strategy=pinned["split_strategy"],
                 expected_champion_version=request["champion_version"],
             )
-            output.update(
-                {
-                    field: pinned[field]
-                    for field in ("start", "holdout_start", "cutoff", "result_cutoff")
-                    if pinned[field] is not None
-                }
-            )
+            output |= {
+                field: pinned[field]
+                for field in ("start", "holdout_start", "cutoff", "result_cutoff")
+                if pinned[field] is not None
+            }
         else:
-            output.update(
-                {
-                    field: options[field]
-                    for field in ("candidate_version", "expected_champion_version")
-                    if field in options
-                }
-            )
+            output |= {
+                field: options[field]
+                for field in ("candidate_version", "expected_champion_version")
+                if field in options
+            }
         return store.complete("prepare", output, None)
     except BaseException:
         with suppress(Exception):
@@ -319,15 +295,12 @@ def _evaluate_register(spark: Any, store: _PhaseStore) -> dict[str, Any]:
     )
     fitted = store.receipt("train")["output"]
     store.client.set_tag(store.run_id, "skyulf.lifecycle.registration_intent", "started")
-    registered = training.register_model(
+    registered = training._register_candidate(
         fitted["model_uri"],
         config["model_name"],
         tracking_uri=config["tracking_uri"],
         registry_uri=config.get("registry_uri", "databricks-uc"),
-        tags={
-            key: value if len(value.encode("utf-8")) <= 256 else "See training_data.json"
-            for key, value in fitted["tags"].items()
-        },
+        tags=fitted["tags"],
     )
     receipt = {
         "run_id": store.run_id,
@@ -461,9 +434,102 @@ def _result(store: _PhaseStore) -> dict[str, Any]:
         )
     else:
         outcome = AliasChangeReceipt(**store.receipt("operator")["output"]["result"])
-    from .job_runtime import _bundle_result  # noqa: PLC0415 - shared notebook result formatting
+    return asdict(workflow.build_bundle_result(request["config"], request["action"], outcome))
 
-    return asdict(_bundle_result(request["config"], request["action"], outcome))
+
+def _complete_invocation(
+    spark: Any,
+    store: _PhaseStore,
+    tracking_uri: str,
+    reference: dict[str, str],
+    task_states: dict[str, str] | None,
+) -> LifecyclePhaseResult:
+    """Finalize training before checking task outcomes and publishing the branch result."""
+    training_action = store.request["action"] == "train"
+    if training_action:
+        run_lifecycle_phase(
+            spark,
+            phase="finalize",
+            context=store.context,
+            tracking_uri=tracking_uri,
+            reference=reference,
+        )
+    expected_states = (
+        {"training": "success", "operator": "excluded"}
+        if training_action
+        else {"training": "excluded", "operator": "success"}
+    )
+    if task_states != expected_states:
+        raise ValueError("Lifecycle task outcomes do not allow publishing a result.")
+    return run_lifecycle_phase(
+        spark,
+        phase="result",
+        context=store.context,
+        tracking_uri=tracking_uri,
+        reference=reference,
+    )
+
+
+def _validate_active_phase(store: _PhaseStore, phase: str) -> None:
+    """Reject the wrong branch or inactive attempts before starting durable work."""
+    training_action = store.request["action"] == "train"
+    if (
+        phase in {"train", "evaluate_register", "compare", "decide", "finalize"}
+        and not training_action
+        or phase == "operator"
+        and training_action
+    ):
+        raise ValueError("Lifecycle phase does not belong to the pinned action branch.")
+    if phase not in {"result", "finalize"} and (
+        store.client.get_run(store.run_id).info.status != "RUNNING"
+        or any(
+            key.endswith(".attempt") and value == "failed" for key, value in store.tags().items()
+        )
+    ):
+        raise ValueError("Lifecycle is no longer active; inspect evidence and start a fresh run.")
+
+
+def _record_phase_failure(store: _PhaseStore, phase: str) -> None:
+    """Best-effort cleanup preserves the original error and any committed alias change."""
+    with suppress(Exception):
+        store.client.set_tag(store.run_id, f"skyulf.lifecycle.{phase}.attempt", "failed")
+    if phase in {"compare", "decide"}:
+        with suppress(Exception):
+            lifecycle = _lifecycle(store)
+            lifecycle.restore(_registered(store))
+            lifecycle.failed()
+    if phase == "operator":
+        with suppress(Exception):
+            store.client.set_terminated(store.run_id, status="FAILED")
+
+
+def _execute_phase(
+    spark: Any, store: _PhaseStore, phase: str, reference: dict[str, str]
+) -> LifecyclePhaseResult:
+    """Execute one phase and persist its receipt, termination or failure evidence."""
+    store.begin(phase)
+    try:
+        if phase == "finalize":
+            output = _finalize(store)
+        elif phase == "result":
+            output = _result(store)
+        else:
+            output = {
+                "train": _train,
+                "evaluate_register": _evaluate_register,
+                "compare": _compare,
+                "decide": _decide,
+                "operator": _operator,
+            }[phase](spark, store)
+        completed = store.complete(phase, output, reference)
+        if phase in {"finalize", "operator"}:
+            status = output["status"] if phase == "finalize" else "FINISHED"
+            store.client.set_terminated(store.run_id, status=status)
+            store.client.set_tag(store.run_id, "skyulf.lifecycle.status", status)
+        return completed
+    except BaseException:
+        _record_phase_failure(store, phase)
+        raise
 
 
 def run_lifecycle_phase(
@@ -531,73 +597,7 @@ def run_lifecycle_phase(
     expected_predecessor = "prepare" if phase == "complete" else _PREDECESSORS[phase]
     if reference["phase"] != expected_predecessor:
         raise ValueError("Lifecycle phase received the wrong predecessor reference.")
-    training_action = store.request["action"] == "train"
     if phase == "complete":
-        if training_action:
-            run_lifecycle_phase(
-                spark,
-                phase="finalize",
-                context=context,
-                tracking_uri=tracking_uri,
-                reference=reference,
-            )
-        expected_states = (
-            {"training": "success", "operator": "excluded"}
-            if training_action
-            else {"training": "excluded", "operator": "success"}
-        )
-        if task_states != expected_states:
-            raise ValueError("Lifecycle task outcomes do not allow publishing a result.")
-        return run_lifecycle_phase(
-            spark,
-            phase="result",
-            context=context,
-            tracking_uri=tracking_uri,
-            reference=reference,
-        )
-    if (
-        phase in {"train", "evaluate_register", "compare", "decide", "finalize"}
-        and not training_action
-        or phase == "operator"
-        and training_action
-    ):
-        raise ValueError("Lifecycle phase does not belong to the pinned action branch.")
-    if phase not in {"result", "finalize"} and (
-        store.client.get_run(store.run_id).info.status != "RUNNING"
-        or any(
-            key.endswith(".attempt") and value == "failed" for key, value in store.tags().items()
-        )
-    ):
-        raise ValueError("Lifecycle is no longer active; inspect evidence and start a fresh run.")
-    store.begin(phase)
-    try:
-        if phase == "finalize":
-            output = _finalize(store)
-        elif phase == "result":
-            output = _result(store)
-        else:
-            output = {
-                "train": _train,
-                "evaluate_register": _evaluate_register,
-                "compare": _compare,
-                "decide": _decide,
-                "operator": _operator,
-            }[phase](spark, store)
-        completed = store.complete(phase, output, reference)
-        if phase in {"finalize", "operator"}:
-            status = output["status"] if phase == "finalize" else "FINISHED"
-            store.client.set_terminated(store.run_id, status=status)
-            store.client.set_tag(store.run_id, "skyulf.lifecycle.status", status)
-        return completed
-    except BaseException:
-        with suppress(Exception):
-            store.client.set_tag(store.run_id, f"skyulf.lifecycle.{phase}.attempt", "failed")
-        if phase in {"compare", "decide"}:
-            with suppress(Exception):
-                lifecycle = _lifecycle(store)
-                lifecycle.restore(_registered(store))
-                lifecycle.failed()
-        if phase == "operator":
-            with suppress(Exception):
-                store.client.set_terminated(store.run_id, status="FAILED")
-        raise
+        return _complete_invocation(spark, store, tracking_uri, reference, task_states)
+    _validate_active_phase(store, phase)
+    return _execute_phase(spark, store, phase, reference)

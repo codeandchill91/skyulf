@@ -4,8 +4,9 @@ The caller serializes all lifecycle writes for each model and output. Importing
 this module creates no Spark session, registry connection or cloud resource.
 """
 
+import json
 import warnings
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,7 @@ from ..mlflow.registry import (
 )
 from ._contracts import input_budget_bytes
 from .admission import SingleWriterAdmission
-from .local_approval import _load_evidence, approve_local_candidate, reject_local_candidate
+from .local_approval import approve_local_candidate, reject_local_candidate
 from .local_cv import LocalCVSpec
 from .local_incremental import run_incremental_local_batch
 from .local_retraining import (
@@ -48,6 +49,7 @@ from .local_sdk import (
     OutputSink,
     prepare_local_workflow,
 )
+from .local_training_evidence import load_candidate_evidence as _load_evidence
 from .local_training_evidence import validate_training_evidence
 from .prediction_output import (
     _IDENTIFIER,
@@ -73,6 +75,52 @@ class AutoTrainingOutcome:
 
     candidate: Any
     alias_change: AliasChangeReceipt | None
+
+
+@dataclass(frozen=True, slots=True)
+class BundleActionResult:
+    """Expose Core output, optional score handoff and copyable operator inputs."""
+
+    action: str
+    result: Any
+    score_requested: bool
+    next_actions: dict[str, dict[str, str]]
+
+
+def _next_actions(result: Any, policy: str) -> dict[str, dict[str, str]]:
+    """Expose the exact evidence accepted by existing Core approval and rollback APIs."""
+    actions: dict[str, dict[str, str]] = {}
+    candidate = result.candidate if isinstance(result, AutoTrainingOutcome) else result
+    if isinstance(candidate, LocalCandidateResult) and policy == "manual_approval":
+        for action in ("approve", "reject"):
+            actions[action] = {
+                "lifecycle_action": action,
+                "candidate_version": candidate.model_version,
+                "expected_champion_version": candidate.comparison.champion_version or "none",
+            }
+    receipt = result.alias_change if isinstance(result, AutoTrainingOutcome) else result
+    if isinstance(receipt, AliasChangeReceipt) and receipt.kind == "promotion":
+        actions["rollback"] = {
+            "lifecycle_action": "rollback",
+            "expected_champion_version": receipt.new_version,
+            "promotion_receipt_json": json.dumps(
+                asdict(receipt), sort_keys=True, separators=(",", ":")
+            ),
+        }
+    return actions
+
+
+def build_bundle_result(config: dict[str, Any], action: str, result: Any) -> BundleActionResult:
+    """Derive operator inputs and score handoff only from a completed typed outcome."""
+    _, policy = _workflow_policies(config)
+    receipt = result.alias_change if isinstance(result, AutoTrainingOutcome) else result
+    score_requested = (
+        config["score_handoff"] == "after_alias_change"
+        and action in {"train", "approve", "rollback"}
+        and isinstance(receipt, AliasChangeReceipt)
+        and receipt.kind in {"initial", "promotion", "rollback"}
+    )
+    return BundleActionResult(action, result, score_requested, _next_actions(result, policy))
 
 
 def _selection_mode(config: dict[str, Any]) -> str:
@@ -349,6 +397,39 @@ def _current_champion_version(config: dict[str, Any]) -> str | None:
     return champion.version
 
 
+def _prepare_training(
+    spark: Any,
+    config: dict[str, Any],
+    *,
+    policy: str,
+    now: datetime | None,
+) -> tuple[LocalTrainingSpec, LocalCVSpec, str | None]:
+    """Validate training policy and pin source/champion for either execution adapter.
+
+    Callers retain their expected-champion compatibility checks and own all
+    run creation, fitting and publication. Score model selection stays unchanged.
+    """
+    if policy == "automatic" and config.get("quality_threshold") is None:
+        raise ValueError("Automatic promotion requires an absolute quality_threshold.")
+    cv = LocalCVSpec.from_workflow(config)
+    cv.validate_pipeline(
+        config["pipeline"],
+        target_column=config["target_column"],
+        event_column=config.get("event_column"),
+    )
+    spec = _resolve_training_spec(spark, config, now or datetime.now(UTC))
+    champion = (
+        controlled_champion_version(
+            config["model_name"],
+            tracking_uri=config.get("tracking_uri", "databricks"),
+            registry_uri=config.get("registry_uri", "databricks-uc"),
+        )
+        if policy == "automatic" or "score_model_selection" in config
+        else _current_champion_version(config)
+    )
+    return spec, cv, champion
+
+
 def _automatic_promotion(
     spark: Any,
     config: dict[str, Any],
@@ -473,31 +554,16 @@ def run_action(
     if action == "train":
         if experiment_name is None or artifact_path is None:
             raise ValueError("Training needs an experiment and temporary artifact path.")
-        if policy == "automatic" and config.get("quality_threshold") is None:
-            raise ValueError("Automatic promotion requires an absolute quality_threshold.")
-        cv = LocalCVSpec.from_workflow(config)
-        cv.validate_pipeline(
-            config["pipeline"],
-            target_column=config["target_column"],
-            event_column=config.get("event_column"),
-        )
-        spec = _resolve_training_spec(spark, config, now or datetime.now(UTC))
-        if policy == "automatic" or "score_model_selection" in config:
-            champion_version = controlled_champion_version(
-                config["model_name"], tracking_uri=tracking_uri, registry_uri=registry_uri
-            )
-            expected = config.get("champion_version")
-            if (
-                "score_model_selection" in config
-                and expected is not None
-                and str(expected) != champion_version
-            ):
-                raise ValueError("champion_version does not match the current champion.")
-        else:
-            champion_version = _current_champion_version(config)
-            expected = config.get("champion_version")
-            if expected is not None and str(expected) != champion_version:
-                raise ValueError("champion_version does not match the current champion.")
+        spec, cv, champion_version = _prepare_training(spark, config, policy=policy, now=now)
+        expected = config.get("champion_version")
+        # Legacy automatic selection ignored an explicit champion pin. Preserve
+        # that SDK compatibility; current policies and durable tasks check it.
+        if (
+            (policy != "automatic" or "score_model_selection" in config)
+            and expected is not None
+            and str(expected) != champion_version
+        ):
+            raise ValueError("champion_version does not match the current champion.")
         lifecycle = ChallengerLifecycle(
             config["model_name"],
             expected_champion_version=champion_version,

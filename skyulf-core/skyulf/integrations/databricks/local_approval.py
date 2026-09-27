@@ -4,18 +4,12 @@ The caller must serialize this operation with every other lifecycle writer.
 Approval never fits, registers or uploads a model and never changes a scoring pin.
 """
 
-import hashlib
-import json
 import re
-from dataclasses import asdict, replace
-from datetime import datetime
-from pathlib import Path
-from tempfile import TemporaryDirectory
+from dataclasses import replace
 from typing import Any
 
 import polars as pl
 
-from ...inference.project_code import load_project_module, project_source_digest
 from ..mlflow.promotion import (
     AliasChangeReceipt,
     AliasConflictError,
@@ -32,16 +26,14 @@ from ..mlflow.promotion import (
 from ..mlflow.registry import (
     _make_client,
     _require_mlflow,
-    load_registered_local_pipeline,
     resolve_model,
 )
 from ..mlflow.rejection import reject_candidate
 from ..mlflow.validation import ModelComparisonReport
 from . import local_retraining
 from ._contracts import input_budget_bytes
-from .local_retraining import LocalTrainingSpec
+from .local_training_evidence import load_candidate_evidence as _load_evidence
 from .local_training_evidence import validate_training_evidence
-from .training_dates import training_date_spec
 
 
 def resolve_candidate_comparison_digest(
@@ -87,82 +79,6 @@ def resolve_candidate_comparison_digest(
     if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
         raise AliasConflictError("Saved comparison receipt has no valid digest.")
     return digest
-
-
-def _load_evidence(
-    client: Any, name: str, version: str, digest: str, *, registry_uri: str | None = None
-) -> tuple[ModelComparisonReport, LocalTrainingSpec, str, dict[str, Any] | None]:
-    """Read only the named version's run artifacts and verify the operator's evidence pin."""
-    model = client.get_model_version(name, version)
-    if not model.run_id:
-        raise ValueError("Candidate has no training run with approval evidence.")
-    with TemporaryDirectory(prefix="skyulf-approval-") as directory:
-        report_path = client.download_artifacts(
-            model.run_id, "candidate_comparison.json", directory
-        )
-        spec_path = client.download_artifacts(
-            model.run_id, "candidate_training_spec.json", directory
-        )
-        report = ModelComparisonReport(**json.loads(Path(report_path).read_text(encoding="utf-8")))
-        saved_spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
-        saved_filter_evidence = None
-        if saved_spec.get("training_evidence_sha256") is not None:
-            evidence_path = client.download_artifacts(
-                model.run_id, "training_filter_evidence.json", directory
-            )
-            saved_filter_evidence = json.loads(Path(evidence_path).read_text(encoding="utf-8"))
-            if not isinstance(saved_filter_evidence, dict):
-                raise ValueError("Saved training filter evidence must be a JSON object.")
-    actual = hashlib.sha256(
-        json.dumps(asdict(report), sort_keys=True, allow_nan=False).encode()
-    ).hexdigest()
-    if actual != digest:
-        raise ValueError("Saved comparison digest differs from requested approval evidence.")
-    if report.model_name != name or report.candidate_version != version:
-        raise ValueError("Saved comparison does not identify the requested candidate.")
-    engine = saved_spec.pop("engine")
-    if engine not in ("pandas", "polars"):
-        raise ValueError("Saved approval engine must be pandas or polars.")
-    source_sha = None
-    recipe = None
-    if saved_filter_evidence is not None:
-        tracking_uri = getattr(client, "tracking_uri", None)
-        reference = resolve_model(
-            name,
-            version=version,
-            tracking_uri=tracking_uri,
-            registry_uri=registry_uri or tracking_uri,
-        )
-        artifact = load_registered_local_pipeline(
-            reference, tracking_uri=tracking_uri, registry_uri=registry_uri or tracking_uri
-        )
-        if engine != artifact.manifest.fitted_engine:
-            raise ValueError("Saved approval engine differs from fitted model engine.")
-        source_sha = artifact.manifest.project_source_sha256
-        if source_sha is not None:
-            source = artifact.pipeline.config["project_python_source"]
-            if project_source_digest(source) != source_sha:
-                raise ValueError("Saved project source differs from model manifest.")
-            factory = getattr(load_project_module(source), "build_pre_split_steps", None)
-            recipe = factory() if factory is not None else []
-    for field in ("start", "holdout_start", "cutoff", "result_cutoff"):
-        value = saved_spec[field]
-        saved_spec[field] = None if value is None else datetime.fromisoformat(value)
-    for field in ("record_key_columns", "input_columns"):
-        saved_spec[field] = tuple(saved_spec[field])
-    saved_spec["pre_split_steps"] = tuple(saved_spec.get("pre_split_steps", ()))
-    for field in ("event_time_parsing", "result_time_parsing"):
-        saved_spec[field] = training_date_spec(saved_spec[field])
-    spec = LocalTrainingSpec(**saved_spec)
-    if spec.holdout_key_sha256 is None:
-        raise ValueError("Saved training evidence requires holdout membership proof.")
-    if spec.dataset_id != report.dataset_id:
-        raise ValueError("Saved training snapshot differs from comparison evidence.")
-    if saved_filter_evidence is not None:
-        validate_training_evidence(saved_filter_evidence, spec, project_source_sha256=source_sha)
-        if source_sha is not None and recipe != list(spec.pre_split_steps):
-            raise ValueError("Saved project source recipe differs from training evidence.")
-    return report, spec, engine, saved_filter_evidence
 
 
 def _completed_approval(
