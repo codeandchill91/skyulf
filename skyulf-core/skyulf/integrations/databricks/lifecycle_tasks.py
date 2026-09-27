@@ -48,7 +48,13 @@ class _ReplayEvidence:
 def _spec(payload: dict[str, Any], source: str | None) -> training.LocalTrainingSpec:
     """Restore pinned source settings after loading the saved custom-step identities."""
     if source is not None:
-        load_project_module(source)
+        module = load_project_module(source)
+        # custom_step registers inside builders, not when their classes are imported.
+        # Keep the saved steps authoritative; these calls restore process-local IDs.
+        for name in ("build_preprocessing", "build_pre_split_steps"):
+            factory = getattr(module, name, None)
+            if factory is not None:
+                factory()
     return training.LocalTrainingSpec.from_payload(payload)
 
 

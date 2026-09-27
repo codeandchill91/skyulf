@@ -215,6 +215,59 @@ def _call(staged, phase, reference=None, **kwargs):
 
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
+@pytest.mark.parametrize("custom_filter", [False, True])
+def test_custom_recipes_restore_before_cv_in_separate_task(
+    staged, tmp_path, monkeypatch, engine, custom_filter
+):
+    """Saved builders must register custom nodes after the preparation process ends."""
+    from skyulf.integrations.databricks.project import load_project_workflow
+    from skyulf.registry import NodeRegistry
+
+    _, client, config, _, frame = staged
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "templates/databricks/examples/preprocessing_custom.py"
+    ).read_text(encoding="utf-8")
+    source += '''
+def build_preprocessing():
+    """Enable the published centering recipe."""
+    return [example_custom_step("x")]
+
+def build_pre_split_steps():
+    """Enable the published eligibility recipe."""
+    return [example_custom_pre_split("is_test")]
+'''
+    if not custom_filter:
+        source = source.replace('return [example_custom_pre_split("is_test")]', "return []")
+    path = tmp_path / "preprocessing.py"
+    path.write_text(source, encoding="utf-8")
+    frame["is_test"] = False
+    config.update(engine=engine, cv_enabled=True, cv_folds=2)
+    config.update(load_project_workflow(config, path))
+    prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
+    path.unlink()
+
+    def clear_project_state():
+        """Simulate separate notebook processes without inheriting their registrations."""
+        for registry in (NodeRegistry._calculators, NodeRegistry._appliers, NodeRegistry._metadata):
+            for key in list(registry):
+                if key.startswith("_skyulf_project_"):
+                    monkeypatch.delitem(registry, key)
+        for name in list(sys.modules):
+            if name.startswith("_skyulf_project_"):
+                monkeypatch.delitem(sys.modules, name)
+
+    clear_project_state()
+    registered = _call(staged, "train_register", prepared.reference)
+    clear_project_state()
+    decision = _call(staged, "compare_decide", registered.reference)
+    assert decision.output["alias_change"]["new_version"] == "1"
+    metrics = client.get_run(prepared.reference["run_id"]).data.metrics
+    assert metrics["heldout_rmse"] < 1e-8
+    assert metrics["cv_rmse_mean"] < 1e-8
+
+
+@pytest.mark.parametrize("engine", ["pandas", "polars"])
 def test_train_prepares_latest_once_and_downstream_keeps_the_pin(staged, engine):
     """The unified training action must save the resolved version before separate tasks run."""
     adapter, client, config, context, _ = staged
