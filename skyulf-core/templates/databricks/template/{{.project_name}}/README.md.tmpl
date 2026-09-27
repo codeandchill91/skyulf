@@ -1,653 +1,154 @@
 # {{.project_name}}
 
-This Skyulf 0.9.0 Bundle fits and predicts with **{{.engine}}**. Spark reads
-bounded Unity Catalog Delta rows and writes predictions. The selected job
-compute mode is **{{.compute_mode}}**. `dev`, `test`, `syst` and `prod` use the
-same Skyulf workflow code with different target bindings.
+Skyulf 0.9.0 Bundle: **{{.task}}** with **{{.engine}}**, using **{{.compute_mode}}**
+compute. Spark reads bounded Delta inputs and writes predictions; preprocessing
+and model fitting run locally on the selected compute.
 
-## Review your training setup first
+## 1. Configure and preview
 
-Initialization is ordered: **data -> model -> evaluation CV
--> lifecycle -> compute**. Date prompts are hidden when irrelevant. The same
-choices can be supplied in a JSON init file.
+| File | Edit here |
+| --- | --- |
+| `config/workflow.json` | Existing input tables, record keys, features/target, model parameters, data selection, limits and promotion/scoring policies |
+| `src/preprocessing.py` | `build_pre_split_steps()` for fixed cleanup/eligibility; `build_preprocessing()` for learned transformations |
+| `databricks.yml` | Workspace/UC bindings for `dev`, `test`, `syst`, `prod`; schedule and compute variables |
+| `resources/workflow.jobs.yml` | Generated task definitions; keep them aligned with the installed wheel |
 
-Setup uses your answers and does not inspect data. Observation-date questions
-are hidden for random full-snapshot training; answer-availability dates are
-separate and appear only if that filter is enabled. For each used date column,
-choose `timestamp` (database instant), `local_timestamp` (clock without timezone),
-`date` (day only), or `text` (string). Text asks what it contains and its format.
-Timezone is asked only for local clocks/dates; the midnight/reject choice only
-for days without a time. A database timestamp needs none of those follow-ups.
-CV, cron and cluster details also stay hidden until their option is selected.
-These choices guide the questions; runtime validates the actual source values.
+Review source column names and positive `max_rows`/`max_input_mb` budgets.
+Overflow fails. `training_version: null` pins the latest snapshot at run start;
+an explicit integer pins that Delta version. Random full-snapshot training needs
+no dates; temporal training needs an event column and a valid window.
+Advanced snapshot/split, sampling and CV settings use defaults without setup
+questions. Override them in init JSON or the generated config; preview after edits.
 
-Install the matching Skyulf wheel locally, then run from the generated project:
+Both Python recipes start empty, with commented examples to adapt. Keep
+`pipeline.preprocessing` empty in JSON. Put custom classes in the same Python
+file: training saves its source and fitted state; sibling modules are not
+packaged. Approval and scoring use the saved code, even if this file later changes.
+See [setup and advanced inputs][setup] and [custom recipes][recipes].
+
+Install the matching Skyulf wheel in your local environment, then from this project:
 
 ```powershell
-python src/preview.py
+python src/preview.py --action train
 python src/preview.py --list-models
 python src/preview.py --list-preprocessors
-python src/preview.py --action train
 ```
 
-The default preview validates structure and shows the ordered pipeline.
-`--action train` checks the training selection policy for both manual and scheduled
-runs. A null source version resolves latest at run start; only `fixed_window`
-requires configured dates. Preview executes your trusted Python recipe to list its steps;
-it does not itself read data, train or deploy. Keep data access and training out
-of module-level code and both recipe functions. The preview
-uses the generated dev catalog/schema defaults; for another target pass
-`--catalog`, `--input-schema`, `--output-schema`, `--metadata-schema` and
-`--resource-suffix` with the same values used by your Bundle target/overrides.
-It does not resolve Databricks target variables or check cloud permissions.
+Preview executes your trusted recipe builders and checks configuration; it does
+not read source data or train. Keep data access/training out of imports and
+builders. For another target, pass `--catalog`, `--input-schema`, `--output-schema`,
+`--metadata-schema` and `--resource-suffix` using that target's bindings.
 
-Preprocessing is not a setup question. Edit `build_preprocessing()` in
-`src/preprocessing.py`: select columns, add Skyulf nodes and reorder steps.
-It starts empty. Keep `pipeline.preprocessing` empty in JSON; the Python recipe
-supplies the actual Core step list. IDs and metadata defaults come
-from the installed Core registry via the list commands above; a registry listing
-does not guarantee every option/dependency is usable in your target environment.
+## 2. Build and deploy
 
-For training eligibility, edit `build_pre_split_steps()` in the same Python
-file. It starts empty and accepts Core `DropMissingRows` with an explicit
-`subset` (and optional `how`, `threshold`, or `missing_threshold`), or
-`ManualBounds` with explicit finite numeric bounds. Fixed explicit-column
-`ValueReplacement`, `TextCleaning`, `AliasReplacement`,
-`InvalidValueReplacement` and noncategorical `Casting` can run before the filters.
-They reuse existing Core implementations. For example:
+From the Skyulf checkout, build into this project's `dist` directory:
 
-```python
-def build_pre_split_steps():
-    """Keep known targets and plausible ages for training and evaluation."""
-    return [
-        {"name": "missing_income", "transformer": "ValueReplacement",
-         "params": {"columns": ["income"], "to_replace": -999, "value": None}},
-        {"name": "known_target", "transformer": "DropMissingRows",
-         "params": {"subset": ["target"], "how": "any"}},
-        {"name": "valid_age", "transformer": "ManualBounds",
-         "params": {"bounds": {"age": {"lower": 0, "upper": 120}}}},
-    ]
+```powershell
+uv build --wheel --no-build-isolation --out-dir <this-project>/dist skyulf-core
 ```
 
-The named columns must exist in the training source. `age` may be used only
-for filtering; it need not be a model input. Bounds require numeric source
-columns; Boolean columns are rejected. These filters run after source snapshot/window selection, the optional
-seeded source sample, bounded local read, and label-availability selection.
-Availability is selected before sampling when sampling is enabled; without a
-sample it is selected after the bounded read. Filters run before the final
-train/holdout split and fold-local learned preprocessing.
-The sample is never refilled: filtering can leave fewer rows than requested.
-Both fit and held-out metrics use the remaining eligible population, with
-requested steps and per-step exclusions in `pre_split_filters.json`. Missing
-training targets require an explicit target filter; otherwise training fails.
-The versioned `training_filter_evidence.json` records the saved recipe and
-Python source identities, ordered row-key membership digests, and counts.
-Approval replays and checks this evidence against the original source version;
-later edits to this file do not change an existing candidate. These are
-training-only filters. Scoring does not require a target and may predict rows
-excluded from training. Shared prediction eligibility is a separate opt-in rule.
-Fixed feature cleanup is saved as a prefix of the model pipeline. The adapter
-selects rows on a working copy and keeps raw model inputs, so fit, CV, holdout
-and prediction each apply that prefix once. Do not repeat the same step in
-`build_preprocessing()`. A scoring sentinel becomes missing but is not dropped;
-use ordinary fitted imputation if the model must accept those inputs.
-Target-only cleanup is excluded from scoring and its semantic contract must
-match champion before comparing metrics. Record keys and source timestamps
-cannot be modified. Numeric replacement dictionary keys are not JSON-safe;
-use `to_replace`/`value` or `replacements=[{"old": -999, "new": None}]` instead.
-Keep learned imputation, scaling and ordinary custom transformations in
-`build_preprocessing()`.
+From this generated project, with your authenticated CLI profile:
 
-Existing `Deduplicate` can also run before splitting with an explicit nonempty
-`subset` and `keep="first"`, `"last"`, or `"none"`. Source rows are ordered by
-event time (when active) and record keys first. Conflicting target values in a
-duplicate group are rejected; unique source record keys remain mandatory.
-Deduplicating on customer alone does not implement a customer-group split.
-
-For a project-specific fixed training filter, enable
-`example_custom_pre_split("is_test")` in the same hook. The supplied example
-keeps known `False` flags and excludes true/null flags. Edit the supplied
-Eligibility Calculator/Applier classes and keep their `pre_split` declaration
-explicit: `effect="filter"`, named `required_columns`, `learns_from_data=False`.
-The source snapshot saves this code. Scoring never runs this training filter
-or requires its extra flag column. Runtime guards preserve existing row order,
-identities, columns and target values; they do not prove arbitrary Python code
-is leakage-free. Custom value changes belong in ordinary preprocessing.
-
-For example, replace the empty Python recipe with the following steps
-after changing `income` and `age` to your actual numeric feature names:
-
-```python
-def build_preprocessing():
-    """Learn numeric cleanup and scaling from training rows only."""
-    return [
-        {"name": "impute", "transformer": "SimpleImputer",
-         "params": {"columns": ["income", "age"], "strategy": "mean"}},
-        {"name": "scale", "transformer": "StandardScaler",
-         "params": {"columns": ["income", "age"]}},
-    ]
+```powershell
+databricks bundle validate --strict -t dev --profile <profile>
+databricks bundle deploy -t dev --profile <profile>
 ```
 
-For your own transformation, define top-level Calculator/Applier classes in
-the same file and return `custom_step(...)` alongside the standard nodes.
-The generated `CenterCalculator`/`CenterApplier` example shows both pandas and
-Polars handling: fit learns a mean, apply reuses it. Enable it by adding
-`example_custom_step("income")` to the returned list. Custom steps must preserve
-row count/order and store learned values in the returned fit state. CV fits
-these steps separately within each fold.
-
-Training snapshots this file with the fitted pipeline. Local and MLflow loading
-restore that code before loading the saved model; scoring, approval and rollback
-do not execute the current editable file. Code changes affect the next training
-run. This supports one self-contained Python file (up to 64 KiB); imported packages
-must be installed on the job. Sibling project modules are not bundled automatically.
-Model source and pickle are trusted executable artifacts, not sandboxed code.
-
-The model menu shows only registered models for your selected task. Some models
-need optional packages or additional settings (for example, ensemble members);
-appearing in the menu is not a guarantee that default settings fit your data.
-In `config/workflow.json`, `pipeline.modeling.params` means the `params` object
-inside `modeling`: add settings there, or keep `{}` for Core defaults.
-For example, with `random_forest_classifier` or `random_forest_regressor`:
-
-```json
-"modeling": {
-  "type": "random_forest_classifier",
-  "params": {"n_estimators": 100, "max_depth": 8, "random_state": 42}
-}
-```
-
-The native initializer offers a task-specific model menu. Edit preprocessing in
-Python and model parameters in JSON. Re-run preview
-after editing. Preflight is structural; node-specific data/parameter validity is
-still checked by Core during execution. Do not treat preview as a successful fit.
-
-`cv_enabled=true` evaluates fixed parameters on the training partition, refitting
-preprocessing within each fold. It never uses the final holdout or selects new
-parameters. Choose `cv_type`, `cv_folds`, `cv_shuffle`, `cv_random_state`. Time-series
-CV requires a mapped event column and `cv_shuffle=false`; stratified CV requires
-classification. Parameter search/Optuna integration is a later task.
-
-`training_window_mode=auto` resolves to full snapshot for random splitting or
-rolling calendar for temporal splitting. Choose `fixed_window` or
-`rolling_calendar` explicitly to select an observation window **and then** use a
-random holdout. Rolling selection has separate `monthly_lookback_months` and
-`window_timezone`. Source parsing uses `event_time_format`, `event_time_timezone`,
-`event_date_only` (and corresponding `result_*` inputs); these become the two
-`*_time_parsing` objects. String formats use numeric Python-style directives.
-Leave format/timezone blank for native timezone-aware timestamps; local/date-only
-sources need explicit rules. Neither the schedule nor window timezone supplies
-an omitted source timezone.
-
-`training_sample_rows` defaults to `null`: no sample, overflow fails. An explicit
-size samples eligible source records before splitting; it includes the holdout.
-`training_sample_seed` pins repeatable key-based selection. Scoring is never sampled.
-
-## Setup questions in plain language
-
-| Setting | Meaning |
-| --- | --- |
-| Training input | Existing rows with features and known answers. |
-| Prediction input | Existing rows the model will read to predict; blank reuses training input. This is not the output table. |
-| Prediction output | Choose `prediction_table_name` during setup, e.g. `customer_predictions`; blank defaults to a project-named output. The configured output schema and target suffix apply. |
-| Record keys | Enter `customer_id` or `customer_id, observation_id`; these identify one row. |
-| Feature columns | Enter `income, age`; these are inputs the model learns from. |
-| Training version | Delta snapshot number from the source table's History, such as 12. It pins data, not a model version. `null` or missing resolves latest once at run start; an explicit nonnegative integer pins that snapshot for manual and scheduled runs. |
-| Source window | All rows (`full_snapshot`), fixed observation dates (`fixed_window`), or recent complete months (`rolling_calendar`). `auto` picks all rows for random splitting and rolling months for temporal splitting. |
-| Result availability | A column such as `claim_confirmed_at` tells when each answer became known. Availability filtering excludes answers known after `result_cutoff`; an explicit cutoff is honored in every run. A null cutoff derives invocation UTC minus `result_availability_lag_hours` (default 0 elapsed hours). |
-| Text date format | `10/08/2026 14:30` uses `%d/%m/%Y %H:%M`; `2026-08-10` uses `%Y-%m-%d`. Database timestamp/date columns need no text format. |
-| Source timezone | For a clock value with no offset, enter its location, e.g. `Europe/Copenhagen`. A value ending in `+02:00` already identifies its offset. |
-| Date only | `reject` stops; `midnight` treats a date with no clock time as 00:00 in the declared source timezone. |
-| Training sample | 10,000 means at most 10,000 eligible rows total, then split into training/test. `null` disables sampling; read limits still apply. |
-| CV | Several evaluations on different training-row splits; final test data stays separate. It evaluates settings, not parameter tuning. |
-
-All date fields can remain unused for a random full-snapshot split with result
-availability filtering disabled. Date parsing, data-window timezone and job
-clock timezone are separate because they answer different questions.
-
-## What deployment creates
-
-The Python notebooks under `src/` are thin, fixed-phase entry points. The
-installed adapter handles widgets/JSON and calls Core's existing training,
-evaluation, lifecycle and prediction services. Customize preprocessing in
-`src/preprocessing.py` and model/workflow settings in `config/workflow.json`;
-common workflow changes belong in the Skyulf wheel.
-
-The train job exposes the actual work:
-
-```text
-prepare_request -> training_requested
-  training: train_and_register -> compare_and_decide
-  operator: apply_operator_action
-  either branch -> finalize_and_report -> scoring_requested -> run_batch_scoring
-```
-
-Open `finalize_and_report` for metrics, the final decision and manual action inputs.
-Training tasks share pinned configuration and saved MLflow artifacts, not local
-temporary files. `finalize_and_report` runs after either branch, including an
-earlier failure; it finalizes training and requires verified success before
-publishing a result or score request. Failed initial evaluation cannot
-register or promote a model. Approve/reject/rollback take the operator branch
-without fitting another model. There are still exactly two jobs and no new
-control tables.
-
-`bundle deploy` uploads the wheel, notebook and configuration, and creates
-two jobs. It creates **no** Unity Catalog table or registered model.
-Initialize with `retraining_mode=scheduled`, `scoring_mode=scheduled`, both, or
-neither. Each defaults to `manual`, which omits that job's schedule. Scheduled
-jobs default to `UNPAUSED`, including in dev mode, and start at the next matching
-cron time after deployment. Initialization only creates local files.
-Each clock has independent, target-overridable Bundle variables:
-`retraining_cron_expression`, `retraining_timezone_id`, `retraining_pause_status`
-and `scoring_cron_expression`, `scoring_timezone_id`, `scoring_pause_status`.
-Choose `PAUSED` explicitly to keep a clock inactive. These are Bundle settings,
-not fields in `config/workflow.json`.
-Your Quartz cron controls frequency. For example, `0 0 3 1 1,7 ?` runs at 03:00
-on January 1 and July 1 in the chosen schedule timezone. There is no additional
-monthly timer overriding it. Both manual and scheduled runs use the `train`
-action and resolve the same configured source version and window policy.
-The data window is independent: running every six months does not automatically
-read six months of data.
-
-For score-only scheduling, choose `retraining_mode=manual` and
-`scoring_mode=scheduled`. The default scoring cron `0 0 * * * ?` runs hourly in
-UTC; edit the cron and timezone for your chosen cadence. Scoring still needs an
-existing selected model. Independent scoring and lifecycle handoff use the same
-`score` job, its queue and its single active run. No additional jobs or control
-tables are created. A paused clock stops scheduled triggers; it does not cancel
-queued or manual runs. A successful no-op is an executed score run with no new
-rows to write. A queued run is waiting for the active run, not paused or a no-op.
-
-| Job | Run it when | UC effect |
-| --- | --- | --- |
-| `train` | Train, approve, reject or roll back using `lifecycle_action` | Training registers a candidate; operator actions reuse existing versions |
-| `score` | A model is pinned and rows need scoring | Appends rows or builds a new generation |
-
-In both selection modes, each registered contender becomes `@challenger`
-before comparison. Model-version tags show `validation_status` (`pending`,
-`passed`, `rejected`, or `error`), `validation_reason`, and `promotion_status`.
-A tied or worse candidate remains challenger; a newer contender replaces the
-pointer while earlier version evidence remains. Only the serialized train job
-identity may write these aliases. Restrict other writers before running train;
-table-free alias admission relies on that externally enforced ownership.
-
-Run and model-version tags use `train_data_version`, `test_data_version`,
-`train_data_destination`, `test_data_destination`, `model_type`, and
-`candidate_date_tag`. Both data versions refer to the pinned source snapshot;
-`split_strategy` names the evaluation split. Temporal runs also record
-`train_start`, `test_start`, and `data_end`; date-free runs omit these tags.
-Optional `risk_category` is selected at initialization and stays editable in
-config/workflow.json. Leaving it blank omits the tag; it never changes promotion gates.
-For policy compute, select `PayingRegNo` as the cost tag key when required by
-your company and provide the approved number as the cost tag value.
-The complete dataset identity is in the run's training_data.json artifact.
-Technical promotion event tags contain recovery receipts; do not edit them.
-
-### Training evidence and manual replay
-
-After argument validation, the training run saves these artifacts before reading
-the source, splitting, cross-validation, fitting or heldout evaluation:
-
-- `training_snapshot.json`: the concrete source table/version, input/target/key
-  columns, resolved ISO date boundaries, parsing rules, split/sample/filter
-  settings, memory limits and engine. Membership digests are filled only in the
-  separate successful candidate evidence.
-- `training_pipeline_config.json`: the original pipeline input, including the
-  self-contained `project_python_source` captured from `src/preprocessing.py`.
-- `skyulf_pipeline_config.json`: the effective pipeline with fixed preprocessing
-  projected into it. This is inspection evidence; feeding it back as the input
-  would prepend fixed steps a second time. CV settings are saved as run parameters.
-
-If source reading, splitting, CV, fitting or evaluation fails, the run is FAILED
-and retains these inputs. It does not publish a model or nominate a challenger.
-`candidate_training_spec.json`, filter/membership evidence and comparison remain
-successful-training artifacts used by approval.
-
-To replay manually, download the failed run's snapshot and original input config.
-Restore the saved `project_python_source` to `src/preprocessing.py`, preserving its
-contents. In `config/workflow.json`, restore the saved pipeline modeling/settings
-with `pipeline.preprocessing=[]` and top-level `pre_split_steps=[]`: the project
-loader rebuilds both hooks from the restored source. Map snapshot `table` to
-`training_table`, `version` to
-`training_version`, and `max_bytes` to `max_input_mb` by dividing by 1048576.
-Generated projects use whole MiB budgets; keep this value an integer.
-Restore the snapshot's keys, inputs, target, `max_rows`, engine, split/sample
-settings, `event_column`, `result_available_at_column`,
-`filter_unavailable_results`, date parsing rules, `start`, `holdout_start`,
-`cutoff` and `result_cutoff`, including null inactive fields. Use `fixed_window`
-when an event column is active, otherwise `full_snapshot`; set
-`monthly_lookback_months`, `holdout_months` and `window_timezone` to null.
-Set `result_availability_lag_hours` to null when result filtering is disabled,
-otherwise 0; manual replay uses the saved `result_cutoff` rather than this lag.
-The `fixed_window` policy preserves these saved boundaries on every `train` run.
-Restore the recorded CV parameters and reviewed
-comparison/promotion settings. Run the serialized train job with action `train`.
-Keep the saved explicit version, fixed boundaries and result cutoff for replay;
-leaving them automatic would select a fresh snapshot or resolve dates again.
-
-For a direct Core replay, reconstruct `LocalTrainingSpec` from the snapshot
-(ISO strings to aware datetimes, parsing objects to `TrainingDateSpec`, and
-key/input/pre-split lists to tuples), remove its `engine` field and pass that
-engine plus `training_pipeline_config.json` to `train_local_candidate`.
-Reuse the saved trusted project source registration when custom nodes require it.
-Retained Delta history and compatible code/dependencies are required. These pins
-identify the inputs; they do not promise identical future floating-point results.
-
-## Model selection and operator actions
-
-This project uses `score_model_selection={{.score_model_selection}}`,
-`promotion_policy={{.promotion_policy}}`, and `score_handoff={{.score_handoff}}`.
-These choices remain editable in `config/workflow.json`. Changing `score_handoff`
-also requires updating `deployed_score_handoff` in both notebook tasks in
-`resources/workflow.jobs.yml` and redeploying. A mismatch fails before execution.
-Keep `workflow_contract: "1"` fixed in both tasks; it is not a run parameter.
-
-| Setting | Choices |
-| --- | --- |
-| `score_model_selection` | `pinned_version` keeps `model_version`; `champion` resolves the controlled alias once per score run |
-| `promotion_policy` | `manual_approval` waits for an operator; `automatic` promotes only after quality gates pass |
-| `score_handoff` | `disabled`, or `after_alias_change` to call the existing score job after champion initialization, promotion or rollback |
-
-All four selector/promotion combinations are supported. Promotion never rewrites
-a scoring pin. A first champion requires a numeric absolute `quality_threshold`,
-including manual approval; subsequent candidates also need positive improvement
-meeting `min_improvement`. Configure the metric and gates for your task before fit.
-
-Use the **train job's Run now parameters** for every lifecycle action. It is
-queued with one active run, so operator actions share training's writer.
-Configuration and lifecycle policy overrides are not accepted as run parameters.
-
-| `lifecycle_action` | Additional parameters |
-| --- | --- |
-| `train` | Leave operator evidence fields empty |
-| `approve` | `candidate_version`, `expected_champion_version` |
-| `reject` | Same evidence plus `rejection_reason` |
-| `rollback` | `promotion_receipt_json`, `expected_champion_version` |
-
-Training output contains `next_actions.approve` and `next_actions.reject` in
-manual mode. Copy the relevant fields, adding a reason for rejection. Explicit
-`none` is used for a first champion; blank is not accepted. A completed promotion
-returns `next_actions.rollback`, including a ready-to-copy receipt JSON string.
-Copy that string's value into `promotion_receipt_json`; do not edit receipt fields.
-Approval/rejection resolves the full comparison digest from the named model
-version's committed receipt. You do not copy a hash. Missing/stale evidence and
-changed comparison artifacts still fail the strict Core checks. Older callers
-can continue supplying `comparison_sha256` explicitly.
-The executed notebook shows a readable summary and next-action parameter tables;
-expand Technical details for JSON. The standard Notebook exited JSON is retained
-for API consumers. A no-op manifest describes the previous prediction write.
-Initial champion creation has no prior champion and cannot be rolled back.
-Clear fields unrelated to the selected action. All prior evidence is verified
-against the registry; changing an alias directly in Catalog UI is not approval.
-
-Operator actions never retrain/register/upload another model. A retry of the
-same still-current committed operation returns its receipt. Rejected or tied
-candidates do not trigger score. Manual training also waits for approval.
-With handoff enabled, a completed champion change triggers score using the
-configured selector, including an unchanged pinned version if selected.
-The score notebook has a fixed score role. It ignores inherited lifecycle
-parameters from the parent job and rejects role/action override attempts.
-For one independent score run, set its `score_model_version` parameter to a
-positive concrete version number. This overrides the selector for that run
-without redeployment; leave it blank to use the configured selector. It does
-not change the saved pin or champion. The lifecycle handoff explicitly clears
-this parameter so it always uses the configured selection policy.
-
-Handoff and Delta publication remain separate operations. If score fails,
-run the independent score job again; do not rerun training. Staged lifecycle
-notebooks reject repairs and retries. Inspect any uncertain effects first,
-then start a fresh train-job run with the intended operator action. An unknown
-alias write leaves a pending marker requiring reconciliation.
-`previous_challenger` retains displaced candidates and clears if that version
-becomes champion/challenger again. Model versions and evidence remain available.
-
-In scheduled mode, the schedule starts enabled. Its Quartz cron and IANA timezone
-are selected at initialization and remain editable as
-`retraining_cron_expression`, `retraining_timezone_id` and
-`retraining_pause_status` Bundle variables.
-The default is 03:00 UTC on the third day of each month; choose any supported
-Quartz cron cadence. Every invocation uses `train`: a null or missing
-`training_version` resolves the latest concrete Delta version once at run start;
-an explicit version pins that snapshot. `training_window_mode` independently selects `full_snapshot`,
-`fixed_window` or `rolling_calendar`. Rolling selection uses the explicit
-`window_timezone` and `monthly_lookback_months` (initial temporal project:
-UTC and four months). A temporal split uses `holdout_months` (default 1),
-included in that total. Set an integer from 1 through total lookback minus 1.
-Random splitting uses `test_size` and null `holdout_months`; fixed temporal
-selection keeps explicit boundaries and null `holdout_months`. A fixed window
-never advances with the schedule. If result availability filtering is enabled,
-an explicit `result_cutoff` is honored; otherwise its cutoff is invocation UTC
-minus `result_availability_lag_hours` (default 0;
-integer from 0 to 87600 elapsed hours). This subtraction follows UTC across DST.
-Inactive availability filtering requires null lag. These rules apply equally
-to manual and scheduled runs. Result timestamps exactly at that
-cutoff are included; observation selection remains `[start, cutoff)`.
-
-For example, use four lookback months, `holdout_months=2`, and
-`result_availability_lag_hours=48` with availability filtering enabled. A
-`train` invocation on September 3 at 00:00 UTC, using a UTC window and null result cutoff,
-selects May through August: May/June train, July/August hold out. Only results
-available by September 1 at 00:00 UTC participate. Availability can also be used
-with a full snapshot and no event column. Job timezone, source parsing timezone,
-and data-window timezone are independent.
-
- The captured Delta version is pinned at run start; it is not a
-historical snapshot as of the observation cutoff. If the source has too few
-labeled rows in either partition, training fails without publishing a model.
-The run compares against the concrete version behind `@champion` if present;
-a missing alias means first-model training. An explicit `champion_version`
-must match the current champion or training fails before fit. Registry access failures still
-fail the job. Retry runs can create additional candidate versions.
-Manual approval mode retains the candidate until a separate operator action.
-
-`training_table` is the existing labeled input. `score_source_table` is the
-existing input to predict. Initialization accepts `source_table_name` and an
-optional `score_source_table_name` within the target's input schema. A blank
-source name uses `<project_name>_source`; a blank scoring source reuses training.
-You may give them different UC names when the labeled training data and new
-inference data have different lifecycles. Neither is created by this Bundle.
-`prediction_table` is the physical output table in `incremental_append` mode.
-In `full_rebuild` mode it is a stable **view**, backed by physical Delta
-generations named `<prediction_table>_v<model_version>`. A successful `score`
-fills a new generation before switching the view; previous generations stay
-available. The first full score creates one physical table and the view.
-Each generation records the registered model name, version and artifact digest.
-An existing generation with different provenance is rejected. If you change
-the registered model name while reusing the same numeric version, choose a
-different logical prediction name or a new model version before scoring.
-Moving an already deployed append-mode table to full mode under the same
-logical name is rejected; choose a new view name or migrate deliberately.
-`model_name` is a registered UC model, not a table. The Bundle creates no
-admission table.
-The `record_key_columns` initialization input names existing source keys as
-comma-separated text (for example, `customer_id, observation_id`).
-The generated config stores it as `["customer_id", "observation_id"]`.
-`score` copies them into the prediction table for SQL lookups. Each key must be
-non-null and `STRING` or `BIGINT`; the combination must uniquely identify records
-across all scored rows, including later inserts. The resulting
-`record_key_columns` remains editable in `config/workflow.json`.
-With no key input, `entity_id` remains the example source-column name.
-
-`result_available_at_column` names the source timestamp recording when each
-row's target became available. It defaults to null and is required only with
-`filter_unavailable_results: true`. An aware `result_cutoff` pins the cutoff;
-null derives it from invocation time minus `result_availability_lag_hours`.
-`event_column` names the observation timestamp for `split_strategy: temporal`;
-`start`, `holdout_start` and `cutoff` apply to it. Rows can have different result
-dates. Result availability is independent of the observation window.
-The library and saved training settings use these same names directly.
-Regenerate projects and retrain models created before this pre-production
-rename; earlier column settings and saved training evidence are not converted.
-The default `split_strategy: random` requires no date columns. Set `test_size`
-(default 0.2), `random_state` (42) and optionally classification `stratify`
-(false). Stable record-key sorting precedes Core splitting. Approval replays the
-saved snapshot, split policy and holdout-key digest; input row ordering cannot
-silently change evaluation membership. A different snapshot can change the split.
-
-Optional Basic-model CV is configured in this same workflow file with
-`cv_enabled`, `cv_folds` (2â€“20), `cv_type`, `cv_shuffle`, and `cv_random_state`.
-It defaults to disabled. `stratified_k_fold` is for classification; `k_fold` and
-`shuffle_split` also support regression. `time_series_split` uses the normalized
-`event_column` from window selection and requires shuffle disabled. The timestamp
-is removed before fold feature engineering; tied timestamps crossing a fold
-boundary are rejected. Core refits preprocessing inside each fold, independently
-of the saved final model. MLflow contains `cross_validation.json` and `cv_*`
-metrics; the `heldout_*` promotion metrics still use untouched final test rows.
-This is evaluation with fixed parameters, not Optuna/search support.
-
-| Split | Availability filter | Date settings |
-| --- | --- | --- |
-| Random | Disabled | None; all targets must be known. |
-| Random | Enabled | Result column; explicit `result_cutoff` or invocation time minus lag. |
-| Temporal | Disabled | Event column; ordered `start`, `holdout_start`, `cutoff` for `fixed_window`, or rolling calendar settings. |
-| Temporal | Enabled | Both sets; independent observation and result cutoffs. |
-
-Null or late result times are excluded when filtering is enabled. Eligible
-null targets fail. With filtering disabled, every target must be nonnull.
-Keep inactive date fields null and parsing rules at defaults; contradictory
-settings fail rather than silently switching policies. Configure
-`event_time_parsing` and `result_time_parsing` independently in
-`config/workflow.json`. Defaults accept native Spark `TIMESTAMP` instants.
-For strings use an explicit numeric Python format, for example
-`{"format": "%d/%m/%Y %H:%M:%S", "timezone": "Europe/Copenhagen", "date_only": "reject"}`.
-For offset-bearing strings use `%z` and leave timezone null. Native local-clock
-`TIMESTAMP_NTZ` needs a timezone but no format. Date-only inputs additionally
-need `date_only: "midnight"`; they represent local midnight, not UTC by default.
-Full year/month/day are required; unknown formats and DST gaps/overlaps fail.
-These are Python format directives, not Spark `yyyy-MM-dd` patterns.
-
-Source dates are validated before filtering, so invalid events cannot disappear
-outside a training window. Null result availability remains unavailable. The
-saved training spec retains the parsing rules for approval replay. Row/byte
-budgets bound driver materialization; source validation can scan the snapshot
-in Spark. The source timezone is independent of the job's cron timezone.
-
-Initialization never creates an ID in the source. Keep key
-columns out of `input_columns`; they identify predictions, not model features.
-The score job has `max_concurrent_runs: 1`; grant write access to its physical
-prediction targets only to this job's identity. In full mode the job also
-needs permission to create and own the active view. Other jobs must not write
-the targets.
-Skyulf Core's shared-admission option remains available when multiple jobs
-need to publish to one target.
-
-## Prepare the project
-
-1. Build a matching, trusted wheel from a Skyulf checkout with `uv build
-   --wheel --no-build-isolation --out-dir <this-project>/dist skyulf-core`.
-2. Edit `config/workflow.json` for real source/model names, row keys, model
-   inputs, estimator, split policy and size limits. The
-   initialized task is **{{.task}}**: regression starts with linear regression
-   and RMSE; classification defaults to logistic regression and accuracy. The
-   initializer lets you select other task-compatible models/metrics. Enter
-   `input_columns` as comma-separated names, then edit
-   `src/preprocessing.py` for preprocessing and `pipeline.modeling` for the estimator. Feature
-   engineering is not inferred automatically. Set a task-compatible metric
-   and quality threshold, and positive `max_rows`/`max_input_mb` transfer limits.
-   `max_input_mb` defaults to 64 MiB (one unit = 1024 * 1024 bytes), limiting
-   local input size rather than total training RAM. `max_rows` bounds input
-   before train/test splitting; overflow fails without implicit truncation.
-   Optional `training_sample_rows`/`training_sample_seed` select eligible records
-   on Spark before local transfer. The sample count includes final holdout rows;
-   scoring is never sampled. Leave `training_sample_rows` null to use all data.
-   In an initialization config file, supply those limits as integer strings
-   (for example, `"max_rows": "10000"`); generated workflow limits are numbers.
-   Leave `training_version` null to resolve latest once per run, or pin an explicit
-   version. Random full-snapshot splitting needs no dates. Temporal splitting
-   requires an event column; `fixed_window` needs aware
-   `start < holdout_start < cutoff`, while `rolling_calendar` derives boundaries
-   at every invocation. Availability filtering requires a result column; pin
-   `result_cutoff` or leave it null to derive invocation time minus lag.
-   `window_timezone` is independent of the cron timezone. Manual and scheduled
-   runs use the same `train` action and selection rules.
-   Enable Delta Change
-   Data Feed on the scoring source before new rows arrive. Check that the
-   source's initial rows are the rows you intend to score: the first `score`
-   run predicts **all** existing source rows, including labeled training rows
-   when one table is used for both purposes.
-3. Authenticate a Databricks CLI profile and validate/deploy the `dev` target:
-
-   ```powershell
-   databricks bundle validate --strict -t dev --profile <profile>
-   databricks bundle deploy -t dev --profile <profile>
-   ```
-
-   `dev` uses the profile's workspace host and the catalog/schema chosen at
-   initialization. The three other targets contain **different placeholder
-   hosts and catalogs**. Replace each with an approved value and use its own
-   profile before validation or deployment. Credentials are never saved here.
-   The generated target variables also let each environment use different
-   input, output and metadata schemas.
+`dev` uses your profile's workspace and initialized UC bindings. Replace the
+placeholder hosts/catalogs for other targets before using them. The source tables
+must already exist; enable Delta Change Data Feed on the scoring source before
+new rows arrive. The first score processes all existing rows in that source.
+Record keys must be unique, nonnull STRING/BIGINT columns.
 
 {{if eq .compute_mode "policy_cluster"}}
-The selected policy-backed jobs look up the policy name supplied during
-initialization. Confirm its runtime, node type and cost tag in each workspace.
-An example init config lives in `skyulf-core/templates/databricks/examples/policy-init.example.json`
-in the Skyulf checkout. Its placeholders must be reviewed before use.
+Review the approved cluster policy, runtime, node type and cost tag for each
+workspace. See the checkout's `skyulf-core/templates/databricks/examples/policy-init.example.json`.
 {{else}}
-The generated jobs use Databricks serverless Python environment 4. Policy
-clusters are a separate compute choice at project initialization.
+The jobs use serverless Python environment 4. Policy clusters are a separate
+initialization choice.
 {{end}}
 
-## Existing-project migration
+Deployment creates two jobs and uploads code/configuration; input tables are
+not created. Selected schedules start `UNPAUSED` unless you set their Bundle
+pause variables to `PAUSED`. Training and scoring clocks are independent.
+See [deployment and schedules][schedules] and [existing-project migration][migration].
 
-New projects use `config_version: 1` and an explicit `task`. Before upgrading
-an existing project, review its source snapshot, date split, task, metric and
-limits. Replace legacy `model_selection_mode` with explicit
-`score_model_selection`, `promotion_policy`, and `score_handoff`; do not retain
-both formats. The helper
-`skyulf.integrations.databricks.workflow_config.migrate_workflow_config(config,
-task="regression", score_handoff="disabled")` returns a migrated copy; select
-the task and handoff deliberately, then review and save the result.
-Add the fixed notebook contract fields and score run parameter
-from this template, then validate and redeploy. Keep row keys and prediction
-columns compatible with existing outputs; incompatible changes require a new
-prediction target or an explicit data migration.
+## 3. Train, inspect and approve
 
-## First run and later increments
+```powershell
+databricks bundle run -t dev --profile <profile> train
+databricks bundle run -t dev --profile <profile> score
+```
 
-1. Run `train` against a pinned labeled Delta version. It logs held-out MLflow
-   metrics and registers a concrete model version.
-2. In manual mode, approve the existing candidate if champion-based scoring
-   is desired. Pinned scoring instead uses the explicit `model_version`;
-   update and redeploy that config to change its saved pin, or use
-   `score_model_version` for one run. Run `score` independently,
-   or inspect the optional handoff following a successful champion transition.
-   Scoring verifies the source, Change Data Feed, model
-   outputs, row keys and any existing target schema before writing. It creates
-   only a missing physical prediction table; it never overwrites an existing
-   table or creates the source. Full mode then creates or updates its managed
-   view after a complete nonempty score. The initial row check is bounded by `max_rows`, and
-   scoring enforces `max_rows` and `max_input_mb` for each local transfer.
-3. Add new rows to the existing source Delta table and run `score`
-   again. An unchanged replay is a no-op. No date or source-version argument
-   is entered for each run. Source updates or deletes require a separate
-   rescore policy.
+Run `score` after a model is selected. When handoff is enabled, first inspect its
+child score run; a separate score invocation is only needed for new rows or recovery.
 
-{{if eq .score_model_selection "pinned_version"}}
-`score` uses its configured concrete model version unless the run supplies
-`score_model_version`. Training a new
-candidate or changing a registry alias alone does not change predictions.
-{{else}}
-`score` loads the concrete champion version at run start unless the run supplies
-`score_model_version`. A later alias change
-cannot alter that run's pinned model. Score remains independently runnable
-for new source rows, regardless of the configured handoff choice.
-{{end}}
-When a score run selects v2, `incremental_append` leaves v1 rows intact
-and scores only new source inserts with v2. `full_rebuild` scores every current
-source row into a new v2 table, switches the view only after success, then
-uses that table's Delta receipt to append future inserts. A failed rebuild
-leaves the old view active. The new generation must retain the active output
-schema; an incompatible model needs a new logical view or an explicit migration.
-The training schedule uses the same promotion and handoff choices. There is no online
-endpoint or Spark-native FE/model execution in this starting project.
+The `train` job has one active run, with queued training and operator actions:
 
-### Explicit retry policy
+| Task | Purpose |
+| --- | --- |
+| `prepare_request` | Validate and pin the request |
+| `training_requested` | Select training or operator branch |
+| `train_and_register` | Fit, evaluate and register the candidate |
+| `compare_and_decide` | Compare with champion and apply promotion policy |
+| `apply_operator_action` | Approve, reject or roll back without fitting |
+| `finalize_and_report` | Finalize either branch and publish verified results |
+| `scoring_requested` | Check whether scoring was requested |
+| `run_batch_scoring` | Invoke the existing score job |
 
-Generated notebook tasks set `max_retries: 0`; serverless tasks additionally set
-`disable_auto_optimization: true` because serverless auto-optimization can add
-retries independently. A training retry can register another candidate version.
-Inspect failed run evidence and registry state before rerunning; retry score
-separately after an already-committed approval. This is not an exactly-once
-training guarantee. See the [Databricks serverless retry behavior](https://docs.databricks.com/aws/en/jobs/run-serverless-jobs).
+The separate score job has the `score` task. Open **`finalize_and_report`** for
+metrics, the decision and ready-to-copy `next_actions`. Comparison output is in
+`compare_and_decide`; score results are in the child or independent score run.
+Finalization can run after failure; that does not imply a successful result.
+
+This project's policies are:
+
+- `score_model_selection={{.score_model_selection}}`: pinned version or champion.
+- `promotion_policy={{.promotion_policy}}`: manual approval or automatic gates.
+- `score_handoff={{.score_handoff}}`: disabled or score after an alias change.
+
+Set a numeric `quality_threshold` before the first champion approval/promotion.
+Later promotions also need positive improvement meeting `min_improvement`.
+Training a candidate never changes a saved scoring pin. Only the serialized train
+job identity should write lifecycle aliases; enforce exclusive ownership externally.
+
+Use the train job's **Run now parameters** for operator actions:
+
+| `lifecycle_action` | Required inputs |
+| --- | --- |
+| `train` | Clear operator evidence fields |
+| `approve` | Copy `next_actions.approve`: candidate and expected champion |
+| `reject` | Copy `next_actions.reject` and add `rejection_reason` |
+| `rollback` | Copy `next_actions.rollback`, including `promotion_receipt_json` |
+
+Use explicit `none` for a first champion. Its initialization has no prior champion
+to roll back to. A later completed promotion returns rollback inputs. Evidence
+is revalidated; editing a registry alias directly is not approval.
+See [results and next actions][results] and [operator walkthrough][operators].
+
+## 4. Score new rows and recover
+
+The independent score job accepts `score_model_version` for a one-run concrete
+version override; blank uses the configured selector. Handoff uses the configured
+selector. `incremental_append` keeps old predictions and scores new inserts;
+`full_rebuild` builds a versioned generation and switches the view after success.
+An unchanged replay is a no-op. [Prediction behavior and model changes][predictions].
+
+If scoring fails after promotion, retry score independently. Inspect saved
+MLflow evidence and registry state before a fresh lifecycle run; lifecycle repair
+and retry are rejected because effects may already have committed.
+See [failure evidence and pinned replay][replay] and [recovery][schedules].
+
+Keep `workflow_contract: "2"` fixed in the generated notebook parameters.
+`config_version: 1` is the separate workflow JSON schema version. Changing
+`score_handoff` requires updating `deployed_score_handoff` wherever present in
+`resources/workflow.jobs.yml` and redeploying the matching graph/notebooks/wheel.
+
+[setup]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle/#guided-setup-and-offline-preview
+[recipes]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle/#custom-preprocessing-recipes
+[migration]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle/#configuration-validation-and-migration
+[operators]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle_walkthrough/#approve-without-training-again
+[results]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle_walkthrough/#where-to-find-next_actions
+[predictions]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle_walkthrough/#what-happens-to-existing-predictions
+[replay]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle_walkthrough/#inspect-failures-and-replay-a-pinned-training-input
+[schedules]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle_walkthrough/#recovery-and-schedules

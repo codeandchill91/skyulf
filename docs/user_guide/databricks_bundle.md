@@ -16,8 +16,8 @@ databricks bundle init skyulf-core/templates/databricks --output-dir ./generated
 
 Initialization follows five sections: **data, model,
 evaluation CV, lifecycle, compute**. It asks for existing record keys (including
-composite keys), source columns, independent data-window/split choices, optional
-training sampling, date parsing, scoring/promotion policies and job settings. Serverless is the default. Reviewable
+composite keys), source columns, split strategy, applicable date parsing,
+scoring/promotion policies and job settings. Serverless is the default. Reviewable
 noninteractive examples are in `skyulf-core/templates/databricks/examples/`. The generated
 project has its own `databricks.yml`; Skyulf's root has no Bundle config.
 
@@ -42,8 +42,38 @@ runtimes may still be nondeterministic and must pass replay checks.
 
 Setup follows your answers; it does not inspect source tables or sample rows.
 Random full-snapshot training hides observation-date questions. Result-availability
-questions appear only when you enable that separate filter. CV, scheduled training
-and policy-cluster details likewise appear only when selected.
+questions appear only when you enable that separate filter. Schedule and
+policy-cluster details likewise appear only when selected.
+
+Advanced settings use defaults without additional questions. Set them with
+`--config-file` using an existing example, or edit the generated
+`config/workflow.json` before running preview:
+
+| Advanced fields | Default |
+| --- | --- |
+| `training_version` | `null`: pin latest snapshot at run start |
+| `training_window_mode` | `auto`: full snapshot for random, rolling calendar for temporal |
+| `test_size`, `random_state`, `stratify` | `0.2`, `42`, `false` |
+| `training_sample_rows`, `training_sample_seed` | `null` (all eligible rows within limits), `42` |
+| `cv_folds`, `cv_type`, `cv_shuffle`, `cv_random_state` | `5`, `k_fold`, `true`, `42`; the CV enable question remains |
+| `min_improvement`, `risk_category` | `0.0`, empty (generated as `null`) |
+
+Existing init-file names, values and validation remain supported. Most init
+values are strings, including `"true"`, `"42"` and `"null"`; `min_improvement`
+is a JSON number. Generated workflow JSON uses native booleans/numbers/null.
+For fixed dates, start from
+`random-window-init.example.json` or `temporal-delayed-results-init.example.json`.
+For stratified CV and sampling, use `guided-classification-init.example.json`.
+From the Skyulf checkout, for example:
+
+```powershell
+databricks bundle init skyulf-core/templates/databricks --config-file skyulf-core/templates/databricks/examples/guided-classification-init.example.json --output-dir ./generated
+```
+
+Review table and feature names in the example first. If editing generated JSON,
+use `full_snapshot`, `fixed_window` or `rolling_calendar` for the window mode;
+`auto` is resolved during initialization. Run `python src/preview.py --action train`
+from the generated project to validate the resulting combination.
 
 For each date column you actually use, declare how it is stored:
 
@@ -68,7 +98,7 @@ Choose the result name in the `prediction_table_name` setup question, for exampl
 `customer_predictions`. It becomes `prediction_table` in the configured output
 schema, with any target resource suffix. Blank uses `<project_name>_predictions`.
 
-| Question | Meaning and example |
+| Setting | Meaning and example |
 | --- | --- |
 | Training version | A saved Delta table snapshot from the table's History, such as version 12. This pins input data, not model v12. `null` or missing resolves latest once at run start; an explicit nonnegative integer pins that snapshot for manual and scheduled runs. |
 | Source selection | `full_snapshot`: use all eligible rows from that snapshot. `fixed_window`: use observation dates between your boundaries. `rolling_calendar`: derive recent complete months at every invocation. `auto`: full snapshot for random splitting, rolling calendar for temporal splitting. |
@@ -90,9 +120,9 @@ months of data a rolling window reads. Independent score scheduling is SM-34.
 
 | Section | What you choose |
 | --- | --- |
-| Basics/data | Engine/task, UC names, keys/features/target, snapshot pin, final holdout, independent source window, availability/date parsing, input limits and optional sample |
+| Basics/data | Engine/task, UC names, keys/features/target, split strategy, availability/date parsing and input limits; advanced snapshot/window/sampling settings use config |
 | Model | A menu containing only models for the selected regression/classification task; defaults remain editable in the generated file |
-| Evaluation CV | Enable, folds, method, shuffle and seed; evaluates fixed parameters with fold-local preprocessing |
+| Evaluation CV | Enable evaluation with fold-local preprocessing; folds, method, shuffle and seed use config |
 | Lifecycle | Metric/gates, manual/automatic promotion, score selector/handoff and enabled retraining cron |
 | Compute | Serverless or approved policy cluster and cost tags |
 
@@ -111,11 +141,19 @@ def build_preprocessing():
     ]
 ```
 
+### Custom preprocessing recipes
+
 Select per-step columns when mixing numeric and categorical features. For your
 own logic, define top-level Calculator/Applier classes in the same file and add
 `custom_step("my_step", MyCalculator, MyApplier, params={...})` to this list.
-The generated file includes a working mean-centering example for pandas/Polars;
-add `example_custom_step("income")` to enable it. Fit returns learned state;
+The self-contained
+[custom recipe example](https://github.com/flyingriverhorse/Skyulf/blob/master/skyulf-core/templates/databricks/examples/preprocessing_custom.py)
+in `skyulf-core/templates/databricks/examples/preprocessing_custom.py` provides
+mean-centering and fixed eligibility examples for pandas/Polars. Copy the needed
+imports, classes and helper functions into your generated `src/preprocessing.py`;
+keep your two recipe builders and add `example_custom_step("income")` to
+`build_preprocessing()` to enable centering. Do not import the example as a
+sibling module: training snapshots only `src/preprocessing.py`. Fit returns learned state;
 apply uses it without learning again. Preserve row count/order and implement
 the engines your project uses. CV refits the custom step within every fold.
 
@@ -571,7 +609,7 @@ The `paying-reg-no-init.example.json` example demonstrates both settings;
 the generic default remains `CostCenter`. This tag applies to policy-cluster
 compute. Selecting it does not assign a model risk category.
 
-Initialization also asks for an optional `risk_category`, such as `Low`,
+Advanced configuration accepts an optional `risk_category`, such as `Low`,
 `Medium`, or `High`. Leave it blank to omit the tag. The value remains editable
 in `config/workflow.json` and is recorded on future training runs and model
 versions; it does not change promotion gates or relabel existing versions.
@@ -624,7 +662,7 @@ Automatic promotion still requires `quality_threshold`, including when
 scoring is pinned. Scoring never updates the caller's configured version.
 
 New Bundles require both policy fields and `score_handoff`. Migrate an older
-project's configuration, both notebook entrypoints and job graph together;
+project's configuration, all notebook entrypoints and job graph together;
 changing only JSON is insufficient. Core direct callers retain the legacy
 compatibility path described above. Generated projects use the new policies.
 

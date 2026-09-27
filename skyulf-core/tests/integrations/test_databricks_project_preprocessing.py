@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -38,24 +39,40 @@ def build_preprocessing():
 """
 
 
-def _project(tmp_path):
+def _project(tmp_path, source_text=SOURCE):
     """Resolve the editable Python source into a normal Core pipeline config."""
     from skyulf.integrations.databricks.project import load_project_workflow
 
     source = tmp_path / "preprocessing.py"
-    source.write_text(SOURCE, encoding="utf-8")
+    source.write_text(source_text, encoding="utf-8")
     config = {"pipeline": {"preprocessing": [], "modeling": {"type": "linear_regression"}}}
     return load_project_workflow(config, source), source
 
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
-def test_project_code_and_fitted_state_survive_without_the_project_file(tmp_path, engine):
+@pytest.mark.parametrize("recipe", ["synthetic", "published_example"])
+def test_project_code_and_fitted_state_survive_without_the_project_file(tmp_path, engine, recipe):
     """Inference must use saved training code/state even after the project file changes."""
     from skyulf.data.dataset import SplitDataset
     from skyulf.inference.local_pipeline import predict_local_pipeline
     from skyulf.integrations.databricks.local_batch import fit_local_workflow
 
-    config, source = _project(tmp_path)
+    source_text = SOURCE
+    if recipe == "published_example":
+        source_text = (
+            Path(__file__).resolve().parents[2]
+            / "templates/databricks/examples/preprocessing_custom.py"
+        ).read_text(encoding="utf-8")
+        source_text += '''
+def build_preprocessing():
+    """Enable the published centering example after fitted imputation."""
+    return [
+        {"name": "impute", "transformer": "SimpleImputer",
+         "params": {"columns": ["x"], "strategy": "mean"}},
+        example_custom_step("x"),
+    ]
+'''
+    config, source = _project(tmp_path, source_text)
     frame = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "target": [3.0, 5.0, 7.0, 9.0]})
     if engine == "polars":
         frame = pl.from_pandas(frame)

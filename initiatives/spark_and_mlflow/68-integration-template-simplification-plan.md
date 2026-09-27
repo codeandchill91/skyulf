@@ -1,7 +1,7 @@
 # Integration and template simplification plan
 
 > Execute one task at a time using `executing-plans`; do not start implementation
-> merely because this plan exists. The user resumed C1-C3 on 2026-09-27.
+> merely because this plan exists. The user resumed C1-C5 on 2026-09-27.
 
 **Goal:** Reduce duplicated decisions, repeated work and setup/documentation bulk
 without changing the supported training, approval, rollback and scoring contracts.
@@ -17,7 +17,8 @@ Use small explicit helpers rather than a new workflow framework or generic base 
 `skyulf-core/templates/`, and the six findings summarized below, 2026-09-27.
 
 **State:** SM-34C1/C2 and the Sourcery follow-up are committed as `e16b27e8`.
-**SM-34C3** is locally complete, uncommitted; **SM-34C4** is next.
+**SM-34C3** is committed as `f4d654cf`; **SM-34C4/C5** are locally complete,
+uncommitted; **SM-34C6** is next.
 Original baseline: `454d2dad`, following `daa1e1c7`
 and graph commit `bd49f49e`. The unrelated gitignore commit is preserved.
 
@@ -105,7 +106,7 @@ APIs accidentally. Naming changes alone do not count as completion.
 
 ### SM-34C3 — Avoid redundant replay within a task
 
-**Status:** DONE locally, uncommitted. 327 tests, lint/type checks and independent
+**Status:** DONE, committed as `f4d654cf`. 327 tests, lint/type checks and independent
 review passed. [Measured operation counts and guards](71-sm34c3-replay-reuse.md).
 
 **Files:** `lifecycle_tasks.py`, `_lifecycle_state.py`, `local_workflow.py`,
@@ -125,7 +126,9 @@ repeat is necessary, document why and retain it; do not weaken checks for speed.
 
 ### SM-34C4 — Reduce initial setup complexity
 
-**Status:** READY.
+**Status:** DONE locally, uncommitted. 127 local tests and 68 CLI cases verified;
+12 before/after generated configurations and previews matched.
+[Evidence](72-sm34c4-initializer-simplification.md).
 
 **Files:** `skyulf-core/templates/databricks/databricks_template_schema.json`,
 `template/{{.project_name}}/config/workflow.json.tmpl`, `examples/*.json`,
@@ -135,13 +138,13 @@ integration `workflow_config.py` only if normalization genuinely needs changing.
 `test_databricks_bundle_template.py`, `test_databricks_workflow_config.py`,
 `test_databricks_workflow_preview.py`.
 
-- [ ] Separate essential first-run inputs from advanced settings. Retain existing
+- [x] Separate essential first-run inputs from advanced settings. Retain existing
   date, CV, sampling, schedule, compute and lifecycle capabilities.
-- [ ] Reduce repeated prompt conditions and explain advanced configuration through
+- [x] Reduce repeated prompt conditions and explain advanced configuration through
   existing example files/config editing; preserve supported init-file inputs.
-- [ ] Keep domain validation in Core and CLI input validation at its boundary;
+- [x] Keep domain validation in Core and CLI input validation at its boundary;
   do not introduce a new schema-generation framework to shorten JSON.
-- [ ] Generate and preview date-free/temporal, pandas/Polars, manual/automatic
+- [x] Generate and preview date-free/temporal, pandas/Polars, manual/automatic
   and serverless/policy-cluster cases with real CLI checks.
 
 **Acceptance:** Simpler basic setup with explicit advanced paths, unchanged
@@ -150,7 +153,8 @@ SM-42 can build on this; this task does not implement its future feature scenari
 
 ### SM-34C5 — Keep generated projects small and documentation consistent
 
-**Status:** WAIT for C4.
+**Status:** DONE locally, uncommitted. 109 local and 68 CLI tests passed;
+[starter reduction and saved-code evidence](73-sm34c5-smaller-generated-project.md).
 
 **Files:** `template/{{.project_name}}/README.md.tmpl`, `src/preprocessing.py`,
 `src/preview.py.tmpl` where needed, and `docs/user_guide/databricks_bundle*.md`.
@@ -158,22 +162,22 @@ SM-42 can build on this; this task does not implement its future feature scenari
 **Tests:** `test_databricks_bundle_template.py`,
 `test_databricks_bundle_generation.py`, `test_databricks_project_preprocessing.py`.
 
-- [ ] Fix the stale graph contract and obsolete two-notebook wording; add a
+- [x] Fix the stale graph contract and obsolete two-notebook wording; add a
   meaningful generated-project consistency check for the current contract.
-- [ ] Keep README focused on configuration, preview, run and result/operator steps;
+- [x] Keep README focused on configuration, preview, run and result/operator steps;
   link detailed recipes and recovery explanations to the central guides.
-- [ ] Keep the two recipe entrypoints and a minimal usable example. Move unused
+- [x] Keep the two recipe entrypoints and a minimal usable example. Move unused
   calculator/applier tutorials out of every generated project's active Python file.
-- [ ] Preserve self-contained custom-code packaging: moving examples must not
+- [x] Preserve self-contained custom-code packaging: moving examples must not
   introduce sibling-module imports that trained artifacts cannot replay.
-- [ ] Verify generated project preview, custom-code snapshot/replay and guide links.
+- [x] Verify generated project preview, custom-code snapshot/replay and guide links.
 
 **Acceptance:** Smaller usable starter output, no contradictory contract/task
 instructions, and all current custom preprocessing capabilities documented.
 
 ### SM-34C6 — Retire redundant notebook lifecycle routing carefully
 
-**Status:** WAIT for C5; relies on the ownership clarified in C2.
+**Status:** READY; C5 passed locally. Relies on the ownership clarified in C2.
 
 **Files:** `job_runtime.py`, template `src/score.py`, runtime/notebook tests,
 public docs and exports only where the usage audit requires it.

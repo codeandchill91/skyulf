@@ -1,7 +1,8 @@
 # SM-34C3: remove discarded replay and reuse verified phase metadata
 
 Date: 2026-09-27. Baseline: `e16b27e8` (C1/C2 and Sourcery follow-up, DCO signed;
-all applicable commit hooks passed). C3 is locally complete and uncommitted.
+all applicable commit hooks passed). C3 was committed as `f4d654cf`,
+with DCO sign-off and applicable hooks passing.
 No cloud run or deployment. Next: SM-34C4.
 
 ## Measured repetition

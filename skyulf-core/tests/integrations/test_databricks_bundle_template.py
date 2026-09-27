@@ -99,7 +99,7 @@ def test_unused_dates_hide_all_followup_questions(prefix):
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_optional_setup_sections_hide_their_details_until_selected(enabled):
-    """CV, scheduling and cluster settings must not clutter the default setup."""
+    """Scheduling and cluster details appear only when the user selects them."""
     from jsonschema import Draft7Validator
 
     properties = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())[
@@ -109,10 +109,6 @@ def test_optional_setup_sections_hide_their_details_until_selected(enabled):
     if enabled:
         values.update(cv_enabled="true", retraining_mode="scheduled", compute_mode="policy_cluster")
     for name in (
-        "cv_folds",
-        "cv_type",
-        "cv_shuffle",
-        "cv_random_state",
         "retraining_cron_expression",
         "retraining_timezone_id",
         "cluster_policy_name",
@@ -123,6 +119,35 @@ def test_optional_setup_sections_hide_their_details_until_selected(enabled):
     ):
         hidden = Draft7Validator(properties[name]["skip_prompt_if"]).is_valid(values)
         assert hidden is not enabled
+
+
+@pytest.mark.parametrize("task", ["regression", "classification"])
+def test_advanced_settings_use_defaults_without_extra_prompts(task):
+    """Enabling CV must not restore tuning questions to the basic setup."""
+    from jsonschema import Draft7Validator
+
+    properties = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())[
+        "properties"
+    ]
+    values = {key: spec["default"] for key, spec in properties.items()}
+    values.update(task=task, cv_enabled="true", training_sample_rows="1000")
+    for name in (
+        "training_version",
+        "test_size",
+        "random_state",
+        "stratify",
+        "training_window_mode",
+        "training_sample_rows",
+        "training_sample_seed",
+        "cv_folds",
+        "cv_type",
+        "cv_shuffle",
+        "cv_random_state",
+        "min_improvement",
+        "risk_category",
+    ):
+        assert "default" in properties[name]
+        assert Draft7Validator(properties[name].get("skip_prompt_if", False)).is_valid(values)
 
 
 @pytest.mark.parametrize("train_mode", ["manual", "scheduled"])

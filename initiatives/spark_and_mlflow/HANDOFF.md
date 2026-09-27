@@ -1,15 +1,28 @@
-# Current handoff: SM-34C1/C2 committed; C3 locally DONE; C4 READY
+# Current handoff: SM-34C1-C3 committed; C4/C5 locally DONE; C6 READY
 
 The user resumed implementation on 2026-09-27. The six slices are in
 [report68](68-integration-template-simplification-plan.md)
 and `OPEN_QUEUE.md`: shared training operations, evidence/result ownership,
 replay reuse, simpler setup, smaller generated docs/examples, and notebook routing.
-**Start SM-34C4 next session.** C3 removes the discarded decision replay and
+**Start SM-34C6 next session.** C3 removes the discarded decision replay and
 reuses comparison metadata within one phase. Both engines/policies reduced
 compare/decide source reads from 3 to 2 and client artifact downloads from 27
 to 25. The pre-registration receipt reread and fresh decision/mutation checks
 remain. **327 tests**, scoped Ruff/format, full ty and independent review passed.
-[C3 evidence and limits](71-sm34c3-replay-reuse.md). C3 is uncommitted.
+[C3 evidence and limits](71-sm34c3-replay-reuse.md). C3 is committed as `f4d654cf`
+with DCO sign-off and applicable hooks passing.
+
+C4 reduces default initializer prompts from 33 to 26. Thirteen advanced fields
+use defaults without prompts; all names, defaults, validation and explicit
+init-file overrides are preserved. 127 local tests and 68 CLI cases verified;
+12 baseline/current config/resource/preview comparisons passed. Ruff/format,
+full ty and independent review passed.
+[C4 evidence](72-sm34c4-initializer-simplification.md). C4 is uncommitted.
+C5 reduces generated README from 660 to 154 lines and the recipe from 113 to 24.
+Custom examples live centrally and remain self-contained when copied. Generated
+README checks pin contract2 against real task YAML. Both engines passed saved
+example replay in a fresh process after source edits; 109 local and 68 CLI tests
+passed. [C5 evidence](73-sm34c5-smaller-generated-project.md). C5 is uncommitted.
 
 C1 shares training preparation and registration;
 [C1 verification](69-sm34c1-shared-training-preparation.md). C2 adds shared saved-spec
@@ -24,7 +37,7 @@ C1/C2 and review fixes were committed as `e16b27e8`, with DCO sign-off and all
 applicable commit hooks passing. No push was requested or performed.
 SM-35 waits for this sequence; preserve the later program's existing scope.
 
-Current HEAD is `e16b27e8`; the unrelated `454d2dad` gitignore commit is preserved.
+Current HEAD is `f4d654cf`; the unrelated `454d2dad` gitignore commit is preserved.
 SM-34B and its training
 follow-up were committed as `bd49f49e`; the first-candidate HTML report fix and
 runtime helper extraction were committed as `daa1e1c7`. That fix passed 83 local
@@ -33,11 +46,11 @@ The test rendered the two saved Polars payloads and an illustrative rollback
 panel without training or model mutations. Persistent job deployment was rejected
 as outside that test/commit request, so their wheel is still the earlier version.
 
-Resume by verifying Git state and reading report68's C4 file/test map. Preserve
+Resume by verifying Git state and reading report68's C6 file/test map. Preserve
 unrelated `.tmp-review-model/` and `.tmp-sm34b-readable-green/` artifacts.
-C1-C3 included no cloud run, deployment or scheduled automation. Reports 68-70
-are committed; report71 is a local ignored initiative file, to include explicitly
-in a later C3 commit. Do not treat the local suites as live acceptance.
+C1-C5 included no cloud run, deployment or scheduled automation. Reports 68-71
+are committed; reports72-73 are local ignored initiative files, to include
+explicitly in a later commit. Do not treat the local suites as live acceptance.
 
 ## Previous SM-34B acceptance checkpoint (historical state)
 

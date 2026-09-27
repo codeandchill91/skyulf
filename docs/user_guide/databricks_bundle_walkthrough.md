@@ -161,8 +161,10 @@ target values are rejected instead of silently choosing a label. Source record
 keys must still be unique. This does not create customer-disjoint train/test
 sets; do not deduplicate on customer alone to simulate a group split.
 
-The generated Python file also contains a disabled `example_custom_pre_split`.
-Enable it in `build_pre_split_steps()` after changing the column name:
+The [custom recipe example](databricks_bundle.md#custom-preprocessing-recipes)
+contains `example_custom_pre_split`. Copy its imports, Eligibility classes and
+helper into your generated `src/preprocessing.py`, then enable it in
+`build_pre_split_steps()` after changing the column name:
 
 ```python
 def build_pre_split_steps():

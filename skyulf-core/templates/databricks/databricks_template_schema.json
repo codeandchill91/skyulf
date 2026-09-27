@@ -1,5 +1,5 @@
 {
-  "welcome_message": "Create a Skyulf training and prediction project. Column names can be comma-separated. Edit Skyulf preprocessing steps and custom transformations afterward in src/preprocessing.py. Initialization creates local files only.",
+  "welcome_message": "Create a Skyulf training and prediction project. Column names can be comma-separated. Edit Skyulf preprocessing steps and custom transformations afterward in src/preprocessing.py. Initialization creates local files only. Advanced snapshot, split, sampling and CV settings use defaults; override them with --config-file or edit config/workflow.json after setup. See skyulf-core/templates/databricks/examples/ in the Skyulf checkout.",
   "properties": {
     "project_name": {
       "order": 1,
@@ -89,12 +89,13 @@
       "type": "string",
       "default": "null",
       "description": "1. Data | Training table snapshot number from Databricks table History, e.g. 0 or 12 (not a model version). null = resolve latest once at run start; an explicit version pins that snapshot for manual and scheduled runs",
-      "pattern": "^(?:null|0|[1-9][0-9]*)$"
+      "pattern": "^(?:null|0|[1-9][0-9]*)$",
+      "skip_prompt_if": {}
     },
     "split_strategy": {
       "type": "string",
       "default": "random",
-      "description": "1. Data | How to reserve test rows? random = random rows; temporal = newer rows for testing and older rows for training",
+      "description": "1. Data | How to reserve test rows? random = random rows; temporal = newer rows for testing and older rows for training. Default source: full snapshot for random, rolling calendar for temporal. Override training_window_mode in an init file.",
       "enum": [
         "random",
         "temporal"
@@ -106,13 +107,7 @@
       "default": "0.2",
       "description": "1. Data | Share of rows reserved for final testing: 0.2 means 20% test and 80% training",
       "pattern": "^0\\.[0-9]*[1-9][0-9]*$",
-      "skip_prompt_if": {
-        "properties": {
-          "split_strategy": {
-            "const": "temporal"
-          }
-        }
-      },
+      "skip_prompt_if": {},
       "order": 14
     },
     "random_state": {
@@ -120,13 +115,7 @@
       "default": "42",
       "description": "1. Data | Seed for repeatable random splitting. Keep 42 unless you want a different split",
       "pattern": "^(?:0|[1-9][0-9]*)$",
-      "skip_prompt_if": {
-        "properties": {
-          "split_strategy": {
-            "const": "temporal"
-          }
-        }
-      },
+      "skip_prompt_if": {},
       "order": 15
     },
     "stratify": {
@@ -137,24 +126,7 @@
         "false",
         "true"
       ],
-      "skip_prompt_if": {
-        "anyOf": [
-          {
-            "properties": {
-              "split_strategy": {
-                "const": "temporal"
-              }
-            }
-          },
-          {
-            "properties": {
-              "task": {
-                "const": "regression"
-              }
-            }
-          }
-        ]
-      },
+      "skip_prompt_if": {},
       "order": 16
     },
     "training_window_mode": {
@@ -167,7 +139,8 @@
         "fixed_window",
         "rolling_calendar"
       ],
-      "order": 17
+      "order": 17,
+      "skip_prompt_if": {}
     },
     "window_timezone": {
       "type": "string",
@@ -957,20 +930,15 @@
       "default": "null",
       "description": "1. Data | Optional sample: enter 10000 to select up to 10000 eligible rows BEFORE train/test splitting. null = no sampling. Prediction rows are never sampled",
       "pattern": "^(?:null|[1-9][0-9]*)$",
-      "order": 41
+      "order": 41,
+      "skip_prompt_if": {}
     },
     "training_sample_seed": {
       "type": "string",
       "default": "42",
       "description": "1. Data | Seed for choosing the same sample from the same table snapshot. Keep 42 unless you want another sample",
       "pattern": "^(?:0|[1-9][0-9]*)$",
-      "skip_prompt_if": {
-        "properties": {
-          "training_sample_rows": {
-            "const": "null"
-          }
-        }
-      },
+      "skip_prompt_if": {},
       "order": 42
     },
     "regression_model": {
@@ -1040,7 +1008,7 @@
     "cv_enabled": {
       "type": "string",
       "default": "false",
-      "description": "3. Cross-validation | Also evaluate the model on several train/validation splits (cross-validation)? No parameter search; final test rows stay separate",
+      "description": "3. Cross-validation | Also evaluate the model on several train/validation splits (cross-validation)? No parameter search; final test rows stay separate. Defaults: 5-fold K-fold, shuffle enabled, seed 42; change details in config/workflow.json.",
       "enum": [
         "false",
         "true"
@@ -1052,13 +1020,7 @@
       "default": "5",
       "description": "3. Cross-validation | How many CV splits? 5 means five evaluations; more splits take longer (2-20)",
       "pattern": "^(?:[2-9]|1[0-9]|20)$",
-      "skip_prompt_if": {
-        "properties": {
-          "cv_enabled": {
-            "const": "false"
-          }
-        }
-      },
+      "skip_prompt_if": {},
       "order": 46
     },
     "cv_type": {
@@ -1071,13 +1033,7 @@
         "time_series_split",
         "shuffle_split"
       ],
-      "skip_prompt_if": {
-        "properties": {
-          "cv_enabled": {
-            "const": "false"
-          }
-        }
-      },
+      "skip_prompt_if": {},
       "order": 47
     },
     "cv_shuffle": {
@@ -1088,13 +1044,7 @@
         "false",
         "true"
       ],
-      "skip_prompt_if": {
-        "properties": {
-          "cv_enabled": {
-            "const": "false"
-          }
-        }
-      },
+      "skip_prompt_if": {},
       "order": 48
     },
     "cv_random_state": {
@@ -1102,13 +1052,7 @@
       "default": "42",
       "description": "3. Cross-validation | Seed for repeatable CV splits. Keep 42 unless you want different splits",
       "pattern": "^(?:0|[1-9][0-9]*)$",
-      "skip_prompt_if": {
-        "properties": {
-          "cv_enabled": {
-            "const": "false"
-          }
-        }
-      },
+      "skip_prompt_if": {},
       "order": 49
     },
     "retraining_mode": {
@@ -1321,7 +1265,8 @@
       "type": "number",
       "default": 0.0,
       "minimum": 0,
-      "description": "4. Lifecycle | Minimum metric improvement required for manual or automatic promotion; ties never pass"
+      "description": "4. Lifecycle | Minimum metric improvement required for manual or automatic promotion; ties never pass",
+      "skip_prompt_if": {}
     },
     "quality_threshold": {
       "order": 65,
@@ -1335,7 +1280,8 @@
       "type": "string",
       "default": "",
       "description": "4. Lifecycle | Optional business risk label (e.g. Low, Medium, High); leave blank when unused. This label does not change promotion gates.",
-      "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9 ._-]{0,63})?$"
+      "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9 ._-]{0,63})?$",
+      "skip_prompt_if": {}
     },
     "compute_mode": {
       "order": 67,

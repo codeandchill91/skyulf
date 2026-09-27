@@ -2,8 +2,10 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,12 +19,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _initialize_project(tmp_path, **overrides):
+def _initialize_project(tmp_path, *, omit_fields=(), **overrides):
     """Render the actual template through the installed CLI without cloud writes."""
     root = Path(__file__).resolve().parents[2] / "templates/databricks"
     schema = json.loads((root / "databricks_template_schema.json").read_text())
     values = {key: spec["default"] for key, spec in schema["properties"].items()}
     values.update(project_name="sm33_generated", **overrides)
+    for name in omit_fields:
+        values.pop(name)
     inputs = tmp_path / "init.json"
     inputs.write_text(json.dumps(values), encoding="utf-8")
     generated = subprocess.run(
@@ -50,6 +54,66 @@ def _generate_project(tmp_path, **overrides):
     generated, project = _initialize_project(tmp_path, **overrides)
     assert generated.returncode == 0, generated.stdout + generated.stderr
     return project
+
+
+def test_cli_basic_setup_defaults_match_explicit_advanced_settings(tmp_path):
+    """Skipped tuning prompts must use defaults without losing explicit init-file values."""
+    basic = tmp_path / "basic"
+    explicit = tmp_path / "explicit"
+    basic.mkdir()
+    explicit.mkdir()
+    advanced = (
+        "training_version",
+        "test_size",
+        "random_state",
+        "stratify",
+        "training_window_mode",
+        "training_sample_rows",
+        "training_sample_seed",
+        "cv_folds",
+        "cv_type",
+        "cv_shuffle",
+        "cv_random_state",
+        "min_improvement",
+        "risk_category",
+    )
+    defaults = _generate_project(basic, omit_fields=advanced, cv_enabled="true")
+    supplied = _generate_project(explicit, cv_enabled="true")
+    assert _read_validated_config(defaults) == _read_validated_config(supplied)
+
+
+def test_cli_hidden_advanced_overrides_survive_initialization(tmp_path):
+    """Config-file values must take precedence even when their questions are hidden."""
+    expected = {
+        "training_version": 12,
+        "test_size": 0.3,
+        "random_state": 7,
+        "stratify": True,
+        "training_window_mode": "fixed_window",
+        "training_sample_rows": 1000,
+        "training_sample_seed": 11,
+        "cv_folds": 3,
+        "cv_type": "stratified_k_fold",
+        "cv_shuffle": False,
+        "cv_random_state": 13,
+        "min_improvement": 0.1,
+        "risk_category": "high",
+    }
+    overrides = {
+        key: value if isinstance(value, str) or key == "min_improvement" else json.dumps(value)
+        for key, value in expected.items()
+    }
+    project = _generate_project(
+        tmp_path,
+        **overrides,
+        task="classification",
+        cv_enabled="true",
+        event_column="observed_at",
+        start="2026-06-01T00:00:00+00:00",
+        cutoff="2026-09-01T00:00:00+00:00",
+    )
+    config = _read_validated_config(project)
+    assert {key: config[key] for key in expected} == expected
 
 
 @pytest.mark.parametrize(
@@ -142,6 +206,15 @@ def test_cli_independent_schedules_preserve_shared_two_job_graph(tmp_path, train
                 assert variables[f"{prefix}_{suffix}"]["default"] == expected
                 assert f"{prefix}_{suffix}" not in config
     tasks = {task["task_key"]: task for task in jobs["train"]["tasks"]}
+    readme = (project / "README.md").read_text(encoding="utf-8")
+    documented_contract = re.search(r'workflow_contract: "(\d+)"', readme)
+    assert documented_contract is not None
+    for task in jobs["train"]["tasks"] + jobs["score"]["tasks"]:
+        assert task["task_key"] in readme
+        if "notebook_task" in task:
+            assert task["notebook_task"]["base_parameters"][
+                "workflow_contract"
+            ] == documented_contract.group(1)
     assert tasks["run_batch_scoring"]["run_job_task"]["job_id"] == "${resources.jobs.score.id}"
     assert (
         tasks["train_and_register"]["max_retries"] == jobs["score"]["tasks"][0]["max_retries"] == 0
@@ -656,6 +729,9 @@ def test_cli_preserves_conflicting_fields_for_preflight_rejection(tmp_path):
         "temporal-delayed-results-init.example.json",
         "guided-classification-init.example.json",
         "random-window-init.example.json",
+        "serverless-init.example.json",
+        "policy-init.example.json",
+        "paying-reg-no-init.example.json",
     ],
 )
 def test_cli_training_examples_pass_manual_preflight(tmp_path, filename):
@@ -666,7 +742,8 @@ def test_cli_training_examples_pass_manual_preflight(tmp_path, filename):
     root = Path(__file__).resolve().parents[2] / "templates/databricks/examples"
     inputs = json.loads((root / filename).read_text())
     inputs.pop("project_name")
-    config = _read_validated_config(_generate_project(tmp_path, **inputs))
+    project = _generate_project(tmp_path, **inputs)
+    config = _read_validated_config(project)
     resolved = resolve_target_config(
         config,
         {
@@ -678,7 +755,15 @@ def test_cli_training_examples_pass_manual_preflight(tmp_path, filename):
         },
     )
     checked = validate_workflow_config(resolved, action="train")
-    assert checked["training_version"] == 12
-    assert checked["split_strategy"] == inputs["split_strategy"]
+    assert checked["training_version"] == json.loads(inputs.get("training_version", "null"))
+    assert checked["split_strategy"] == inputs.get("split_strategy", "random")
     if inputs.get("start"):
         assert checked["training_window_mode"] == "fixed_window"
+    preview = subprocess.run(
+        [sys.executable, str(project / "src/preview.py"), "--action", "train"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert preview.returncode == 0, preview.stdout + preview.stderr
+    assert f"Engine: {inputs['engine']}" in preview.stdout
