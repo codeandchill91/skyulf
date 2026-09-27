@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: spark-tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   spark:
     runs-on: ubuntu-latest

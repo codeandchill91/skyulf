@@ -1,39 +1,25 @@
-# © 2025 Murat Unsal — Skyulf Project
-#
-# Backend test suite: runs the root `tests/` directory (backend API, Celery
-# tasks, DB models, node wiring, etc.) plus the full-monorepo Docker smoke
-# test. This is intentionally separate from skyulf-core-tests.yml — the two
-# suites exercise different layers of the architecture (see
-# .github/instructions/project_architecture.instructions.md) and should be
-# re-runnable/required independently.
-#
-# The suite runs once per DataFrame engine (SKYULF_ENGINE=polars|pandas) as
-# the engine-parity gate from the backend Polars migration plan — neither
-# engine may regress while the other stays green.
-#
-# Static analysis (lint/format/type checks) is NOT duplicated here — that's
-# pr_check.yml's job. This workflow assumes pr_check.yml already gates PRs.
-
+# Called once by PR Check; workflow_dispatch supports focused manual reruns.
 name: Backend Tests
 
 on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+  workflow_call:
+    secrets:
+      CODECOV_TOKEN:
+        required: false
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: backend-tests-${{ github.ref }}
+  group: backend-tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
     name: Backend test suite (engine ${{ matrix.engine }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     services:
       redis:
         image: redis
@@ -45,6 +31,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.12"]
         # Engine-parity gate (migration plan Phase 1.4): the suite must stay
@@ -96,10 +83,7 @@ jobs:
         # and runs in skyulf-core-tests.yml instead.
         # No -s: keeps captured stdout/print output out of the log for
         # passing tests (still shown automatically for any failure).
-        # No --maxfail: same reasoning as skyulf-core-tests.yml — the suite
-        # finishes in under two minutes, so aborting on the first failure
-        # saves nothing and hides how many tests a PR actually broke, once
-        # per matrix leg.
+        # Report all failures in one run.
         # No --cov-fail-under: OC-77 scoped the ratchet to skyulf-core, whose
         # floor of 45 sat 51 points under its actual coverage. Backend measures
         # 77% on both engine legs (CI run 34032836559), so a floor here is a
@@ -107,7 +91,15 @@ jobs:
         run: |
           bash .github/scripts/run_check.sh "pytest tests (backend)" \
             pytest tests -q --disable-warnings \
-              --cov=backend --cov-branch --cov-report=term-missing --cov-report=xml
+              --cov=backend --cov-branch --cov-report=term-missing --cov-report=xml:coverage-backend.xml
+
+      - name: Share backend coverage with SonarQube
+        if: ${{ !cancelled() && matrix.engine == 'polars' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-backend
+          path: coverage-backend.xml
+          if-no-files-found: error
 
       - name: Upload coverage reports to Codecov
         # Single upload per push: both matrix legs produce the same coverage,
@@ -117,23 +109,18 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: backend
+          files: coverage-backend.xml
+          disable_search: true
 
   docker-test-smoke:
     name: Docker test image smoke test (full monorepo)
     runs-on: ubuntu-latest
-    # Validates that tests/docker/Dockerfile.unittests actually builds and its
-    # pytest suite passes in a clean container — catches Docker-specific
-    # breakage (missing files in build context, dependency drift) that the
-    # native `test` job above can't detect, without duplicating it as a
-    # required gate. See tests/docker/run_unit_tests.ps1|sh for local usage.
+    timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Build and run unit-test image
+      - uses: actions/checkout@v7
+      - name: Check backend imports, registry wiring and serialization in Docker
         run: |
-          echo "## 🐳 Docker smoke test (full monorepo)" >> "$GITHUB_STEP_SUMMARY"
-          echo "::group::docker compose build + run (unit-tests)"
-          bash .github/scripts/run_check.sh "docker compose unit-tests (monorepo)" \
-            docker compose -f docker-compose.test.yml run --rm --build unit-tests
-          echo "::endgroup::"
+          bash .github/scripts/run_check.sh "Docker backend smoke" \
+            docker compose -f docker-compose.test.yml run --rm --build unit-tests \
+              python -m pytest tests/unit/test_registry_fixes.py \
+                tests/unit/test_serialization_values.py -q --disable-warnings --no-cov

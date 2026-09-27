@@ -1,36 +1,27 @@
-# © 2025 Murat Unsal — Skyulf Project
-#
-# skyulf-core test suite: runs skyulf-core/tests (the standalone ML-library
-# package) plus its own complexity gate and the standalone Docker smoke test.
-# Kept separate from backend-tests.yml so the two suites — which exercise
-# different layers of the architecture (see
-# .github/instructions/project_architecture.instructions.md) — can be
-# triaged, re-run, and required independently in branch protection.
-#
-# Static analysis (lint/format/type checks) is NOT duplicated here — that's
-# pr_check.yml's job. This workflow assumes pr_check.yml already gates PRs.
-
+# Called once by PR Check; workflow_dispatch supports focused manual reruns.
 name: Skyulf-Core Tests
 
 on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+  workflow_call:
+    secrets:
+      CODECOV_TOKEN:
+        required: false
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: skyulf-core-tests-${{ github.ref }}
+  group: skyulf-core-tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
     name: skyulf-core test suite
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.12"]
     steps:
@@ -78,10 +69,7 @@ jobs:
         # bug that pattern used to cause when both suites shared one job).
         # No -s: keeps captured stdout/print output out of the log for
         # passing tests (still shown automatically for any failure).
-        # No --maxfail: the suite finishes in ~2 minutes, so bailing out early
-        # saves nothing and costs the real failure count — a PR that broke
-        # thirty tests used to report "1 failed" and had to be re-run once per
-        # fix to discover the rest.
+        # Report all failures in one run.
         # Floor is 90 against a measured 96% (CI run 34032836551). The 45 it
         # replaces was 51 points below the suite's actual coverage, so it could
         # never fail and was not a ratchet at all. 90 keeps enough headroom for
@@ -91,12 +79,20 @@ jobs:
           bash .github/scripts/run_check.sh "pytest skyulf-core/tests (coverage ≥ 90%)" \
             pytest skyulf-core/tests -q --disable-warnings \
               --cov=skyulf-core/skyulf --cov-branch --cov-report=term-missing \
-              --cov-report=xml --cov-fail-under=90
+              --cov-report=xml:coverage-core.xml --cov-fail-under=90
+
+      - name: Share Core coverage with SonarQube
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-core
+          path: coverage-core.xml
+          if-no-files-found: error
 
       - name: Build and verify distributable wheel
         run: |
           echo "::group::Build skyulf-core wheel"
-          python -m pip install --upgrade build
+          uv pip install --system build
           rm -rf skyulf-core/dist
           python -m build --outdir skyulf-core/dist skyulf-core
           echo "::endgroup::"
@@ -109,35 +105,16 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: skyulf-core
+          files: coverage-core.xml
+          disable_search: true
 
   skyulf-core-docker-smoke:
     name: Docker test image smoke test (skyulf-core standalone)
     runs-on: ubuntu-latest
-    # Builds skyulf-core in total isolation from backend/ — enforces the
-    # "independently distributable" architecture rule in
-    # project_architecture.instructions.md by construction: if skyulf-core
-    # ever grows an accidental import of fastapi/celery/backend, this build
-    # fails (those packages simply aren't installed in this image).
-    defaults:
-      run:
-        working-directory: skyulf-core
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Build and run skyulf-core unit-test image
-        run: |
-          echo "## 🐳 Docker smoke test (skyulf-core standalone)" >> "$GITHUB_STEP_SUMMARY"
-          echo "::group::docker compose build + run (unit-tests)"
-          bash ../.github/scripts/run_check.sh "docker compose unit-tests (skyulf-core)" \
-            docker compose -f docker-compose.test.yml run --rm --build unit-tests
-          echo "::endgroup::"
-
-      - name: Run skyulf-core integration-test image
-        # Reuses the image built by the previous step (same build context /
-        # Dockerfile, so the build cache makes --build a no-op here).
-        run: |
-          echo "::group::docker compose run (integration-tests)"
-          bash ../.github/scripts/run_check.sh "docker compose integration-tests (skyulf-core)" \
-            docker compose -f docker-compose.test.yml run --rm --build integration-tests
-          echo "::endgroup::"
+      - uses: actions/checkout@v7
+      - name: Build standalone wheel smoke image
+        run: docker build -f skyulf-core/tests/docker/Dockerfile.smoke -t skyulf-core-smoke skyulf-core
+      - name: Train, predict and save/load outside the source checkout
+        run: docker run --rm --network none skyulf-core-smoke
