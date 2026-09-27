@@ -1085,7 +1085,8 @@ async def list_error_events(
         .distinct()
         .order_by(ErrorEvent.job_id)
     )
-    facet_job_ids = [row[0] for row in facet_job_ids_result.all()]
+    # The SQL IS NOT NULL predicate guarantees strings at this boundary.
+    facet_job_ids = [cast(str, row[0]) for row in facet_job_ids_result.all()]
 
     total_result = await db.execute(
         select(sa_func.count()).select_from(ErrorEvent).where(*conditions)
@@ -1770,7 +1771,8 @@ async def list_pipeline_logs(
         .distinct()
         .order_by(PipelineRunLog.node_type)
     )
-    facet_node_types = [row[0] for row in facet_node_types_result.all()]
+    # SQL IS NOT NULL predicates narrow these nullable model fields to strings.
+    facet_node_types = [cast(str, row[0]) for row in facet_node_types_result.all()]
 
     facet_pipeline_ids_result = await db.execute(
         select(PipelineRunLog.pipeline_id)
@@ -1778,7 +1780,7 @@ async def list_pipeline_logs(
         .distinct()
         .order_by(PipelineRunLog.pipeline_id)
     )
-    facet_pipeline_ids = [row[0] for row in facet_pipeline_ids_result.all()]
+    facet_pipeline_ids = [cast(str, row[0]) for row in facet_pipeline_ids_result.all()]
 
     facet_node_ids_result = await db.execute(
         select(PipelineRunLog.node_id)
@@ -1786,7 +1788,7 @@ async def list_pipeline_logs(
         .distinct()
         .order_by(PipelineRunLog.node_id)
     )
-    facet_node_ids = [row[0] for row in facet_node_ids_result.all()]
+    facet_node_ids = [cast(str, row[0]) for row in facet_node_ids_result.all()]
 
     total_result = await db.execute(
         select(sa_func.count()).select_from(PipelineRunLog).where(*conditions)

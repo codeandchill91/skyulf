@@ -684,6 +684,7 @@ class NodeRunnersMixin:
             "n_trials": 1,
             "cv_enabled": node.params.get("cv_enabled", False),
             "cv_folds": node.params.get("cv_folds", 5),
+            "cv_inner_folds": node.params.get("cv_inner_folds"),
             "cv_type": node.params.get("cv_type", "k_fold"),
             "cv_shuffle": node.params.get("cv_shuffle", True),
             "cv_random_state": node.params.get("cv_random_state", DEFAULT_RANDOM_STATE),
@@ -871,6 +872,8 @@ class NodeRunnersMixin:
                 or tuning_params.get("tuning_config", {}).get("metric")
                 or tuning_params.get("metric"),
             }
+            if getattr(tuning_result, "nested_cv", None) is not None:
+                metrics["nested_cv"] = tuning_result.nested_cv
             # F-13: surface the tuned decision thresholds (string keys so the
             # job metrics stay JSON-serializable regardless of label dtype).
             thresholds = getattr(tuning_result, "decision_thresholds", None)
@@ -896,9 +899,8 @@ class NodeRunnersMixin:
     ) -> dict[str, Any]:
         """Run post-tuning cross-validation with the tuned model's best params.
 
-        For ``nested_cv``, the inner CV loop already ran during the search, so
-        post-tuning CV only needs the outer evaluation and downgrades to
-        ``stratified_k_fold`` (classification) or ``k_fold`` (regression).
+        New nested searches already contain independent outer-fold scores.
+        Older artifacts retain the historical fixed-model diagnostic fallback.
 
         ``fold_preprocessing`` (F-15): ``(adapter, (X_pre, y_pre),
         validation_payload)`` — CV must slice the pre-transform rows so the
@@ -909,6 +911,9 @@ class NodeRunnersMixin:
         """
         if not tuning_params.get("cv_enabled", False):
             return {}
+        nested = getattr(tuning_result, "nested_cv", None)
+        if nested is not None:
+            return self._aggregate_cv_metrics(nested)
         best_params: dict[str, Any] = tuning_result.best_params if tuning_result else {}
         cv_estimator = StatefulEstimator(calculator, applier, node.node_id)
 
@@ -917,8 +922,8 @@ class NodeRunnersMixin:
             is_classification = getattr(calculator, "problem_type", "") == "classification"
             post_cv_type = "stratified_k_fold" if is_classification else "k_fold"
             self.log(
-                "Nested CV inner loop already ran during tuning. "
-                f"Using {post_cv_type} for post-tuning evaluation."
+                "Legacy result has no nested search evidence; "
+                f"using {post_cv_type} for fixed-model diagnostics only."
             )
 
         preprocessing = None
@@ -954,6 +959,20 @@ class NodeRunnersMixin:
                 metrics["iteration_metric"] = last_point["metric"]
             if last_point.get("direction"):
                 metrics["iteration_direction"] = last_point["direction"]
+
+    @staticmethod
+    def _require_nested_fold_preprocessing(
+        tuning_params: dict[str, Any], refit_fallback: str | None
+    ) -> None:
+        """Reject nested evaluation when preprocessing cannot be refit within each fold."""
+        if (
+            tuning_params.get("cv_enabled", False)
+            and tuning_params.get("cv_type") == "nested_cv"
+            and refit_fallback is not None
+        ):
+            raise ValueError(
+                f"Nested CV requires fold-local preprocessing; cannot use {refit_fallback}."
+            )
 
     def _run_training_tuned(
         self,
@@ -1011,6 +1030,7 @@ class NodeRunnersMixin:
         # Unsupported learned graphs fail closed. Explicit warn/ignore mode
         # permits fallback, recorded by the stable reason code in the metrics.
         fold_preprocessing, refit_fallback = self._resolve_fold_preprocessing(node, target_col)
+        self._require_nested_fold_preprocessing(tuning_params, refit_fallback)
 
         # Audit telemetry (findings 2026-08-26 §3/B): record the input row
         # count of every per-fold fit/transform so the run can be audited

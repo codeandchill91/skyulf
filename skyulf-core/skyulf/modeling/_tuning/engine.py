@@ -40,6 +40,7 @@ from . import splitters
 from .fold_pipeline import FoldAwareModelStep
 from .grid_random import fit_and_score_candidate_fold, run_grid_or_random_search
 from .metrics import is_multiclass_target, resolve_metric, resolve_scorer
+from .nested import run_nested_search
 from .params import (
     clean_search_space,
     instantiate_model,
@@ -869,6 +870,17 @@ class TuningCalculator(BaseModelCalculator):
         validation_frames: tuple[Any, Any] | None = None,
     ) -> TuningResult:
         """Runs hyperparameter tuning."""
+        if config.cv_enabled and config.cv_type == "nested_cv":
+            raw_x, raw_y = preprocessing_frames if preprocessing_frames is not None else (X, y)
+            return run_nested_search(
+                self,
+                raw_x,
+                raw_y,
+                config,
+                preprocessing=preprocessing,
+                progress_callback=progress_callback,
+                log_callback=log_callback,
+            )
         # 1. Prepare Estimator
         # We need a base estimator. Since our Calculator wraps the class,
         # we need to instantiate the underlying sklearn model with default params.
@@ -909,12 +921,9 @@ class TuningCalculator(BaseModelCalculator):
             # FeatureEngineer), not the numpy arrays used by the searchers.
             # Holdout mode is excluded: the splitter stage already produced
             # the concatenated train+validation frames the mask is aligned to.
-            if (
-                preprocessing is not None
-                and preprocessing_frames is not None
-                and validation_data is None
-            ):
-                X_for_search, y_for_search = preprocessing_frames
+            X_for_search, y_for_search = self._grid_search_frames(
+                (X_for_search, y_for_search), preprocessing, preprocessing_frames, validation_data
+            )
             # Use custom loop to support progress and log callbacks
             return run_grid_or_random_search(
                 X_for_search,
@@ -968,6 +977,22 @@ class TuningCalculator(BaseModelCalculator):
             preprocessing_frames,
             log_callback,
         )
+
+    @staticmethod
+    def _grid_search_frames(
+        search_frames: tuple[Any, Any],
+        preprocessing: "FoldPreprocessor | None",
+        preprocessing_frames: tuple[Any, Any] | None,
+        validation_data: tuple[Any, Any] | None,
+    ) -> tuple[Any, Any]:
+        """Retain named raw frames for per-fold refits outside explicit holdout mode."""
+        if (
+            preprocessing is not None
+            and preprocessing_frames is not None
+            and validation_data is None
+        ):
+            return preprocessing_frames
+        return search_frames
 
 
 class TuningApplier(BaseModelApplier):

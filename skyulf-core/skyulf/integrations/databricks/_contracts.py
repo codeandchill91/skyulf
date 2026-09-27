@@ -1,0 +1,154 @@
+"""Validated batch identities, independent of Spark or platform connections."""
+
+import re
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+PREDICTION_METADATA_COLUMNS = ("run_id", "model_name", "model_version")
+
+
+def input_budget_bytes(max_input_mb: Any) -> int:
+    """Convert a positive whole-MiB Bundle input limit to the SDK's byte unit."""
+    if type(max_input_mb) is not int or max_input_mb <= 0:
+        raise ValueError("max_input_mb must be a positive integer (1 unit = 1024 * 1024 bytes).")
+    return max_input_mb * 1024 * 1024
+
+
+def table_name(value: str) -> str:
+    """Validate and quote a simple one-, two- or three-part catalog identifier."""
+    if type(value) is not str or not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}", value
+    ):
+        raise ValueError("Table name must contain one to three simple identifiers.")
+    return ".".join(f"`{part}`" for part in value.split("."))
+
+
+def column_name(value: str) -> str:
+    """Restrict control columns to simple names outside reserved batch metadata."""
+    if type(value) is not str or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise ValueError("Control column must be a simple identifier.")
+    if value.lower().startswith("__skyulf_"):
+        raise ValueError("Control column collides with reserved __skyulf_ metadata.")
+    return f"`{value}`"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BatchSpec:
+    """Pin period, source, model and expected target version for one logical run.
+
+    Aware dates represent instants and are converted to UTC without reinterpreting
+    wall-clock values. Construct local calendar boundaries with ``ZoneInfo``.
+    ``source_version`` is a Delta integer version, never an arbitrary label.
+    The output table must already exist with the intended prediction schema.
+    """
+
+    period_start: datetime
+    period_end: datetime
+    as_of: datetime
+    record_key_columns: tuple[str, ...]
+    output_table: str
+    model_name: str
+    model_version: str
+    source_version: int
+    code_version: str
+    run_id: str
+    model_digest: str
+    expected_target_version: int
+    period_column: str = "event_time"
+    business_timezone: str = "UTC"
+    mode: str = "native_features"
+    publish_mode: str = "replace_period"
+    allow_empty: bool = False
+
+    def __post_init__(self) -> None:
+        """Reject ambiguity before any Spark action or table modification."""
+        _validate_batch_period(self)
+        _validate_batch_columns(self)
+        _validate_batch_model_identity(self)
+        for name in ("source_version", "expected_target_version"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer.")
+        if type(self.model_digest) is not str or not re.fullmatch(
+            r"[0-9a-f]{64}", self.model_digest
+        ):
+            raise ValueError("model_digest must be a SHA-256 bundle digest.")
+        if self.mode not in ("native_features", "python_pipeline", "local_pipeline"):
+            raise ValueError("mode must be native_features, python_pipeline or local_pipeline.")
+        if self.publish_mode != "replace_period":
+            raise ValueError("Only replace_period publication is supported.")
+        if type(self.allow_empty) is not bool:
+            raise TypeError("allow_empty must be a bool.")
+        try:
+            ZoneInfo(self.business_timezone)
+        except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+            raise ValueError("business_timezone must name an IANA timezone.") from exc
+
+    @property
+    def period_start_utc(self) -> datetime:
+        """Return the inclusive start instant in UTC."""
+        return self.period_start.astimezone(UTC)
+
+    @property
+    def period_end_utc(self) -> datetime:
+        """Return the exclusive end instant in UTC."""
+        return self.period_end.astimezone(UTC)
+
+    @property
+    def as_of_utc(self) -> datetime:
+        """Return the source availability cutoff in UTC."""
+        return self.as_of.astimezone(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class BatchResult:
+    """Report a verified Delta commit without retaining distributed data."""
+
+    spec: BatchSpec
+    input_count: int
+    output_count: int
+    commit_version: int
+    manifest: dict[str, Any]
+    replayed: bool = False
+
+
+def _validate_batch_period(spec: BatchSpec) -> None:
+    """Validate aware period instants and their chronological order."""
+    for name in ("period_start", "period_end", "as_of"):
+        value = getattr(spec, name)
+        if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{name} must be timezone-aware.")
+        # Reject nonexistent local times; fold explicitly resolves ambiguous times.
+        if value.astimezone(UTC).astimezone(value.tzinfo).replace(tzinfo=None) != value.replace(
+            tzinfo=None
+        ):
+            raise ValueError(f"{name} is not a valid local instant.")
+    if spec.period_start_utc >= spec.period_end_utc:
+        raise ValueError("period_start must precede period_end.")
+
+
+def _validate_batch_columns(spec: BatchSpec) -> None:
+    """Validate target identifiers and distinct control columns."""
+    table_name(spec.output_table)
+    column_name(spec.period_column)
+    if type(spec.record_key_columns) is not tuple or not spec.record_key_columns:
+        raise ValueError("record_key_columns must be a nonempty tuple.")
+    for key in spec.record_key_columns:
+        column_name(key)
+    names = [key.lower() for key in spec.record_key_columns]
+    if len(set(names)) != len(names) or spec.period_column.lower() in names:
+        raise ValueError("record_key_columns and period_column must be distinct.")
+    if any(name in PREDICTION_METADATA_COLUMNS for name in (*names, spec.period_column.lower())):
+        raise ValueError("record_key_columns and period_column collide with prediction metadata.")
+
+
+def _validate_batch_model_identity(spec: BatchSpec) -> None:
+    """Validate bounded model identity strings and the concrete model version."""
+    for name in ("model_name", "code_version", "run_id"):
+        value = getattr(spec, name)
+        if type(value) is not str or not value.strip() or len(value) > 512:
+            raise ValueError(f"{name} must be a nonempty string of at most 512 characters.")
+    if type(spec.model_version) is not str or not re.fullmatch(r"[1-9][0-9]*", spec.model_version):
+        raise ValueError("model_version must be a concrete positive version, not an alias.")

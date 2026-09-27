@@ -44,6 +44,7 @@ class TuningConfig:
     # binary target — otherwise it logs a skip and leaves predict on the
     # default decision rule.
     tune_threshold: bool = False
+    cv_inner_folds: int | None = None
 
 
 @dataclass
@@ -63,3 +64,6 @@ class TuningResult:
     # differ from the tuning metric when that metric needs probabilities,
     # e.g. roc_auc falls back to balanced_accuracy).
     decision_threshold_metric: str | None = None
+    # Independent outer-fold evaluation of the complete search procedure.
+    # best_score/trials above still describe the final full-training search.
+    nested_cv: dict[str, Any] | None = None

@@ -1,0 +1,218 @@
+# {{.project_name}}
+
+Skyulf 0.9.0 Bundle: **{{.task}}** with **{{.engine}}**, using **{{.compute_mode}}**
+compute. Spark reads bounded Delta inputs and writes predictions; preprocessing
+and model fitting run locally on the selected compute.
+
+## 1. Configure and preview
+
+| File | Edit here |
+| --- | --- |
+| `config/workflow.json` | Existing input tables, record keys, features/target, model parameters, validation/search, data selection, limits and promotion/scoring policies |
+| `src/preprocessing.py` | `build_pre_split_steps()` for fixed cleanup/eligibility; `build_preprocessing()` for learned transformations |
+| `src/tuning.py` | Optional `build_search_space()` override; returning `None` uses Core defaults |
+| `src/ensemble.py` | Optional voting/stacking composition; returning `None` keeps JSON parameters and Core defaults |
+| `databricks.yml` | Workspace/UC bindings for `dev`, `test`, `syst`, `prod`; schedule and compute variables |
+| `resources/workflow.jobs.yml` | Generated task definitions; keep them aligned with the installed wheel |
+
+Review source column names and positive `max_rows`/`max_input_mb` budgets.
+Overflow fails. `training_version: null` pins the latest snapshot at run start;
+an explicit integer pins that Delta version. Random full-snapshot training needs
+no dates; temporal training needs an event column and a valid window.
+Snapshot/split, sampling and CV details use defaults without setup
+questions. Override them in init JSON or the generated config; preview after edits.
+
+The generated project searches parameters for the selected model, then refits
+the winner. To set fixed base parameters, edit
+`pipeline.modeling.base_model.params` in `config/workflow.json`, or provide
+`model_params` as a JSON object in an init file. Voting and stacking
+models require composition settings such as `base_estimators`; setup asks for
+`model_params` when one is selected. Use `--list-models` to inspect available
+models and their parameter metadata.
+
+For voting or stacking, `src/ensemble.py:build_ensemble_params(model_type)`
+receives the selected registered model type and can return a JSON object of
+ensemble parameters. Its keys override matching keys in
+`pipeline.modeling.base_model.params`; other JSON parameters remain. The default
+returns `None`. Set `USE_EXAMPLES = True` in that file to try its four editable
+classification/regression voting/stacking recipes. Training and preview capture
+the exact recipe source and digest before the tuning hook runs; scoring loads the
+saved fitted artifact. Existing projects without `ensemble.py` still work.
+
+For example, a voting regression model can use
+`{"base_estimators":["linear_regression","ridge"],"base_estimator_params":{"ridge":{"alpha":2.0}}}`
+as `model_params`. A stacking model can additionally set `final_estimator`,
+`final_estimator_params`, `cv` and `passthrough` in the same object. Choose
+component keys valid for the selected classification or regression model.
+Optional classifier calibration uses `calibrate_base_models`,
+`calibration_method` (`sigmoid` or `isotonic`) and `calibration_cv`. Stacking also
+has its own internal `cv` for the final learner; this is separate from the
+workflow's candidate-scoring `cv_*` settings. Keep `n_jobs: 1` to avoid nested
+parallel fits. `tune_base_models` opts into the selected base learners' search
+axes; leave it off to search only the ensemble's own parameters.
+
+The generated config uses Core's `hyperparameter_tuner` wrapper. The Core model
+registry supplies a search space for the selected model and strategy. For a project
+override, edit `src/tuning.py:build_search_space()` and return finite candidate
+lists, or provide `search_space` as a JSON object in an init file. The generated
+`pipeline.modeling.search_space: {}` requests Core defaults. The checked-in
+`skyulf-core/templates/databricks/examples/tuning-init.example.json` shows a
+bounded random search using the model's default axes. After selecting a strategy,
+choose **Default** for Core controls or **Custom** for its relevant controls.
+Grid and halving-grid evaluate the full Cartesian space and fail preflight when
+it exceeds `max_candidates` (default 1000, maximum 10000); raise that limit or
+narrow the space. Random, halving-random and Optuna use `n_trials` (maximum 1000)
+as a candidate budget. Halving supports `factor`, `min_resources`,
+and `resource`; `n_estimators` resource also needs numeric starting and maximum
+budgets and a compatible estimator. The resource cannot also be a search axis;
+remove `n_estimators` from the search space with `src/tuning.py` when using that
+resource. Optuna needs `optuna` and `optuna-integration` in the
+training environment; its timeout is a soft stop between fits, not a hard
+interruption of a running estimator.
+
+The top-level `cv_*` fields are the only fold settings. They score search
+candidates; `cv_enabled: false` uses an internal training-only validation split. There is
+no second post-search CV report. The search objective (`rmse`, `accuracy`, etc.)
+is separate from the final holdout comparison metric (`heldout_rmse`,
+`heldout_accuracy`, etc.). `search_random_state`, `cv_random_state`, and the
+top-level split `random_state` control different randomness. Core's `nested_cv`
+option repeats tuning independently inside each outer training fold. `cv_folds`
+sets outer folds; optional `cv_inner_folds` sets inner folds. A separate final
+search selects the saved model. Each search gets the configured trial/time
+budget. Outer evaluation and final-search scores are reported separately.
+The final holdout is reserved for model comparison.
+
+The preprocessing and tuning recipes start empty; `ensemble.py` has disabled
+examples to adapt. Keep
+`pipeline.preprocessing` empty in JSON. Put custom classes in the same Python
+file: training saves its source and fitted state; imported sibling modules are
+not packaged with that custom class. Approval and scoring use the saved code,
+even if this file later changes.
+See [setup and advanced inputs][setup] and [custom recipes][recipes].
+
+Install the matching Skyulf wheel in your local environment, then from this project:
+
+```powershell
+python src/preview.py --action train
+python src/preview.py --list-models
+python src/preview.py --list-preprocessors
+```
+
+Preview executes your trusted recipe builders and checks configuration; it does
+not read source data or train. Keep data access/training out of imports and
+builders. For another target, pass `--catalog`, `--input-schema`, `--output-schema`,
+`--metadata-schema` and `--resource-suffix` using that target's bindings.
+
+## 2. Build and deploy
+
+From the Skyulf checkout, build into this project's `dist` directory:
+
+```powershell
+uv build --wheel --no-build-isolation --out-dir <this-project>/dist skyulf-core
+```
+
+From this generated project, with your authenticated CLI profile:
+
+```powershell
+databricks bundle validate --strict -t dev --profile <profile>
+databricks bundle deploy -t dev --profile <profile>
+```
+
+`dev` uses your profile's workspace and initialized UC bindings. Replace the
+placeholder hosts/catalogs for other targets before using them. The source tables
+must already exist; enable Delta Change Data Feed on the scoring source before
+new rows arrive. The first score processes all existing rows in that source.
+Record keys must be unique, nonnull STRING/BIGINT columns.
+
+{{if eq .compute_mode "policy_cluster"}}
+Review the approved cluster policy, runtime, node type and cost tag for each
+workspace. See the checkout's `skyulf-core/templates/databricks/examples/policy-init.example.json`.
+{{else}}
+The jobs use serverless Python environment 4. Policy clusters are a separate
+initialization choice.
+{{end}}
+
+Deployment creates two jobs and uploads code/configuration; input tables are
+not created. Selected schedules start `UNPAUSED` unless you set their Bundle
+pause variables to `PAUSED`. Training and scoring clocks are independent.
+See [deployment and schedules][schedules] and [existing-project migration][migration].
+
+## 3. Train, inspect and approve
+
+```powershell
+databricks bundle run -t dev --profile <profile> train
+databricks bundle run -t dev --profile <profile> score
+```
+
+Run `score` after a model is selected. When handoff is enabled, first inspect its
+child score run; a separate score invocation is only needed for new rows or recovery.
+
+The `train` job has one active run, with queued training and operator actions:
+
+| Task | Purpose |
+| --- | --- |
+| `prepare_request` | Validate and pin the request |
+| `training_requested` | Select training or operator branch |
+| `train_and_register` | Fit, evaluate and register the candidate |
+| `compare_and_decide` | Compare with champion and apply promotion policy |
+| `apply_operator_action` | Approve, reject or roll back without fitting |
+| `finalize_and_report` | Finalize either branch and publish verified results |
+| `scoring_requested` | Check whether scoring was requested |
+| `run_batch_scoring` | Invoke the existing score job |
+
+The separate score job has the `score` task. Open **`finalize_and_report`** for
+metrics, the decision and ready-to-copy `next_actions`. Comparison output is in
+`compare_and_decide`; score results are in the child or independent score run.
+Finalization can run after failure; that does not imply a successful result.
+
+This project's policies are:
+
+- `score_model_selection={{.score_model_selection}}`: pinned version or champion.
+- `promotion_policy={{.promotion_policy}}`: manual approval or automatic gates.
+- `score_handoff={{.score_handoff}}`: disabled or score after an alias change.
+
+Set a numeric `quality_threshold` before the first champion approval/promotion.
+Later promotions also need positive improvement meeting `min_improvement`.
+Training a candidate never changes a saved scoring pin. Only the serialized train
+job identity should write lifecycle aliases; enforce exclusive ownership externally.
+
+Use the train job's **Run now parameters** for operator actions:
+
+| `lifecycle_action` | Required inputs |
+| --- | --- |
+| `train` | Clear operator evidence fields |
+| `approve` | Copy `next_actions.approve`: candidate and expected champion |
+| `reject` | Copy `next_actions.reject` and add `rejection_reason` |
+| `rollback` | Copy `next_actions.rollback`, including `promotion_receipt_json` |
+
+Use explicit `none` for a first champion. Its initialization has no prior champion
+to roll back to. A later completed promotion returns rollback inputs. Evidence
+is revalidated; editing a registry alias directly is not approval.
+See [results and next actions][results] and [operator walkthrough][operators].
+
+## 4. Score new rows and recover
+
+The independent score job accepts `score_model_version` for a one-run concrete
+version override; blank uses the configured selector. Handoff uses the configured
+selector. `incremental_append` keeps old predictions and scores new inserts;
+`full_rebuild` builds a versioned generation and switches the view after success.
+An unchanged replay is a no-op. [Prediction behavior and model changes][predictions].
+
+If scoring fails after promotion, retry score independently. Inspect saved
+MLflow evidence and registry state before a fresh lifecycle run; lifecycle repair
+and retry are rejected because effects may already have committed.
+See [failure evidence and pinned replay][replay] and [recovery][schedules].
+
+Keep `workflow_contract: "2"` fixed in the generated notebook parameters.
+`config_version: 1` is the separate workflow JSON schema version. Changing
+`score_handoff` requires updating `deployed_score_handoff` wherever present in
+`resources/workflow.jobs.yml` and redeploying the matching graph/notebooks/wheel.
+
+[setup]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle/#guided-setup-and-offline-preview
+[recipes]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle/#custom-preprocessing-recipes
+[migration]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle/#configuration-validation-and-migration
+[operators]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle_walkthrough/#approve-without-training-again
+[results]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle_walkthrough/#where-to-find-next_actions
+[predictions]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle_walkthrough/#what-happens-to-existing-predictions
+[replay]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle_walkthrough/#inspect-failures-and-replay-a-pinned-training-input
+[schedules]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle_walkthrough/#recovery-and-schedules

@@ -296,13 +296,23 @@ def test_pandas_sort_positions_accept_polars_positions_too() -> None:
     assert select_rows_by_position([100, 200, 300], order) == [300, 100, 200]
 
 
+@pytest.mark.parametrize("engine", ["pandas", "polars"])
+def test_sort_positions_reject_unknown_column(engine: str) -> None:
+    """A missing declared time column must not silently preserve an unsafe row order."""
+    frame = _frame(engine, {"t": [3, 1, 2], "v": list("abc")})
+    sorter = sort_with_positions_pandas if engine == "pandas" else sort_with_positions_polars
+    with pytest.raises(
+        ValueError, match="sort_by column 'absent' is missing; cannot establish temporal order"
+    ):
+        sorter(frame, "absent")
+
+
 @pytest.mark.parametrize(
     "sort_by,expected_positions",
     [
         pytest.param("t", [1, 3, 2, 0, 4], id="ties-are-stable"),
         pytest.param("n", [2, 4, 0, 1, 3], id="nulls-last"),
         pytest.param(None, None, id="no-sort"),
-        pytest.param("absent", None, id="unknown-column"),
     ],
 )
 def test_pandas_sort_positions_match_sort_values(
@@ -353,7 +363,6 @@ def test_pandas_sort_positions_handle_nullable_and_string_keys() -> None:
         pytest.param("t", [1, 3, 2, 0, 4], id="ties-are-stable"),
         pytest.param("n", [2, 4, 0, 1, 3], id="nulls-last"),
         pytest.param(None, None, id="no-sort"),
-        pytest.param("absent", None, id="unknown-column"),
     ],
 )
 def test_polars_sort_positions_match_dataframe_sort(

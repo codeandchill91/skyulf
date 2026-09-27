@@ -1,0 +1,21 @@
+{
+  "project_name": "customer_value_search",
+  "engine": "pandas",
+  "task": "regression",
+  "catalog": "workspace",
+  "schema": "my_dev_schema",
+  "source_table_name": "labeled_customers",
+  "record_key_columns": "customer_id",
+  "input_columns": "income, age",
+  "target_column": "annual_value",
+  "regression_model": "random_forest_regressor",
+  "search_strategy": "random",
+  "regression_search_metric": "rmse",
+  "search_n_trials": "5",
+  "search_random_state": "23",
+  "cv_enabled": "true",
+  "cv_folds": "3",
+  "cv_type": "k_fold",
+  "cv_random_state": "17",
+  "regression_metric": "heldout_rmse"
+}

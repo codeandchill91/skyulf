@@ -44,6 +44,7 @@ from sklearn.linear_model import (
     LinearRegression,
     LogisticRegression,
     Ridge,
+    SGDClassifier,
 )
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
@@ -86,6 +87,7 @@ logger = logging.getLogger(__name__)
 # repeated fits independent of any shared state).
 BASE_ESTIMATORS_CLF: dict[str, Callable[[], BaseEstimator]] = {
     "logistic_regression": lambda: LogisticRegression(max_iter=1000),
+    "sgd_classifier": lambda: SGDClassifier(loss="log_loss", random_state=DEFAULT_RANDOM_STATE),
     "random_forest": lambda: RandomForestClassifier(
         n_estimators=100, random_state=DEFAULT_RANDOM_STATE
     ),

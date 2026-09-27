@@ -27,26 +27,6 @@ Key flows: job lifecycle (upload → ETL → pipeline run → results), hyperpar
 - `refactor-plan` — before any multi-file refactor.
 - `finishing-a-development-branch` — when work on a branch is complete.
 
-## TOON MCP (token-efficient JSON ingestion)
-
-The `toon` MCP server is registered in user scope (`~/.copilot/mcp-config.json`),
-installed at `~/.local/share/toon-mcp` (own venv, stdio). Tools:
-`encode_toon`, `convert_file_to_toon`, `estimate_token_savings`.
-
-**Trip-wire rule:** before reading any JSON larger than ~5 KB / ~100 lines
-that is an array of objects sharing the same keys, convert it with
-`convert_file_to_toon(file_path=..., output_path=...)` and read the written
-file instead of the raw JSON. For command output (`gh api`, coverage reports,
-lockfiles), write it to a temp file first, then convert — never paste large
-JSON into `encode_toon`. Always pass `output_path` for large files so the
-payload doesn't round-trip through context.
-
-**Do NOT use TOON for:** human-facing output (Markdown tables are only ~12%
-larger and more readable), small payloads (< ~5 KB), irregular/nested
-structures, or anything another program parses (configs, fixtures, API
-bodies). Savings are ~35% vs compact JSON / ~44% vs pretty JSON, only on
-uniform record lists.
-
 ## Repo conventions (short form)
 
 - Python deps: `uv pip` only, never plain pip; keep `requirements-*.txt` in sync with `pyproject.toml`.
@@ -56,6 +36,31 @@ uniform record lists.
 - Docs: docstrings are the source of truth for `docs/reference/`; run `mkdocs build --strict` after doc changes.
 - Changelog: entries go in `changelog/<major>.<minor>.x.md` (root `CHANGELOG.md` is an index only); version lives in root `pyproject.toml`, sync frontend via `npm run sync-version`.
 - Do not run mkdocs, CI pipelines are running this for you. Run `mkdocs build --strict` only to check your own changes before committing, if needed!
+
+## CI analysis gates
+
+- Before editing, inspect the relevant `.github/workflows/` checks. Use the same
+  commands and analysis scope for local verification.
+- Keep Lizard CCN at most 10 in `backend/` and `skyulf-core/skyulf/`, and ESLint
+  complexity at most 10 in the frontend. Extract meaningful helpers while
+  preserving validation order, defaults, error messages and behavior.
+- Do not raise thresholds, disable rules or exclude production code merely to
+  pass a gate. Explain and justify any necessary exception.
+- When adding an import, verify that CI installs its dependency. Keep the
+  relevant requirements files, `pyproject.toml` and `uv.lock` aligned; a package
+  installed in the local environment is not evidence that CI provides it.
+- In optional-dependency tests, place `pytest.importorskip` before application
+  imports that load that dependency. Do not skip unrelated tests.
+- For Python changes, run Ruff, the full Ty scope from CI, and affected tests.
+  When test imports change, also verify collection of the affected test suite.
+- For frontend changes, run affected tests, `lint`, `complexity:check`, `build`
+  and `size-check`. Refresh generated frontend assets after source changes.
+- Preserve the agreed external-analysis exclusions for test/rehearsal files;
+  keep pytest/Vitest execution and source coverage reporting enabled.
+- Before committing, inspect the staged diff and pass pre-commit hooks,
+  including the Lizard and frontend complexity hooks. Keep caches, generated
+  model artifacts and temporary verification output out of commits. Report
+  checks that were not run or did not pass explicitly.
 
 ## Lint scope & test hygiene
 

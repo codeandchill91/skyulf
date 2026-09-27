@@ -4,5 +4,12 @@ exclude_paths:
   - "site/**"
   - "tests/**"
   - "skyulf-core/tests/**"
+  # Test execution and coverage stay enabled in CI; these are not product sources.
+  - "frontend/ml-canvas/e2e/**"
+  - "frontend/ml-canvas/src/test/**"
+  - "**/__tests__/**"
+  - "**/*.test.*"
+  - "**/*.spec.*"
+  - "initiatives/spark_and_mlflow/rehearsals/**"
   - "temp/**"
   - "tmp_repro_artifacts/**"

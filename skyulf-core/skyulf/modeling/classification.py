@@ -137,9 +137,8 @@ class LogisticRegressionCalculator(SklearnCalculator):
         sklearn >=1.8 deprecates the ``penalty`` constructor arg entirely (in
         favor of ``l1_ratio``/``C``) and will remove it in sklearn 1.10. We
         keep ``penalty`` ("l1"/"l2"/"elasticnet"/None) as our own public
-        config/UI field unchanged — it's translated to the newer kwargs here,
-        right before the sklearn estimator is constructed, so we never pass a
-        bare ``penalty=`` to sklearn regardless of installed sklearn version.
+        config/UI field unchanged. Translate it for the newer API while
+        retaining the native penalty argument on older sklearn versions.
         """
         params = super()._resolve_fit_params(config)
         return normalize_logistic_regression_params(params)

@@ -38,6 +38,7 @@ from skyulf.leakage import (
     leakage_exemption_reason,
     step_learns_from_data,
     train_test_splitters,
+    validate_temporal_target,
 )
 
 from .schemas import NodeConfig
@@ -318,6 +319,17 @@ def _exemption_reason(step_type: str, params: dict, target_column: str | None) -
     return leakage_exemption_reason(step_type, params, target_column=target_column)
 
 
+def _validate_temporal_targets(execution_nodes: list[NodeConfig]) -> None:
+    """Reject rolling target features independently of split and warning policies."""
+    for node in execution_nodes:
+        if node.step_type == "RollingAggregate":
+            validate_temporal_target(
+                node.step_type,
+                node.params,
+                target_column=_target_column_for_node(execution_nodes, node.node_id),
+            )
+
+
 def validate_no_preprocessing_before_split(
     nodes: list[NodeConfig],
     on_leakage: OnLeakage = "raise",
@@ -345,6 +357,9 @@ def validate_no_preprocessing_before_split(
     at all (e.g. inference-only pipelines) gets an explicit advisory warning
     instead of silence — the leakage guarantee simply does not apply there —
     unless ``on_leakage="ignore"``.
+
+    Rolling the known current target is an invalid feature definition and
+    always raises, independently of the leakage warning mode or split position.
 
     Returns the gate verdict so the engine can persist it on the job record
     (Job Details shows it as factual per-job information):
@@ -377,6 +392,7 @@ def validate_no_preprocessing_before_split(
     execution_splitters = splitter_ids & execution_ids
     execution_nodes = [n for n in nodes if n.node_id in execution_ids]
     data_dependent = data_dependent_step_types()
+    _validate_temporal_targets(execution_nodes)
 
     checked, exempted, messages = _inspect_pre_split_nodes(
         nodes,

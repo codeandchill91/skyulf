@@ -5,6 +5,7 @@ import { formatMetricName } from '../../../../core/utils/format';
 import { MetricsGrid } from '../MetricsGrid';
 import { getScoringMetric } from './scoring';
 import { TuningConfiguration } from './TuningConfiguration';
+import { NestedCVResults, nestedReport } from './NestedCVResults';
 
 const FeatureImportancesSection: React.FC<{ result: Record<string, unknown> }> = ({ result }) => {
   const metrics = result.metrics as Record<string, unknown> | undefined;
@@ -56,7 +57,7 @@ function JobTuningResults({ job }: { job: JobInfo }) {
           {(job.result as Record<string, unknown>).best_score !== undefined && (
             <div className="p-3 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg w-fit">
               <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">
-                Best Score{getScoringMetric(job) ? ` (${formatMetricName(getScoringMetric(job))})` : ''}
+                {nestedReport(job.result as Record<string, unknown>) ? 'Final search score' : 'Best Score'}{getScoringMetric(job) ? ` (${formatMetricName(getScoringMetric(job))})` : ''}
               </div>
               <div className="font-mono font-bold text-lg text-purple-600 dark:text-purple-400">
                 {Number((job.result as Record<string, unknown>).best_score).toFixed(4)}
@@ -115,6 +116,7 @@ export function JobResults({ job }: { job: JobInfo }) {
           )}
 
           <JobTuningResults job={job} />
+          <NestedCVResults result={job.result as Record<string, unknown>} />
         </div>
       )}
     </>

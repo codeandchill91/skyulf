@@ -1,0 +1,802 @@
+# Using the Databricks Bundle
+
+This walkthrough explains the local-engine Bundle from an operator's point of
+view. Training and prediction use pandas or Polars; Spark reads bounded Delta
+data and writes predictions. Start with the [Bundle configuration guide](databricks_bundle.md)
+for installation, target bindings and source requirements.
+
+After initialization, review the generated project locally before deploying:
+
+```powershell
+python src/preview.py
+python src/preview.py --action train
+```
+
+The first command explains the setup. The second checks the shared `train`
+configuration for manual and scheduled runs without starting a job, including
+automatic snapshot/window selection when configured. Preview uses
+the generated dev bindings; supply the matching catalog/schema/suffix arguments
+when reviewing another target. Edit preprocessing and custom fit/apply code in
+`src/preprocessing.py`; keep model hyperparameters in `config/workflow.json`.
+Preview executes the trusted recipe without itself fitting or reading data.
+The same file can define `build_pre_split_steps()` for explicit training
+eligibility and fixed normalization. It accepts `DropMissingRows` with named columns and optional Core
+`how`, `threshold`, or `missing_threshold` rules; `ManualBounds` requires numeric,
+non-Boolean columns and explicit finite bounds. Fixed explicit-column
+`ValueReplacement`, `TextCleaning`, `AliasReplacement`,
+`InvalidValueReplacement` and noncategorical `Casting` can precede those filters.
+Learned steps remain in
+`build_preprocessing()`. The order
+is snapshot/window selection, optional seeded source sample, bounded transfer,
+label-availability selection, training filters, final split, then fold-local
+preprocessing and model fit. Sampling selects available labels before its
+seeded key choice; without sampling, availability is selected after the bounded
+transfer. Filtering can shrink the selected sample without refilling it.
+Holdout metrics cover the remaining eligible rows; `pre_split_filters.json`
+records the requested steps and exclusions per step. The versioned
+`training_filter_evidence.json` also records the Python source and recipe
+digests, ordered sampled, filtered, training and holdout key digests, and row
+counts. Its digest is part of the candidate's comparison identity. Approval
+replays the saved source version and recipe, then checks those populations;
+editing today's Python file does not change an earlier candidate. Preview shows
+the phase order without reading source data or predicting exclusion counts.
+Training saves the Python source with the model, so later file edits do not
+change existing-model inference. These filters select training and evaluation
+rows only. Scoring does not require a target column and can predict rows that
+training excluded. Shared prediction eligibility needs a separate opt-in rule.
+Model/node listings come from the Core registry.
+See [guided setup](databricks_bundle.md#guided-setup-and-offline-preview).
+
+### Inspect failures and replay a pinned training input
+
+The MLflow training run begins after argument validation and saves its inputs
+before source read, split, CV, fit or heldout evaluation. `training_snapshot.json`
+records the concrete Delta table/version, input/target/key columns, ISO window
+and result cutoffs, parsing rules, split/sample/filter settings, budgets and
+engine. `training_pipeline_config.json` saves the original pipeline input with
+the existing self-contained `project_python_source`; `pipeline_config.json`
+saves the effective config after fixed preprocessing is projected into it.
+CV settings are recorded as run parameters.
+
+A runtime failure leaves this evidence on a FAILED run without model publication
+or challenger nomination. Successful training additionally saves
+`candidate_training_spec.json`, membership/filter evidence and comparison for
+approval. The early snapshot intentionally has no newly computed membership
+digests, so it is not an approval receipt.
+
+For manual replay through the generated project:
+
+1. Download the snapshot and **original** `training_pipeline_config.json`.
+   Restore its `project_python_source` to `src/preprocessing.py` with the exact
+   saved contents. Restore its pipeline modeling/settings in workflow JSON with
+   `pipeline.preprocessing=[]` and top-level `pre_split_steps=[]`; the project
+   loader rebuilds both hooks from the saved source. The effective
+   `pipeline_config.json` already contains
+   projected fixed steps and must not be supplied as the original input.
+2. Set `training_table` and `training_version` from snapshot `table` and `version`.
+   Copy the saved input/target/key columns, engine, split/sample settings,
+   `event_column`, `result_available_at_column`, `filter_unavailable_results`,
+   parsing rules, `start`, `holdout_start`, `cutoff`, `result_cutoff` and `max_rows`,
+   preserving null inactive fields. Convert snapshot `max_bytes` to
+   `max_input_mb` by dividing by 1048576 (a whole integer for generated projects).
+   Use `fixed_window` with an active event column, otherwise `full_snapshot`;
+   set `monthly_lookback_months`, `holdout_months` and `window_timezone` to null.
+   Set `result_availability_lag_hours` to null when result filtering is disabled,
+   otherwise 0; manual replay uses the saved `result_cutoff` rather than this lag.
+   The `fixed_window` policy preserves the saved boundaries on every run.
+   Restore the recorded CV parameters and reviewed comparison/promotion
+   settings.
+3. Invoke the serialized train job with action `train`. Keep the saved explicit
+   version, fixed boundaries and result cutoff for replay; automatic settings
+   would select fresh source history or resolve dates again.
+
+A direct Core replay instead reconstructs `LocalTrainingSpec` from the snapshot
+using aware datetime objects, `TrainingDateSpec` parsing objects and tuple
+key/input/pre-split fields. Pass its separately extracted engine and the original
+`training_pipeline_config.json` to `train_local_candidate`; restore trusted
+project source registration if custom nodes require it. Retain the referenced
+Delta history and compatible code/dependencies. Pinning the inputs does not
+guarantee identical floating-point results across future environments.
+
+## Choose the preprocessing phase
+
+Both hooks live in `src/preprocessing.py`; leave either list empty when unneeded.
+The hook determines when the existing Core node runs, not which implementation
+of the algorithm is used.
+
+| Operation | Where to put it | Prediction behavior |
+| --- | --- | --- |
+| Fixed replacement, text/alias cleanup, numeric invalid-value rules, noncategorical casts | `build_pre_split_steps()` when eligibility depends on cleaned values; otherwise `build_preprocessing()` | Feature normalization is saved and applied once to raw input |
+| Missing-target or fixed-bounds training eligibility | `build_pre_split_steps()` | Training exclusions are not reapplied to prediction requests |
+| Deduplicate with an explicit subset and keep policy | `build_pre_split_steps()` for the eligible population, or ordinary training-only cleanup | Never remove requested prediction rows |
+| Learned imputation, scaling, encoding, binning, selection | `build_preprocessing()` | Reuse fitted state; CV fits fresh state inside each training fold |
+| Oversampling / undersampling | `build_preprocessing()` | Training/fold rows only; never resample holdout or prediction |
+| Winsorize | `build_preprocessing()` | Clip using fitted limits and retain all prediction rows |
+| Filtering outliers such as IQR or ZScore | `build_preprocessing()` | Prediction fails if the configured transform removes requested rows |
+| Lag / rolling | `build_preprocessing()` with ordered supplied history | No automatic history lookup; sorting must not reorder prediction rows |
+| Text vectorization / geo features | `build_preprocessing()` | Retain fitted vocabulary or fixed feature rules; install optional dependencies where required |
+| DataSnapshot / DatasetProfile | `build_preprocessing()` for training diagnostics | Pass features through unchanged |
+| Train/test split | Workflow split settings | Do not put another splitter inside the recipe |
+
+For example, interpret `-999` as a missing income before deciding which training
+rows to retain:
+
+```python
+def build_pre_split_steps():
+    """Normalize the source sentinel before checking training eligibility."""
+    return [
+        {"name": "income_sentinel", "transformer": "ValueReplacement",
+         "params": {"columns": ["income"], "to_replace": -999, "value": None}},
+        {"name": "known_income", "transformer": "DropMissingRows",
+         "params": {"subset": ["income"]}},
+    ]
+```
+
+Do not repeat `income_sentinel` in `build_preprocessing()`: the training adapter
+saves its feature transformation as a prefix of the model pipeline. Eligibility
+uses a working copy; selected model inputs stay raw so fitting, CV, holdout
+evaluation and prediction each apply the prefix once. A score row with `-999`
+becomes missing but is not dropped. Add an ordinary fitted imputer if the model
+should accept such prediction inputs.
+
+Use explicit column lists. Pre-split normalization cannot edit record keys or
+event/result timestamps. Categorical casts and automatic column selection stay
+after the split. For numeric replacement keys, use `to_replace`/`value` or
+`replacements=[{"old": -999, "new": None}]`; numeric dictionary keys are rejected
+because JSON would turn them into strings. Use `None`, not NaN, in the recipe.
+
+Target-only fixed normalization affects labels used for splitting and metrics;
+it is omitted from the feature pipeline and never requires a target at scoring.
+Models with different saved target-normalization contracts cannot be compared
+or promoted against each other as though their metrics had the same meaning.
+Changing target units or label meanings requires a deliberate new comparison
+baseline, even if the resulting class names happen to match.
+
+### Deduplication and your own training filter
+
+`Deduplicate` requires a named `subset` and supports `keep="first"`, `"last"`,
+or `"none"` (`False` also means none). The source is ordered by active event
+time and then record keys before cleanup. Duplicate groups with different
+target values are rejected instead of silently choosing a label. Source record
+keys must still be unique. This does not create customer-disjoint train/test
+sets; do not deduplicate on customer alone to simulate a group split.
+
+The [custom recipe example](databricks_bundle.md#custom-preprocessing-recipes)
+contains `example_custom_pre_split`. Copy its imports, Eligibility classes and
+helper into your generated `src/preprocessing.py`, then enable it in
+`build_pre_split_steps()` after changing the column name:
+
+```python
+def build_pre_split_steps():
+    """Retain known non-test accounts for training and final evaluation."""
+    return [example_custom_pre_split("is_test")]
+```
+
+The example keeps rows whose Boolean flag is `False`; `True` and null rows are
+excluded from training. The flag is read from the source but is not required
+at scoring unless you also choose it as a model input. Edit the supplied
+`EligibilityCalculator` / `EligibilityApplier` for your fixed rule. Its
+`custom_step(..., pre_split={"effect": "filter", "required_columns": ["is_test"],
+"learns_from_data": False})` declaration explicitly opts in to training eligibility.
+
+Runtime guards reject added/reordered rows, missing required inputs, column
+changes, target changes and invalid return types. The declaration is your
+assertion that the code does not learn statistics; it is not automatic proof
+against leakage. Arbitrary custom value normalization is not admitted before
+the split in this release; place it in ordinary preprocessing. Keep the custom
+classes in this same file so saved-source approval can restore their registration
+in a fresh process. Current file edits do not change existing candidates.
+
+Before training, review three separate data settings in `config/workflow.json`:
+`training_window_mode` selects full/fixed/rolling source data, optional
+`training_sample_rows` selects a bounded eligible sample on Spark, and
+`split_strategy` assigns training versus final-test rows. Optional `cv_enabled`
+evaluates fixed model parameters only inside the training partition. Inspect
+`cross_validation.json` and the `cv_*` Experiment metrics for fold results;
+promotion continues to use the separate `heldout_*` metrics. See
+[CV, sampling and calendar examples](databricks_bundle.md#optional-basic-model-cross-validation).
+
+## Three independent decisions
+
+Configure these in the generated project's `config/workflow.json`:
+
+| Setting | Choice | What it controls |
+| --- | --- | --- |
+| `promotion_policy` | `manual_approval` | Training creates/evaluates a candidate; an operator reviews and approves or rejects it |
+| `promotion_policy` | `automatic` | Training applies the configured quality gates and promotes a qualifying candidate |
+| `score_model_selection` | `champion` | Each score run resolves the current controlled champion to one concrete version |
+| `score_model_selection` | `pinned_version` | Each score run uses the explicitly configured `model_version` |
+| `score_handoff` | `after_alias_change` | Successful champion initialization, promotion or rollback requests score immediately |
+| `score_handoff` | `disabled` | A champion change does not start score; run score explicitly or through a separately configured trigger |
+
+For example, manual approval + champion scoring + handoff means: train v2,
+review it, approve it, then automatically score using v2. Manual refers to
+the approval decision; it does not require manual scoring afterward.
+
+Automatic promotion + disabled handoff means: train v2, promote it if its
+quality passes, and leave prediction output unchanged until score runs.
+
+With pinned scoring, promotion of v2 does not change a pin to v1. Even an
+automatic handoff still scores with v1. Select champion scoring when the
+prediction model should follow promotions and rollbacks.
+
+With `score_model_selection=champion`, the configured `model_version` pin is
+ignored. If champion changes from v1 to v2, the next score run loads v2 without
+redeployment. A score run already in progress keeps the version it resolved at
+its start. Handoff controls whether the next run starts immediately; selection
+controls which model that run loads.
+
+A pin can also select a registered version that has not become champion.
+Approval governs the champion alias; it does not automatically gate an
+explicit pinned scoring choice.
+
+For a **single score run**, open the `score` job's **Run with different
+settings** form. Set `score_model_version=2` to use registered v2 for that
+run, or leave it empty to follow `score_model_selection`. No model upload or
+Bundle redeployment is needed. This does not promote v2 or modify the saved
+pin. Automatic lifecycle handoff clears this override and follows the saved
+selection policy. Supplying it to the lifecycle job is rejected.
+
+The model-change policy still applies: `incremental_append` keeps existing
+predictions and scores new rows only; `full_rebuild` uses a separate model
+generation. A one-run pin with full rebuild can therefore change the active
+prediction view even though champion does not change. The next normal score
+run follows the configured selector again.
+
+The readable score report identifies **Selected model for this run**. If no
+new data exists, it also shows the model recorded by the **previous write**;
+those versions can legitimately differ. Changing model version alone does
+not cause an incremental run to rewrite existing predictions.
+
+```mermaid
+flowchart TD
+    A["Run train job: train"] --> B["Fit with pandas or Polars; log artifacts and metrics"]
+    B --> C["Register candidate and nominate challenger"]
+    C --> D["Evaluate against current champion"]
+    D --> E{"Promotion policy?"}
+    E -->|"automatic"| F{"Quality gates pass?"}
+    F -->|"No"| G["Keep champion; no score handoff"]
+    F -->|"Yes"| H["Initialize or promote champion"]
+    E -->|"manual_approval"| I["Return comparison and next_actions; wait for operator"]
+    I --> J{"Operator action"}
+    J -->|"reject"| K["Record rejection; keep champion; no score handoff"]
+    J -->|"approve"| L["Recheck saved evidence, expected champion and quality"]
+    L -->|"Checks pass"| H
+    L -->|"Checks fail"| M["Stop; inspect error; do not score"]
+    R["Run train job: rollback with saved promotion receipt"] --> S["Verify transition and restore previous champion"]
+    S --> T{"Score handoff enabled?"}
+    H --> T
+    T -->|"disabled"| U["Wait for a separate score run"]
+    T -->|"after_alias_change"| V["Call existing score job"]
+    U --> W["Operator or configured trigger starts score"]
+    W --> O{"Per-run score_model_version supplied?"}
+    O -->|"Yes"| OV["Pin that version for this run only"]
+    O -->|"No"| X{"Score model selection?"}
+    V --> X
+    X -->|"champion"| Y["Resolve current champion once"]
+    X -->|"pinned_version"| Z["Use configured model_version"]
+    Y --> P["Apply saved preprocessing and predict"]
+    Z --> P
+    OV --> P
+    P --> Q["Publish predictions according to model-change policy"]
+```
+
+## The two jobs and their tasks
+
+The resource keys are `train` and `score`; their visible names include the
+project name and target/user prefix. Deployment creates two jobs, not a job
+for each action. It does not train or create prediction tables by itself.
+
+| Job/task | Purpose |
+| --- | --- |
+| `prepare_request` | Validates the action and freezes configuration; training also pins Delta data, dates and the expected champion |
+| `training_requested` | Routes train to training, and approve/reject/rollback to the operator branch |
+| `train_and_register` | Reads pinned data, runs the saved split/CV recipe and fits the pipeline; evaluates the saved artifact on the verified holdout before registering and nominating it |
+| `compare_and_decide` | Compares the candidate with the pinned champion on the same holdout; checks saved evidence and quality gates, then promotes automatically or leaves it for manual review |
+| `apply_operator_action` | Approves, rejects or rolls back saved model evidence without training another model |
+| `finalize_and_report` | Runs after either branch, including failures; closes training in MLflow and publishes a report and score request only for a verified successful result |
+| `scoring_requested` | Reads `finalize_and_report`'s boolean `score_requested` value |
+| `run_batch_scoring` | Calls the existing score job when scoring was requested |
+| `score` job, `score` task | Loads the selected model/artifact, predicts and publishes rows |
+
+All rows except the last are tasks inside the **same train job**. These
+eight tasks represent business steps; their internal phase evidence remains in
+MLflow. They do not create extra jobs or control tables.
+
+```mermaid
+flowchart TD
+    A["prepare_request: validate and pin"] --> B{"training_requested?"}
+    B -->|"Yes"| C["train_and_register"]
+    C --> D["compare_and_decide"]
+    B -->|"No: approve, reject or rollback"| E["apply_operator_action"]
+    D --> F["finalize_and_report: runs even on failure"]
+    E --> F
+    F --> G{"scoring_requested?"}
+    G -->|"Yes"| H["run_batch_scoring"]
+    H --> I["Existing score job"]
+```
+
+The inactive branch is excluded. The shared `finalize_and_report` task uses
+`ALL_DONE` to wait for both branch tails, including failed or upstream-failed
+tasks. It closes failed training in MLflow and raises when the saved result is
+unsuccessful; no score request is published in that case. A failed evaluation
+cannot register a model or request scoring. A comparison failure after
+registration retains the candidate with error evidence. A failed score run
+does not undo an already committed promotion or change training's status.
+
+Completion also checks the actual Databricks task states: the active branch
+must succeed and the inactive branch must be excluded. A notebook output error
+after a saved promotion therefore blocks scoring while preserving that promotion.
+
+In the run graph, `EXCLUDED` means a branch was not selected; it is expected
+for `apply_operator_action` during training, and for the training tasks during
+approval or rollback. With manual approval, the training run also excludes
+`run_batch_scoring` until a later approval requests scoring. After a successful
+active branch, `finalize_and_report` must run and show the verified decision.
+Its result checks block scoring after an unsuccessful branch. A completed
+evaluation that fails the quality gate is successful training with no promotion.
+Check the exact run ID: an earlier run keeps its original graph and result even
+after a fix is deployed. Overall job `SUCCESS` alone does not prove scoring ran;
+also inspect `finalize_and_report`, the child score run and the prediction table.
+
+Tasks exchange small MLflow references, not DataFrames or temporary local
+paths. Editing the source table or project files after `prepare_request` does
+not change this invocation's pinned input. The run stores phase evidence in
+MLflow alongside its model artifacts; no additional Delta table is needed.
+For the platform branch and cleanup rules, see
+[Databricks task dependencies](https://docs.databricks.com/aws/en/jobs/run-if).
+
+Each job queues runs and permits one active run. The lifecycle job is the
+single writer for aliases. The fixed score notebook ignores inherited lifecycle parameters and never
+dispatches alias actions. Role/action override attempts are rejected.
+These controls still require appropriate registry/table permissions; another
+independent job or a direct Catalog alias edit can violate writer ownership.
+
+## Training data flow
+
+```mermaid
+flowchart TD
+    S[Pin Delta source version] --> P{Split strategy}
+    P -->|Random| R[Read bounded full snapshot]
+    P -->|Temporal| T[Validate event dates and select observation window]
+    R --> A{Filter unavailable results?}
+    T --> A
+    A -->|Yes| F[Keep known result dates at or before result cutoff]
+    A -->|No| L[Use provided result values]
+    F --> K[Validate stable record keys]
+    L --> K
+    K --> C[Apply fixed cleanup and training eligibility on a working copy]
+    C --> H[Require known targets and create disjoint train and holdout sets]
+    H --> R0[Recover selected raw features and cleaned target]
+    R0 --> M[Apply saved fixed prefix and fit learned preprocessing on training rows]
+    M --> E[Evaluate candidate and champion on the same holdout]
+    E --> V[Save snapshot, split settings and holdout membership digest]
+    V --> O[Approval replays saved evidence before alias change]
+```
+
+Random splitting uses Core `DataSplitter` with stable key ordering and a seed.
+Temporal splitting reserves observations from `holdout_start` to the exclusive
+`cutoff`. Result availability uses its own `result_cutoff`; it does not select
+the observation window. Job cron controls when this flow starts.
+
+## Prepare the project
+
+Use `record_key_columns` for source record identities and
+`result_available_at_column` for the source column indicating when each
+target became available. `event_column` identifies the observation timestamp.
+These are column mappings, not date values; the boundaries are separate.
+Use a newly generated project and models trained with these field names.
+Earlier experimental projects and training evidence are not automatically converted.
+
+1. Set the task, engine, existing source tables, row keys, features, target, pipeline,
+   model name, prediction name, training split and bounded read limits:
+   `max_rows` and `max_input_mb` (MiB, not total process RAM).
+   Leave `training_version` null to resolve latest once per run, or pin a concrete
+   version. The default random
+   split needs no date columns: configure `test_size`, `random_state`, and optional
+   classification `stratify`. For temporal splitting, select `split_strategy: "temporal"`,
+   map `event_column`, then configure rolling calendar selection or set aware
+   `start < holdout_start < cutoff` for `fixed_window`.
+   Independently enable `filter_unavailable_results` if results arrive later;
+   map `result_available_at_column` and pin `result_cutoff`, or leave it null
+   to derive invocation time minus `result_availability_lag_hours`. Leave inactive fields
+   null/default. See the [four training combinations](databricks_bundle.md#choose-the-evaluation-split-and-result-availability).
+   For strings, local-clock timestamps or dates, configure `event_time_parsing`
+   and `result_time_parsing` using the [source-date examples](databricks_bundle.md#source-date-formats-and-timezones).
+   Source timezones and the cron timezone are separate.
+   Review the local validation and migration examples in the
+   [configuration guide](databricks_bundle.md#configuration-validation-and-migration).
+2. Select the three policies above. For learning the approval flow, use:
+
+   ```json
+   {
+     "promotion_policy": "manual_approval",
+     "score_model_selection": "champion",
+     "score_handoff": "after_alias_change"
+   }
+   ```
+
+3. Configure `metric`, `quality_threshold` and `min_improvement` **before
+   training**. For `heldout_rmse`, a threshold of `5.0` means RMSE must be at
+   most five target units. A minimum improvement of `0.1` means RMSE must fall
+   by at least 0.1, not 10%. A tie never qualifies. Manual approval also
+   verifies quality; it is not a way to bypass the gates.
+4. Place the matching Skyulf wheel in `dist/`, then validate and deploy:
+
+   ```powershell
+   databricks bundle validate --strict -t dev --profile <profile>
+   databricks bundle deploy -t dev --profile <profile>
+   ```
+
+The source must already exist and have Change Data Feed enabled. Training and
+scoring may reference the same source table. Prediction output is created by
+score when needed. No default admission/control table is created.
+
+Configuration changes require deploying the changed project. Choosing an
+operator action or supplying its evidence through Run now does not require
+redeployment. Do not switch shared configuration while jobs are running.
+
+## Train a candidate in the UI
+
+1. Open **Jobs & Pipelines** and select the project's `train` job.
+2. Choose **Run with different settings** (also called **Run now with different
+   parameters** in some UI versions).
+3. Set `lifecycle_action=train`. Leave all operator-evidence fields empty.
+4. Open the completed run, then **finalize_and_report** for the final decision.
+   Open **train_and_register** or **compare_and_decide**
+   to inspect the corresponding work separately.
+5. Read `result`: model version, MLflow run and comparison. Follow the MLflow
+   experiment to inspect metrics, artifacts and input provenance.
+
+With manual approval, training returns `next_actions.approve` and
+`next_actions.reject`. `score_requested=false`; the score call is skipped.
+A registered candidate can be `challenger` even when its comparison is worse
+than champion. Alias nomination and quality approval are different events.
+
+With automatic promotion, a qualifying model becomes champion and the optional
+score handoff runs. A tied/worse candidate stays challenger with its validation
+status/reason; champion is unchanged and score is not triggered.
+
+## Understanding the run settings form
+
+The train job exposes the same five parameters for all lifecycle actions. Most
+are intentionally empty because ordinary training needs no operator evidence.
+The form does **not** discover or populate the latest candidate automatically.
+Leaving `lifecycle_action=train` starts another training run and can register
+another version; it does not approve the candidate you just inspected.
+
+| Field | Meaning | When to fill it |
+| --- | --- | --- |
+| `lifecycle_action` | Operation to execute on this run | `train`, `approve`, `reject` or `rollback` |
+| `candidate_version` | Registered model version to approve/reject; not a job run ID or MLflow run ID | Copy from the candidate's `next_actions` for approve/reject |
+| `expected_champion_version` | Champion version that must still be current when the operation executes | Copy for approve/reject/rollback; literal `none` only for first-champion approval/rejection |
+| `promotion_receipt_json` | Saved JSON receipt identifying a completed promotion to reverse | Rollback only |
+| `rejection_reason` | Your explanation for rejecting this candidate | Reject only |
+
+For training, leave the four other fields empty. For approve/reject/rollback,
+start with the matching `next_actions` values and clear fields belonging to
+another action. Add your own reason when rejecting. These are **run overrides**;
+they do not change the deployed job defaults or the Bundle promotion policy.
+
+Older deployments also show `comparison_sha256`. After updating both the wheel
+and notebook/job definitions, leave that field empty or regenerate the Bundle
+to remove it. A supplied full digest remains supported for API callers and
+older automation. Never copy only a shortened digest.
+
+### Why the comparison still has a SHA-256 digest
+
+The digest is a fingerprint of the saved evaluation report, not a metric,
+password or model version. The operator chooses the candidate and expected
+champion. The Bundle retrieves the **full** digest from that candidate's active,
+committed lifecycle receipt, then the strict Core service verifies the saved
+report against it. It does not choose the latest model or blindly trust an
+artifact's current contents. Changed reports, stale aliases and missing or
+uncommitted receipts are refused. Quality gates are still rechecked.
+
+This convenience relies on the same controlled registry writer and permissions
+as the lifecycle workflow. It removes manual hash copying, not the full proof
+check. Direct Core approval/rejection APIs still require their explicit digest.
+
+## Reading the notebook result
+
+The phase notebooks show their own counts, metrics or status. The
+**finalize_and_report** and **score** notebooks use the shared final output renderer.
+Their executed cell shows an operation summary, champion version change when relevant, metric
+comparison for training, prediction counts for scoring, and **Available action**
+parameter tables. Expand **Technical details (JSON)** for the full result.
+If HTML display is unavailable, the notebook prints indented JSON instead.
+
+Databricks may also show **Notebook exited:** followed by JSON. This is the
+normal return value of `dbutils.notebook.exit`, not an error. We keep that JSON
+for Jobs API consumers. The readable report is in the **first cell**; a separate
+final cell returns the JSON. Keeping them separate prevents notebook exit from
+replacing the same cell's report.
+See the [Databricks exit reference](https://docs.databricks.com/aws/en/dev-tools/databricks-utils#exit-command-dbutilsnotebookexit).
+
+**Scoring requested** means the lifecycle action requested a child score job.
+Check that child run for success. For a no-op, the manifest in the technical
+result describes the **previous prediction write**; its model version can be
+older than today's champion. No new rows or model provenance were written.
+
+## Where to find `next_actions`
+
+`next_actions` is a key in the completed **finalize_and_report task's JSON output**. It is not
+a menu, a Catalog alias, an MLflow tag or an extra field in the run settings
+form. You do not need another training run to retrieve it.
+
+1. Close the new-run settings dialog and open the train job's **Runs** tab.
+2. Open the completed training run you want to review.
+3. In that run's task graph/list, click **finalize_and_report**. The condition and
+   score-handoff tasks do not contain the operator parameter tables.
+4. Open the task's executed notebook/output and inspect the **first cell's report**.
+   Use the **Available action: approve/reject** parameter table. The equivalent
+   `next_actions` JSON is under **Technical details (JSON)** and in the notebook
+   exit result. Older runs still show the old single-line JSON; updating the
+   Bundle does not rewrite historical output. Opening the source notebook from
+   Workspace shows the code, not this historical run's output.
+5. Copy the values inside `next_actions.approve` or `next_actions.reject` into
+   the run settings form on the **same train job**. After a successful promotion,
+   save `next_actions.rollback` from that promotion run for a possible rollback.
+
+For a manual candidate, the output has this shape:
+
+```json
+{
+  "action": "train",
+  "result": {
+    "model_version": "2",
+    "comparison": {
+      "candidate_version": "2",
+      "champion_version": "1",
+      "metric": "heldout_rmse",
+      "eligible": true,
+      "reason": "candidate_improved"
+    }
+  },
+  "score_requested": false,
+  "next_actions": {
+    "approve": {
+      "lifecycle_action": "approve",
+      "candidate_version": "2",
+      "expected_champion_version": "1"
+    }
+  }
+}
+```
+
+Before approving, inspect these values:
+
+| Output path | What to check |
+| --- | --- |
+| `result.model_version` | The candidate version you intend to review |
+| `result.comparison.champion_version` | The existing champion used for the comparison |
+| `result.comparison.metric` | The metric used for the promotion decision |
+| `result.comparison.candidate_metrics` / `champion_metrics` | Candidate and champion performance on the comparison data; for RMSE, lower is better |
+| `result.comparison.eligible` / `reason` | Whether the candidate passed the configured gates and why |
+| `score_requested` | Whether this action requests scoring; false while waiting for manual approval |
+
+For a CLI fallback, use the **finalize_and_report task run ID**, not the multi-task parent run
+ID:
+
+```powershell
+databricks jobs get-run-output <publish-result-task-run-id> --profile <profile>
+```
+
+The returned `notebook_output.result` is a JSON string containing `result` and
+`next_actions`. UI labels can differ; Databricks documents navigation from a
+job run to its task output in [Monitor Lakeflow Jobs](https://docs.databricks.com/aws/en/jobs/monitor).
+
+## Approve without training again
+
+Review the comparison first. On the **same train job**, choose **Run now with
+different parameters**, then copy values from `next_actions.approve`:
+
+| Parameter | Value |
+| --- | --- |
+| `lifecycle_action` | `approve` |
+| `candidate_version` | Exact candidate version from the output |
+| `expected_champion_version` | Expected concrete champion version, or the literal `none` for bootstrap |
+| `rejection_reason` | Empty |
+| `promotion_receipt_json` | Empty |
+
+The Bundle resolves the saved comparison proof automatically. `none`
+explicitly means that no champion should exist. Blank does not
+mean the same thing. If someone has changed champion since evaluation, the
+action refuses the stale evidence.
+
+Approval reloads the candidate's evidence and pinned evaluation data and
+rechecks the gates. It does not fit, register or upload a new model. A first
+champion requires the absolute gate; later champions also need improvement.
+An unchanged successful approval can be retried without creating a version.
+
+When handoff is enabled, inspect all three lifecycle tasks and follow the
+linked child score run. When disabled, run the score job yourself. You do not
+need to redeploy merely because champion moved to another version.
+
+## Reject a candidate
+
+Use `next_actions.reject` in the train job's Run now parameters and add a
+nonempty `rejection_reason` of at most 256 UTF-8 bytes. Clear the rollback
+receipt field. Rejection records `approval_status=rejected` and a readable
+reason, preserves champion and never requests score.
+
+The challenger alias may still point to the rejected candidate. Its status
+explains why it is not champion; the next nomination replaces the pointer.
+There is no reopen action here. Do not approve an explicitly rejected version.
+
+## Roll back a completed promotion
+
+The report's **If rollback is needed** section is optional guidance, not a
+scheduled next step. It shows the **Required current champion** separately from
+the **Restore version**. For a v1-to-v5 promotion, rollback requires champion
+to still be v5 and restores v1. The report does not execute rollback.
+
+Expand **Show parameters only if you want to roll back** to see the form values.
+The complete receipt, including its technical comparison digest, stays collapsed
+until needed. Do not remove or edit fields inside that receipt; its exact value
+is still required by the rollback API.
+
+Save `next_actions.rollback` from the successful promotion output. In the
+train job's Run now parameters, use:
+
+| Parameter | Value |
+| --- | --- |
+| `lifecycle_action` | `rollback` |
+| `expected_champion_version` | The promoted version that should still be champion |
+| `promotion_receipt_json` | The complete JSON string value from the saved output |
+| Other operator fields | Empty |
+
+Copy the receipt's value without an extra outer JSON-string quoting layer.
+The receipt names the exact transition to reverse. Rollback verifies that
+transition and restores its previous champion. It cannot reverse first-champion
+initialization because there is no earlier champion. An incompatible current
+alias state is refused. Repeating a still-current completed rollback returns
+the same receipt.
+
+Rollback does not retrain or delete a model. A separate contender is retained.
+It can request score if handoff is enabled. Champion scoring follows the
+restored version; a pinned scorer keeps its pin.
+
+## What happens to existing predictions?
+
+Changing champion alone does not rewrite prediction rows. A later score run
+uses `model_change_mode`:
+
+| Mode | After the selected model changes |
+| --- | --- |
+| `incremental_append` | Keep existing predictions and score only new source inserts with the selected version |
+| `full_rebuild` | Score the full bounded source into a version-specific generation, then switch the stable view after success |
+
+In append mode, a handoff can be a successful no-op when no new rows exist.
+That does not mean promotion failed. It means there were no rows to predict.
+The first score processes the initial snapshot; subsequent runs follow the
+committed Delta/CDF progress, without manually entering monthly dates.
+
+```mermaid
+flowchart TD
+    A["Start score; resolve concrete model version"] --> B{"Model changed and full_rebuild selected?"}
+    B -->|"Yes"| C["Create a full generation, or resume an existing generation on rollback"]
+    C --> D["Activate stable view only after successful scoring"]
+    B -->|"No"| E["Read initial snapshot or new CDF inserts"]
+    E --> F{"Any rows to process?"}
+    F -->|"Yes"| G["Apply saved preprocessing; predict with pandas or Polars"]
+    G --> H["Append predictions and commit source progress"]
+    F -->|"No"| I["noop=true; no new Delta commit"]
+```
+
+For an insert test, add rows with new valid keys to the existing scoring source,
+run score and inspect the added predictions. Repeating score without more data
+should return a no-op. Do not insert duplicate keys or change historical source
+rows to simulate a supported append; updates/deletes need their own recovery
+policy.
+
+## Aliases and results to inspect
+
+| Item | Meaning |
+| --- | --- |
+| `champion` | Current controlled winner |
+| `challenger` | Most recently nominated contender, possibly failed/rejected |
+| `previous_champion` | Previous winner recorded by a promotion |
+| `previous_challenger` | Last displaced contender, not a complete version history |
+| `validation_status` / `validation_reason` | Evaluation outcome |
+| `approval_status` / `approval_reason` | Explicit operator decision, when present |
+| `score_requested` | Whether this lifecycle action requests the score job |
+| `next_actions` | Copyable evidence-bound operator parameters |
+| `noop` in score result | No new prediction write was necessary |
+
+History aliases are cleared when needed to avoid pointing to a conflicting
+current role. Model versions and earlier evidence remain. Do not edit technical
+receipt tags or move controlled aliases directly through Catalog UI.
+
+## Recovery and schedules
+
+- Staged lifecycle notebooks reject **Repair run** and task retries. Inspect
+  phase output and registration/evaluation evidence before starting a fresh
+  run; another training attempt can create another candidate version. This
+  prevents a repaired task from silently reusing an incomplete mutation.
+- To approve, reject or roll back, start a **new run** of the same train job
+  with the saved operator parameters. Its operator branch bypasses training.
+- If approval/rollback reports an uncertain alias write, reconcile its pending
+  evidence before retrying. Do not force a competing alias update.
+- If promotion succeeds and the child score fails, fix scoring and run the
+  score job again. Do not retrain to repair a prediction failure.
+- Training and scoring have independent optional schedules, enabled by default
+  when selected. Their cron, timezone and pause settings are Bundle variables;
+  choosing handoff does not itself create a scoring schedule.
+- Full-rebuild rollback can revisit an earlier generation. It follows that
+  generation's committed progress; it does not erase previously written data.
+
+Platform references: [job parameters](https://docs.databricks.com/aws/en/jobs/parameters)
+and [Run Job tasks](https://docs.databricks.com/aws/en/jobs/tasks/run-job).
+
+### Configure independent clocks and training data
+
+At initialization, choose `manual` or `scheduled` separately for
+`retraining_mode` and `scoring_mode`. Manual omits the schedule; scheduled starts
+`UNPAUSED` after deployment, including the development target. Set
+`retraining_pause_status` or `scoring_pause_status` to `PAUSED` to stop that clock.
+Cron/timezone/pause remain target-overridable Bundle variables:
+
+| Job | Cron variable and default | Timezone | Pause variable |
+| --- | --- | --- | --- |
+| train | `retraining_cron_expression`: `0 0 3 3 * ?` | `retraining_timezone_id`: UTC | `retraining_pause_status` |
+| score | `scoring_cron_expression`: `0 0 * * * ?` | `scoring_timezone_id`: UTC | `scoring_pause_status` |
+
+For hourly score-only operation, choose `retraining_mode=manual` and
+`scoring_mode=scheduled`, with an existing pinned model or champion. Both jobs
+still permit one active run and queue overlapping requests. Scheduled scoring,
+manual scoring and lifecycle handoff use the same score job. `PAUSED` suppresses
+clock triggers, not already queued or manual runs. A no-op means scoring ran
+successfully but had no new rows; a queued run is waiting for its turn.
+There are still exactly two jobs, no control tables and no automatic mutation
+retries.
+
+Manual and scheduled invocations use the same `train` action. Null or missing
+`training_version` resolves the latest Delta snapshot once at run start; an
+explicit nonnegative integer pins that snapshot. Any supported cron frequency
+can invoke it; the cron never determines the data window. Rolling windows derive
+at every invocation, including manual runs. Date-free
+`full_snapshot` training remains available. Source parsing timezone, the
+`window_timezone` defining month boundaries, and each job clock timezone are
+separate settings.
+
+In workflow JSON, `monthly_lookback_months` includes the held-out months.
+For rolling temporal selection, set integer `holdout_months` from 1 through
+lookback minus 1 (default 1). Random rolling selection uses `test_size` and null
+holdout months; fixed temporal selection retains explicit start/holdout/cutoff
+boundaries and null holdout months. Default temporal selection still uses four
+completed months in UTC and holds out the final month.
+
+With `filter_unavailable_results=true`, integer
+`result_availability_lag_hours` is 0 to 87600 (default 0). An explicit
+`result_cutoff` is honored; null derives invocation UTC minus that many elapsed
+hours, even across DST. Manual and scheduled runs follow the same rule.
+The lag is null when filtering is disabled.
+Availability filtering also works without an event column. Results exactly at
+the availability cutoff are included; observation windows are half-open
+`[start, cutoff)`.
+
+For example, these data policy fields select a two-month final holdout and allow
+two days for result availability:
+
+```json
+{
+  "training_window_mode": "rolling_calendar",
+  "split_strategy": "temporal",
+  "window_timezone": "UTC",
+  "monthly_lookback_months": 4,
+  "holdout_months": 2,
+  "filter_unavailable_results": true,
+  "result_cutoff": null,
+  "result_availability_lag_hours": 48
+}
+```
+
+Add these fields to your complete workflow and map the real event and result
+availability columns. At September 3, 00:00 UTC, a `train` invocation selects May
+through August, trains on May/June, holds out July/August, and includes results
+available by September 1, 00:00 UTC. Run
+`python src/preview.py --action train` to inspect this policy offline.
+Preview does not resolve Bundle clocks; inspect `bundle validate -t dev
+--strict --output json` for the resolved schedule. CLI validation is not proof
+of a live scheduled trigger or contention run.

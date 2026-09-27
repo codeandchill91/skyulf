@@ -1,0 +1,38 @@
+name: Docker Full Tests
+
+on:
+  schedule:
+    - cron: "30 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-full-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Standalone Core full Docker tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: skyulf-core
+    steps:
+      - uses: actions/checkout@v7
+      - name: Unit tests
+        run: docker compose -f docker-compose.test.yml run --rm --build unit-tests
+      - name: Integration tests
+        if: ${{ !cancelled() }}
+        run: docker compose -f docker-compose.test.yml run --rm --build integration-tests
+
+  backend:
+    name: Backend full Docker tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Unit tests
+        run: docker compose -f docker-compose.test.yml run --rm --build unit-tests

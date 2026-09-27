@@ -1,0 +1,12 @@
+name: Skyulf product sources
+
+# Python and JavaScript/TypeScript analysis only; CI still executes these tests.
+paths-ignore:
+  - tests/**
+  - skyulf-core/tests/**
+  - frontend/ml-canvas/e2e/**
+  - frontend/ml-canvas/src/test/**
+  - '**/__tests__/**'
+  - '**/*.test.*'
+  - '**/*.spec.*'
+  - initiatives/spark_and_mlflow/rehearsals/**

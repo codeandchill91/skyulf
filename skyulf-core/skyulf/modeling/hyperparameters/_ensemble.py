@@ -23,6 +23,7 @@ _CLF_OPTIONS = [
     {"label": "AdaBoost", "value": "adaboost"},
     {"label": "Decision Tree", "value": "decision_tree"},
     {"label": "Gaussian Naive Bayes", "value": "gaussian_nb"},
+    {"label": "SGD Classifier", "value": "sgd_classifier"},
     {"label": "Support Vector Classifier", "value": "svc"},
     {"label": "K-Nearest Neighbors", "value": "knn"},
 ]

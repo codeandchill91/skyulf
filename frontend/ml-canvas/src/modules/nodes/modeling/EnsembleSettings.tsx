@@ -47,6 +47,7 @@ export interface EnsembleConfig {
   target_column: string;
   cv_enabled: boolean;
   cv_folds: number;
+  cv_inner_folds?: number;
   cv_type: string;
   cv_shuffle: boolean;
   cv_random_state: number;
@@ -131,6 +132,7 @@ export function EnsembleSettings({ config, onChange, nodeId }: {
     config.target_column,
     config.cv_enabled,
     config.cv_folds,
+    config.cv_inner_folds,
     config.cv_type,
     config.cv_shuffle,
     config.cv_random_state,

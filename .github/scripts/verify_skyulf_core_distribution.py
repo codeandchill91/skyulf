@@ -17,7 +17,7 @@ def run(command: list[str], *, cwd: Path) -> None:
 
 
 def main() -> None:
-    """Install the supplied wheel into a fresh venv and import public APIs."""
+    """Install the wheel into a fresh venv and exercise its public pipeline API."""
     if len(sys.argv) != 2:
         raise SystemExit("usage: verify_skyulf_core_distribution.py <wheel-path>")
 
@@ -28,11 +28,11 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="skyulf-core-wheel-") as directory:
         root = Path(directory)
         environment = root / "venv"
-        venv.EnvBuilder(with_pip=True).create(environment)
+        venv.EnvBuilder().create(environment)
         executable = "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
         python = environment / executable
 
-        run([str(python), "-m", "pip", "install", str(wheel)], cwd=root)
+        run(["uv", "pip", "install", "--python", str(python), str(wheel)], cwd=root)
         run(
             [
                 str(python),
@@ -45,6 +45,8 @@ def main() -> None:
             ],
             cwd=root,
         )
+        smoke = Path(__file__).resolve().parents[2] / "skyulf-core/tests/docker/smoke.py"
+        run([str(python), "-I", str(smoke)], cwd=root)
 
 
 if __name__ == "__main__":

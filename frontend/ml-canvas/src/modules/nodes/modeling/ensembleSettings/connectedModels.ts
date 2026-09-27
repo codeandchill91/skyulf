@@ -47,9 +47,11 @@ function connectedTuning(models: Node<ModelData>[], config: EnsembleConfig): Par
 
 function connectedCrossValidation(data: ModelData, config: EnsembleConfig): Partial<EnsembleConfig> {
   const timeColumn = data.cv_time_column || config.cv_time_column;
+  const innerFolds = data.cv_inner_folds ?? config.cv_inner_folds;
   return {
     cv_enabled: data.cv_enabled !== undefined ? data.cv_enabled : config.cv_enabled,
     cv_folds: data.cv_folds || config.cv_folds,
+    ...(innerFolds !== undefined ? { cv_inner_folds: innerFolds } : {}),
     cv_type: data.cv_type || config.cv_type,
     cv_shuffle: data.cv_shuffle !== undefined ? data.cv_shuffle : config.cv_shuffle,
     cv_random_state: data.cv_random_state ?? config.cv_random_state,

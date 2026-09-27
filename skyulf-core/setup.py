@@ -16,7 +16,7 @@ long_description = (this_directory / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="skyulf-core",
-    version="0.8.24",
+    version="0.9.0",
     description="The core machine learning library for Skyulf.",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -41,6 +41,11 @@ setup(
         "statsmodels>=0.14.0",
     ],
     extras_require={
+        # Experimental test/runtime dependency only; node support is gated separately.
+        "spark": ["pyspark>=4.0.3,<4.1.0", "pandas>=2.0.0,<3.0.0"],
+        # Local Delta harness only; Databricks Runtime supplies its own Delta engine.
+        "delta": ["delta-spark>=4.0.0,<4.1.0", "pyspark>=4.0.3,<4.1.0"],
+        "mlflow": ["mlflow>=3.10,<4.0"],
         "dev": [
             "pytest",
             "pytest-cov>=4.1.0,<5.0.0",
@@ -50,6 +55,7 @@ setup(
             "hypothesis>=6.100",
             "syrupy>=4.0.0",
             "pytest-benchmark>=5.0.0,<6.0.0",
+            "jsonschema>=4.0.0,<5.0.0",
         ],
         "viz": ["matplotlib>=3.7.0", "rich>=13.0.0"],
         "eda": [
@@ -77,7 +83,8 @@ setup(
         "modeling-lightgbm": ["lightgbm>=4.0.0"],
         "explainability": ["shap>=0.46.0,<1.0.0"],
         # Convenience aggregate: every optional runtime feature (excludes dev/geo
-        # which carry heavy native deps and are opt-in on their own).
+        # which carry heavy native deps and are opt-in on their own). Spark
+        # also stays separate: it requires Java and is experimental.
         "all": [
             "matplotlib>=3.7.0",
             "rich>=13.0.0",
@@ -91,6 +98,7 @@ setup(
             "lightgbm>=4.0.0",
             "sentence-transformers>=2.2.0",
             "shap>=0.46.0,<1.0.0",
+            "mlflow>=3.10,<4.0",
         ],
     },
     python_requires=">=3.12",

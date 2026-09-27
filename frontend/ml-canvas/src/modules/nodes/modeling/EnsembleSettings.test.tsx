@@ -53,6 +53,15 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** Ensemble internal stacking folds must remain separate from nested search folds. */
+it('keeps nested inner folds distinct from stacking folds', async () => {
+  const onChange = await renderSettings({ run_mode: 'advanced', strategy: 'stacking', cv_enabled: true, cv_type: 'nested_cv', cv_inner_folds: 4 });
+  fireEvent.click(screen.getByRole('button', { name: 'Cross Validation' }));
+  expect(screen.getByRole('spinbutton', { name: 'Outer folds' })).toHaveValue(5);
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Inner folds' }), { target: { value: '2' } });
+  expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ cv_inner_folds: 2, cv: 3 }));
+});
+
 /** A blank fold control must remain an invalid draft and disable direct training. */
 it('preserves blank stacking folds and blocks an invalid numeric config', async () => {
   const onChange = await renderSettings({ strategy: 'stacking', cv: Number.NaN });

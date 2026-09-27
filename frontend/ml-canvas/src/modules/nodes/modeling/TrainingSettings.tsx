@@ -31,6 +31,7 @@ export interface TrainingConfig {
   // Shared CV section.
   cv_enabled: boolean;
   cv_folds: number;
+  cv_inner_folds?: number;
   cv_type: string;
   cv_shuffle: boolean;
   cv_random_state: number;

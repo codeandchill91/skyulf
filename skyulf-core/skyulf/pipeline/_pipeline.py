@@ -13,6 +13,7 @@ import pandas as pd
 import polars as pl
 
 from ..config_validation import validate_pipeline_config
+from ..core.schema import SkyulfSchema
 from ..core.validation import prediction_row_count, validate_prediction_rows
 from ..data.dataset import SplitDataset
 from ..engines import SkyulfDataFrame, get_engine
@@ -143,6 +144,8 @@ class SkyulfPipeline:
         self._fit_metrics: dict[str, Any] | None = None
         self._target_column: str | None = None
         self._tuned_thresholds: dict[Any, float] | None = None
+        self._inference_schemas: tuple[SkyulfSchema, SkyulfSchema] | None = None
+        self._fitted_engine: str | None = None
 
         # Initialize model estimator if config is present
         if self.modeling_config:
@@ -174,6 +177,7 @@ class SkyulfPipeline:
 
         base_calc, base_applier = self._resolve_from_registry(base_model_type)
         if base_calc and base_applier:
+            base_calc.prepare_tuning_params(base_model_config)
             return TuningCalculator(base_calc), TuningApplier(base_applier)
 
         raise ValueError(f"Unknown base model type for tuner: {base_model_type}")
@@ -270,6 +274,7 @@ class SkyulfPipeline:
         # new prediction requests or changing their row order.
         _record_tuning_column_drops(adapter._engineer, raw_train[0], adapter.input_columns)
         self.feature_engineer.fitted_steps = prefix.fitted_steps + adapter._engineer.fitted_steps
+        self.feature_engineer._portable_fitted = True
         transformed = SplitDataset(
             train=adapter.training_payload,
             test=self._transform_tuning_split(adapter, raw_dataset.test, target_column),
@@ -338,6 +343,8 @@ class SkyulfPipeline:
         self._fit_metrics = None
         self._target_column = None
         self._tuned_thresholds = None
+        self._inference_schemas = None
+        self._fitted_engine = None
         if self.model_estimator is not None:
             self.model_estimator.model = None
         try:
@@ -346,6 +353,7 @@ class SkyulfPipeline:
             # A failure can occur after model fitting, while transforming or
             # predicting held-out data. Never expose that partial replacement.
             self.feature_engineer.fitted_steps = []
+            self.feature_engineer._portable_fitted = False
             if self.model_estimator is not None:
                 self.model_estimator.model = None
             raise
@@ -357,6 +365,10 @@ class SkyulfPipeline:
     ) -> dict[str, Any]:
         """Fit validated data, publishing metadata only after all stages complete."""
         metrics = {}
+        input_schema = None
+        fitted_engine = None
+        if self.model_estimator is not None:
+            input_schema, fitted_engine = self._fit_input_metadata(data, target_column)
 
         # 1. Feature Engineering
         logger.info("Starting Feature Engineering...")
@@ -365,6 +377,14 @@ class SkyulfPipeline:
         )
         if is_tuning:
             transformed_data, fe_metrics = self._fit_tuning_pipeline(data, target_column)
+            if input_schema is not None:
+                ordering_columns = (
+                    column
+                    for step in self.feature_engineer.fitted_steps
+                    if isinstance(step.get("applier"), _TuningColumnDropApplier)
+                    for column in step["artifact"]["columns"]
+                )
+                input_schema = input_schema.drop(ordering_columns)
         else:
             transformed_data, fe_metrics = self.feature_engineer.fit_transform(
                 data, target_column=target_column
@@ -373,43 +393,74 @@ class SkyulfPipeline:
 
         # 2. Modeling
         if self.model_estimator:
-            logger.info("Starting Model Training...")
-
-            # Ensure transformed_data is SplitDataset for modeling
-            if isinstance(transformed_data, SplitDataset):
-                dataset = transformed_data
-            else:
-                # If we only have a DataFrame, we can't really evaluate properly without a split
-                # But we can fit on it.
-                # Ideally, the user should provide a SplitDataset or use a Splitter node in preprocessing.
-                # If preprocessing didn't split, we wrap it.
-                engine = get_engine(transformed_data)
-                empty_df = engine.create_dataframe({})
-                dataset = SplitDataset(train=transformed_data, test=empty_df, validation=None)
-
-            # Fit the model
-            # Note: fit_predict updates self.model_estimator.model in-memory
-            if not is_tuning:
-                _ = self.model_estimator.fit_predict(
-                    dataset=dataset,
-                    target_column=target_column,
-                    config=cast(dict[str, Any], self.modeling_config),
-                )
-
-            # Evaluate
-            # We can run evaluation if we have test/validation sets
-            try:
-                eval_report = self.model_estimator.evaluate(
-                    dataset=dataset, target_column=target_column
-                )
-                metrics["modeling"] = eval_report
-            except Exception as e:  # noqa: BLE001 - evaluation failure is recorded as modeling_error; fit must continue
-                logger.warning(f"Evaluation failed: {e}")
-                metrics["modeling_error"] = str(e)
+            self._fit_model(
+                transformed_data, target_column, is_tuning, metrics, input_schema, fitted_engine
+            )
 
         self._fit_metrics = metrics
         self._target_column = target_column
         return metrics
+
+    @staticmethod
+    def _fit_input_metadata(data: Any, target_column: str) -> tuple[SkyulfSchema, str]:
+        """Record the training feature schema and execution engine before preprocessing."""
+        raw_train = data.train if isinstance(data, SplitDataset) else data
+        raw_features = raw_train[0] if isinstance(raw_train, tuple) else raw_train
+        schema = SkyulfSchema.from_dataframe(raw_features).drop((target_column,))
+        return schema, str(get_engine(raw_features).name)
+
+    def _fit_model(
+        self,
+        transformed_data: Any,
+        target_column: str,
+        is_tuning: bool,
+        metrics: dict[str, Any],
+        input_schema: SkyulfSchema | None,
+        fitted_engine: str | None,
+    ) -> None:
+        """Fit and evaluate the model before publishing successful inference metadata."""
+        assert self.model_estimator is not None
+        logger.info("Starting Model Training...")
+
+        # Ensure transformed_data is SplitDataset for modeling
+        if isinstance(transformed_data, SplitDataset):
+            dataset = transformed_data
+        else:
+            # If we only have a DataFrame, we can't really evaluate properly without a split
+            # But we can fit on it.
+            # Ideally, the user should provide a SplitDataset or use a Splitter node in preprocessing.
+            # If preprocessing didn't split, we wrap it.
+            engine = get_engine(transformed_data)
+            empty_df = engine.create_dataframe({})
+            dataset = SplitDataset(train=transformed_data, test=empty_df, validation=None)
+
+        # Observe the actual training representation before sklearn loses
+        # its column names. Schemas contain metadata only, never samples.
+        model_schema = SkyulfSchema.from_dataframe(extract_xy(dataset.train, target_column)[0])
+
+        # Fit the model
+        # Note: fit_predict updates self.model_estimator.model in-memory
+        if not is_tuning:
+            _ = self.model_estimator.fit_predict(
+                dataset=dataset,
+                target_column=target_column,
+                config=cast(dict[str, Any], self.modeling_config),
+            )
+
+        # Evaluate
+        # We can run evaluation if we have test/validation sets
+        try:
+            eval_report = self.model_estimator.evaluate(
+                dataset=dataset, target_column=target_column
+            )
+            metrics["modeling"] = eval_report
+        except Exception as e:  # noqa: BLE001 - evaluation failure is recorded as modeling_error; fit must continue
+            logger.warning(f"Evaluation failed: {e}")
+            metrics["modeling_error"] = str(e)
+
+        if self.model_estimator.model is not None and input_schema is not None:
+            self._inference_schemas = (input_schema, model_schema)
+            self._fitted_engine = fitted_engine
 
     def get_fitted_split(
         self,
@@ -483,12 +534,16 @@ class SkyulfPipeline:
             _to_pandas(y_test),
         )
 
-    def _predict_proba_transformed(self, transformed_data: pd.DataFrame | SkyulfDataFrame) -> Any:
+    def _predict_proba_transformed(
+        self, transformed_data: pd.DataFrame | pl.DataFrame | SkyulfDataFrame
+    ) -> Any:
         """Run predict_proba on already-transformed data, raising if unsupported."""
         if self.model_estimator is None or self.model_estimator.model is None:
             raise ValueError("Pipeline not fitted or no model configured.")
+        # Existing model appliers dispatch Polars at runtime, although their
+        # shared annotation names only pandas and the Skyulf frame protocol.
         proba = self.model_estimator.applier.predict_proba(
-            transformed_data, self.model_estimator.model
+            cast(Any, transformed_data), self.model_estimator.model
         )
         if proba is None:
             raise ValueError(
@@ -499,7 +554,7 @@ class SkyulfPipeline:
 
     def optimize_thresholds(
         self,
-        X_val: pd.DataFrame | SkyulfDataFrame,
+        X_val: pd.DataFrame | pl.DataFrame | SkyulfDataFrame,
         y_val: pd.Series | Any,
         metric: Callable[[Any, Any], float],
         strategy: str | None = None,
@@ -583,7 +638,7 @@ class SkyulfPipeline:
 
     def predict(
         self,
-        data: pd.DataFrame | SkyulfDataFrame,
+        data: pd.DataFrame | pl.DataFrame | SkyulfDataFrame,
         use_tuned_thresholds: bool = False,
     ) -> Any:
         """Generate predictions.
@@ -623,7 +678,7 @@ class SkyulfPipeline:
         # 2. Modeling
         if not use_tuned_thresholds:
             predictions = self.model_estimator.applier.predict(
-                transformed_data, self.model_estimator.model
+                cast(Any, transformed_data), self.model_estimator.model
             )
             validate_prediction_rows(
                 len(data), prediction_row_count(predictions), stage="Model prediction"
@@ -710,6 +765,11 @@ class SkyulfPipeline:
         if self.feature_engineer.fitted_steps:
             return True
         return self.model_estimator is not None and self.model_estimator.model is not None
+
+    @property
+    def fitted_engine(self) -> str | None:
+        """Return the successful model fit's frame engine, if recorded."""
+        return getattr(self, "_fitted_engine", None)
 
     def fingerprint(self) -> str:
         """Return a deterministic SHA-256 over topology + fitted artifacts.

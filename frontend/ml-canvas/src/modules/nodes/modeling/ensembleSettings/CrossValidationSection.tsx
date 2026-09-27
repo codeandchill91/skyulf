@@ -5,6 +5,7 @@ import { AlertTriangle, BarChart3, ChevronRight } from 'lucide-react';
 import type { ColumnProfile } from '../../../../core/api/client';
 import type { EnsembleConfig } from '../EnsembleSettings';
 import { HelpTooltip } from '../components/HelpTooltip';
+import { NestedFoldSettings } from '../components/NestedFoldSettings';
 import type { UpdateFn } from './modelOptions';
 
 /** Collapsible outer evaluation cross-validation (same shape as the training nodes). */
@@ -42,7 +43,9 @@ export function CrossValidationSection({ config, update, showCV, setShowCV, colu
             Enable Cross-Validation
           </label>
           <p className="text-xs text-gray-500 dark:text-gray-400 pl-6">
-            {config.run_mode === 'advanced'
+            {config.cv_type === 'nested_cv'
+              ? 'Nested CV evaluates independent ensemble searches on untouched outer folds. Stacking CV remains a separate model setting.'
+              : config.run_mode === 'advanced'
               ? 'Candidates are already scored by CV during the search. This re-evaluates the winning ensemble after tuning (full metric panel + fold-to-fold variance); it never changes the selected hyperparameters.'
               : 'Runs a k-fold evaluation of the trained ensemble after training. Evaluation only — it measures generalization and never changes the model or its configuration.'}
           </p>
@@ -63,7 +66,7 @@ function CrossValidationFields({ config, update, columns, fieldId }: {
     <div className="space-y-3 pl-6 border-l-2 border-gray-100 dark:border-gray-800">
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <label htmlFor={`${fieldId}-cv_folds`} className="block text-xs text-gray-500 mb-1">Folds</label>
+          <label htmlFor={`${fieldId}-cv_folds`} className="block text-xs text-gray-500 mb-1">{config.cv_type === 'nested_cv' ? 'Outer folds' : 'Folds'}</label>
           <ValidationField field="cv_folds"><input
             id={`${fieldId}-cv_folds`}
             type="number"
@@ -90,6 +93,10 @@ function CrossValidationFields({ config, update, columns, fieldId }: {
         </div>
       </div>
 
+      {config.cv_type === 'nested_cv' && (
+        <NestedFoldSettings fieldId={fieldId} outerFolds={config.cv_folds} innerFolds={config.cv_inner_folds}
+          onChange={(value) => { update({ cv_inner_folds: value }); }} />
+      )}
       {config.cv_type === 'time_series_split' && (
         <div className="space-y-2">
           <div className="flex items-start gap-1.5 p-2 bg-amber-50 dark:bg-amber-900/20 rounded text-xs text-amber-700 dark:text-amber-400">

@@ -54,6 +54,12 @@ repos:
       - id: ruff-format    # Format (replaces black)
   - repo: local
     hooks:
+      - id: lizard-complexity
+        name: Lizard complexity (backend and Core, CCN 10)
+        entry: uv run --no-sync lizard backend skyulf-core/skyulf --CCN 10 -w
+        language: system
+        files: ^(backend/.*\.py|skyulf-core/skyulf/.*\.py|\.pre-commit-config\.yaml)$
+        pass_filenames: false
       - id: ty
         name: ty (type check)
         # Mirrors the CI "Type check (ty)" step so type errors are caught on
@@ -69,4 +75,10 @@ repos:
         entry: npm --prefix frontend/ml-canvas run lint
         language: system
         files: ^frontend/ml-canvas/src/.*\.(ts|tsx|js|jsx)$
+        pass_filenames: false
+      - id: frontend-complexity
+        name: frontend complexity (ESLint, maximum 10)
+        entry: npm --prefix frontend/ml-canvas run complexity:check
+        language: system
+        files: ^(frontend/ml-canvas/src/.*\.(ts|tsx|js|jsx)|\.pre-commit-config\.yaml)$
         pass_filenames: false
