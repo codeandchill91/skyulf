@@ -109,6 +109,7 @@ dev = [
 
     # Linters/formatters/typecheckers (>=0.15: PLC0415 rule, audit finding F-11)
     "ruff>=0.15,<1.0",
+    "lizard>=1.23.0",  # Same CCN 10 gate as CI and pre-commit
 
     # Dev helpers
     "factory-boy>=3.3.0,<4.0.0",

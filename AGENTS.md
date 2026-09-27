@@ -37,6 +37,31 @@ Key flows: job lifecycle (upload → ETL → pipeline run → results), hyperpar
 - Changelog: entries go in `changelog/<major>.<minor>.x.md` (root `CHANGELOG.md` is an index only); version lives in root `pyproject.toml`, sync frontend via `npm run sync-version`.
 - Do not run mkdocs, CI pipelines are running this for you. Run `mkdocs build --strict` only to check your own changes before committing, if needed!
 
+## CI analysis gates
+
+- Before editing, inspect the relevant `.github/workflows/` checks. Use the same
+  commands and analysis scope for local verification.
+- Keep Lizard CCN at most 10 in `backend/` and `skyulf-core/skyulf/`, and ESLint
+  complexity at most 10 in the frontend. Extract meaningful helpers while
+  preserving validation order, defaults, error messages and behavior.
+- Do not raise thresholds, disable rules or exclude production code merely to
+  pass a gate. Explain and justify any necessary exception.
+- When adding an import, verify that CI installs its dependency. Keep the
+  relevant requirements files, `pyproject.toml` and `uv.lock` aligned; a package
+  installed in the local environment is not evidence that CI provides it.
+- In optional-dependency tests, place `pytest.importorskip` before application
+  imports that load that dependency. Do not skip unrelated tests.
+- For Python changes, run Ruff, the full Ty scope from CI, and affected tests.
+  When test imports change, also verify collection of the affected test suite.
+- For frontend changes, run affected tests, `lint`, `complexity:check`, `build`
+  and `size-check`. Refresh generated frontend assets after source changes.
+- Preserve the agreed external-analysis exclusions for test/rehearsal files;
+  keep pytest/Vitest execution and source coverage reporting enabled.
+- Before committing, inspect the staged diff and pass pre-commit hooks,
+  including the Lizard and frontend complexity hooks. Keep caches, generated
+  model artifacts and temporary verification output out of commits. Report
+  checks that were not run or did not pass explicitly.
+
 ## Lint scope & test hygiene
 
 Ruff scope (see the comments in `pyproject.toml` for the reasoning): `F401`,
