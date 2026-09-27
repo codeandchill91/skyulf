@@ -32,15 +32,7 @@ def restore_feature_state(
     payload: bytes, options: ExecutionOptions | None, spec: FrameSpec | None
 ) -> tuple[list[dict], list[dict]]:
     """Rebind explicit Spark keys and instantiate only known node appliers after validation."""
-    if options is not None and not isinstance(options, ExecutionOptions):
-        raise TypeError("execution_options must be ExecutionOptions.")
-    if spec is not None and not isinstance(spec, FrameSpec):
-        raise TypeError("frame_spec must be FrameSpec.")
-    spark = options is not None and options.engine == "spark"
-    if spark and spec is None:
-        raise ValueError("Spark requires frame_spec when loading portable state.")
-    if not spark and spec is not None:
-        raise ValueError("frame_spec is currently supported only for Spark execution.")
+    spark = _validate_runtime(options, spec)
     records = decode_pipeline(payload, max_bytes=_budget(options))
     if spark:
         assert spec is not None
@@ -52,6 +44,20 @@ def restore_feature_state(
     for step in records:
         step["applier"] = _APPLIERS[step["type"]]()
     return configs, records
+
+
+def _validate_runtime(options: ExecutionOptions | None, spec: FrameSpec | None) -> bool:
+    """Check the destination execution context before decoding portable state."""
+    if options is not None and not isinstance(options, ExecutionOptions):
+        raise TypeError("execution_options must be ExecutionOptions.")
+    if spec is not None and not isinstance(spec, FrameSpec):
+        raise TypeError("frame_spec must be FrameSpec.")
+    spark = options is not None and options.engine == "spark"
+    if spark and spec is None:
+        raise ValueError("Spark requires frame_spec when loading portable state.")
+    if not spark and spec is not None:
+        raise ValueError("frame_spec is currently supported only for Spark execution.")
+    return spark
 
 
 def _budget(options: ExecutionOptions | None) -> int:

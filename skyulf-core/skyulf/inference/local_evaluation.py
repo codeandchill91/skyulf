@@ -1,5 +1,7 @@
 """Held-out metrics for a saved pandas/Polars local pipeline."""
 
+from typing import Any
+
 import pandas as pd
 import polars as pl
 from joblib import parallel_config
@@ -28,6 +30,22 @@ def evaluate_local_holdout(
     normal training/batch prediction parallelism remain unchanged. This does not
     guarantee determinism for arbitrary models or other numerical runtimes.
     """
+    _validate_holdout(artifact, heldout, target_column)
+    columns = list(artifact.manifest.input_columns)
+    features = (
+        heldout.select(columns) if isinstance(heldout, pl.DataFrame) else heldout.loc[:, columns]
+    )
+    actual = heldout[target_column].to_numpy()
+    with parallel_config(backend="sequential"):
+        predictions = predict_local_pipeline(features, artifact)
+    raw_metrics = _holdout_metrics(artifact, features, heldout, target_column, actual, predictions)
+    return {f"heldout_{name}": value for name, value in sanitize_metrics(raw_metrics).items()}
+
+
+def _validate_holdout(
+    artifact: LocalPipelineArtifact, heldout: pd.DataFrame | pl.DataFrame, target_column: str
+) -> None:
+    """Require labeled evaluation rows with a target outside the model inputs."""
     if not isinstance(artifact, LocalPipelineArtifact):
         raise TypeError("artifact must be a LocalPipelineArtifact.")
     if not isinstance(heldout, pd.DataFrame | pl.DataFrame):
@@ -36,13 +54,17 @@ def evaluate_local_holdout(
         raise ValueError("heldout must contain at least two labeled rows.")
     if target_column not in heldout.columns or target_column in artifact.manifest.input_columns:
         raise ValueError("heldout must contain a separate target column.")
-    columns = list(artifact.manifest.input_columns)
-    features = (
-        heldout.select(columns) if isinstance(heldout, pl.DataFrame) else heldout.loc[:, columns]
-    )
-    actual = heldout[target_column].to_numpy()
-    with parallel_config(backend="sequential"):
-        predictions = predict_local_pipeline(features, artifact)
+
+
+def _holdout_metrics(
+    artifact: LocalPipelineArtifact,
+    features: pd.DataFrame | pl.DataFrame,
+    heldout: pd.DataFrame | pl.DataFrame,
+    target_column: str,
+    actual: Any,
+    predictions: pd.DataFrame,
+) -> dict[str, Any]:
+    """Score existing predictions using the saved model's task and probability contract."""
     estimator = artifact.pipeline.model_estimator
     if estimator is None:
         raise ValueError("Local artifact has no fitted model.")
@@ -71,4 +93,4 @@ def evaluate_local_holdout(
             ),
             **scoring_args,
         )
-    return {f"heldout_{name}": value for name, value in sanitize_metrics(raw_metrics).items()}
+    return raw_metrics

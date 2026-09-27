@@ -61,22 +61,7 @@ def _operator_options(action: str, values: dict[str, str]) -> dict[str, Any]:
     )
     options: dict[str, Any] = {"expected_champion_version": expected}
     if action == "rollback":
-        try:
-            payload = json.loads(values.get("promotion_receipt_json", ""))
-            if not isinstance(payload, dict) or any(
-                value is not None and not isinstance(value, str) for value in payload.values()
-            ):
-                raise ValueError
-            receipt = AliasChangeReceipt(**payload)
-            if receipt.kind != "promotion" or receipt.alias != "champion":
-                raise ValueError
-            if receipt.new_version != expected or receipt.prior_version is None:
-                raise ValueError
-            _version(receipt.prior_version)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "Rollback needs a complete promotion_receipt_json matching the expected champion."
-            ) from exc
+        receipt = _rollback_receipt(values, expected)
         options["promotion_receipt"] = receipt
         return options
     options["candidate_version"] = _version(values.get("candidate_version", ""))
@@ -90,6 +75,32 @@ def _operator_options(action: str, values: dict[str, str]) -> dict[str, Any]:
             raise ValueError("Rejection needs a reason of at most 256 UTF-8 bytes.")
         options["rejection_reason"] = reason
     return options
+
+
+def _rollback_receipt(values: dict[str, str], expected: str | None) -> AliasChangeReceipt:
+    """Parse a complete promotion receipt and preserve a single operator-facing failure."""
+    try:
+        payload = json.loads(values.get("promotion_receipt_json", ""))
+        if not isinstance(payload, dict) or any(
+            value is not None and not isinstance(value, str) for value in payload.values()
+        ):
+            raise ValueError
+        receipt = AliasChangeReceipt(**payload)
+        _validate_rollback_receipt(receipt, expected)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Rollback needs a complete promotion_receipt_json matching the expected champion."
+        ) from exc
+    return receipt
+
+
+def _validate_rollback_receipt(receipt: AliasChangeReceipt, expected: str | None) -> None:
+    """Require a champion promotion matching both sides of the rollback guard."""
+    if receipt.kind != "promotion" or receipt.alias != "champion":
+        raise ValueError
+    if receipt.new_version != expected or receipt.prior_version is None:
+        raise ValueError
+    _version(receipt.prior_version)
 
 
 def run_bundle_action(
@@ -114,26 +125,8 @@ def run_bundle_action(
     _, policy = _workflow_policies(config)
     if config.get("score_handoff") not in {"disabled", "after_alias_change"}:
         raise ValueError("score_handoff must be disabled or after_alias_change.")
-    for key in _OPERATOR_FIELDS | {
-        "lifecycle_action",
-        "task_role",
-        "action",
-        "score_model_version",
-    }:
-        if key in parameters and not isinstance(parameters[key], str):
-            raise ValueError("Job parameters must be strings.")
-    if parameters.get("task_role") or parameters.get("action"):
-        raise ValueError("Notebook role and score action cannot be overridden by job parameters.")
-    if task_role == "score":
-        if parameters.get("lifecycle_action"):
-            raise ValueError("Score job refuses lifecycle actions.")
-        action = "score"
-    elif task_role == "lifecycle":
-        action = parameters.get("lifecycle_action", "")
-        if action not in {"train", "approve", "reject", "rollback"}:
-            raise ValueError("Lifecycle action must be train, approve, reject or rollback.")
-    else:
-        raise ValueError("Notebook task_role must be lifecycle or score.")
+    _validate_job_parameters(parameters)
+    action = _role_action(task_role, parameters)
     override = parameters.get("score_model_version", "")
     if override:
         if action != "score":
@@ -154,6 +147,35 @@ def run_bundle_action(
         options.update(experiment_name=experiment_name, artifact_path=artifact_path)
     result = run_action(spark, config, action, **options)
     return _bundle_result(config, action, result)
+
+
+def _validate_job_parameters(parameters: dict[str, str]) -> None:
+    """Reject malformed or role-overriding job inputs before selecting an action."""
+    for key in _OPERATOR_FIELDS | {
+        "lifecycle_action",
+        "task_role",
+        "action",
+        "score_model_version",
+    }:
+        if key in parameters and not isinstance(parameters[key], str):
+            raise ValueError("Job parameters must be strings.")
+    if parameters.get("task_role") or parameters.get("action"):
+        raise ValueError("Notebook role and score action cannot be overridden by job parameters.")
+
+
+def _role_action(task_role: str, parameters: dict[str, str]) -> str:
+    """Map a deployed notebook role to its allowed requested action."""
+    if task_role == "score":
+        if parameters.get("lifecycle_action"):
+            raise ValueError("Score job refuses lifecycle actions.")
+        action = "score"
+    elif task_role == "lifecycle":
+        action = parameters.get("lifecycle_action", "")
+        if action not in {"train", "approve", "reject", "rollback"}:
+            raise ValueError("Lifecycle action must be train, approve, reject or rollback.")
+    else:
+        raise ValueError("Notebook task_role must be lifecycle or score.")
+    return action
 
 
 def _read_notebook_config(values: dict[str, str]) -> dict[str, Any]:

@@ -291,10 +291,7 @@ def validate_leakage_safety(
     splitters = train_test_splitters()
     if target_column is None:
         target_column = _find_pipeline_target(preprocessing, splitters)
-    for step in preprocessing:
-        validate_temporal_target(
-            step.get("transformer") or "", step.get("params") or {}, target_column=target_column
-        )
+    _validate_temporal_steps(preprocessing, target_column)
     if already_split:
         return []
     splitter = _first_pipeline_splitter(preprocessing, splitters)
@@ -305,6 +302,14 @@ def validate_leakage_safety(
     if violations and on_leakage == "raise":
         raise ValueError("Data leakage risk:\n" + "\n".join(violations))
     return violations if on_leakage == "warn" else []
+
+
+def _validate_temporal_steps(preprocessing: Any, target_column: str | None) -> None:
+    """Reject current-target rolling features regardless of split or warning policy."""
+    for step in preprocessing:
+        validate_temporal_target(
+            step.get("transformer") or "", step.get("params") or {}, target_column=target_column
+        )
 
 
 def _first_pipeline_splitter(

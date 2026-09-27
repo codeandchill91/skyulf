@@ -55,16 +55,7 @@ class DeltaTableAdmission:
         if self._identity() != self._control_id:
             raise BatchConflictError("Control table identity changed during admission.")
         frame = self._spark.table(self._table)
-        fields = {field.name: field for field in frame.schema}
-        if (
-            len(frame.schema) != 2
-            or set(fields) != {"target_id", "owner"}
-            or any(field.dataType.typeName() != "string" for field in fields.values())
-            or not fields["owner"].nullable
-        ):
-            raise ValueError(
-                "Control table requires only target_id STRING and nullable owner STRING."
-            )
+        _validate_control_schema(frame)
         rows = frame.limit(2).collect()
         if len(rows) != 1 or rows[0]["target_id"] != target_id:
             raise ValueError("Control table must contain exactly one row bound to this target ID.")
@@ -124,3 +115,15 @@ class DeltaTableAdmission:
             # A new publisher may acquire immediately after this release commits.
             if self._state(table_id) == token:
                 raise BatchConflictError("Admission release could not be verified.")
+
+
+def _validate_control_schema(frame: Any) -> None:
+    """Require the exact nullable ownership schema before reading control rows."""
+    fields = {field.name: field for field in frame.schema}
+    if (
+        len(frame.schema) != 2
+        or set(fields) != {"target_id", "owner"}
+        or any(field.dataType.typeName() != "string" for field in fields.values())
+        or not fields["owner"].nullable
+    ):
+        raise ValueError("Control table requires only target_id STRING and nullable owner STRING.")

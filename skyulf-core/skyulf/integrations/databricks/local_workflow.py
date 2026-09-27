@@ -181,22 +181,26 @@ def resolve_target_config(config: dict[str, Any], bindings: dict[str, str]) -> d
         raise ValueError("Invalid resource_suffix for a Unity Catalog identifier.")
     resolved = config.copy()
     for name in _TABLE_FIELDS:
-        value = config[name]
-        if type(value) is not str:
-            raise ValueError(f"{name} must be a string.")
-        for key, replacement in bindings.items():
-            value = value.replace("{" + key + "}", replacement)
-        if not _TABLE_NAME.fullmatch(value):
-            raise ValueError(f"{name} must resolve to a three-part UC name.")
-        if name in {"prediction_table", "model_name"}:
-            schema = "output_schema" if name == "prediction_table" else "metadata_schema"
-            expected = f"{bindings['catalog']}.{bindings[schema]}."
-            if not value.startswith(expected):
-                raise ValueError(f"{name} must use the active target's {schema}.")
-            if suffix and not value.endswith(suffix):
-                raise ValueError(f"{name} must include the active target's resource_suffix.")
-        resolved[name] = value
+        resolved[name] = _bind_target_name(name, config[name], bindings, suffix)
     return resolved
+
+
+def _bind_target_name(name: str, value: Any, bindings: dict[str, str], suffix: str) -> str:
+    """Resolve one UC name and enforce the target's output ownership."""
+    if type(value) is not str:
+        raise ValueError(f"{name} must be a string.")
+    for key, replacement in bindings.items():
+        value = value.replace("{" + key + "}", replacement)
+    if not _TABLE_NAME.fullmatch(value):
+        raise ValueError(f"{name} must resolve to a three-part UC name.")
+    if name in {"prediction_table", "model_name"}:
+        schema = "output_schema" if name == "prediction_table" else "metadata_schema"
+        expected = f"{bindings['catalog']}.{bindings[schema]}."
+        if not value.startswith(expected):
+            raise ValueError(f"{name} must use the active target's {schema}.")
+        if suffix and not value.endswith(suffix):
+            raise ValueError(f"{name} must include the active target's resource_suffix.")
+    return value
 
 
 def _scoring_config(config: dict[str, Any]) -> LocalWorkflowConfig:
@@ -276,13 +280,39 @@ def _optional_boundary(config: dict[str, Any], field: str) -> datetime | None:
         raise ValueError(f"{field} must be an ISO timestamp with timezone.") from exc
 
 
-def _training_window_mode(config: dict[str, Any]) -> str:
-    """Validate source selection independently of the random/temporal evaluation split."""
-    mode = config.get("training_window_mode", "full_snapshot")
-    if mode not in ("full_snapshot", "fixed_window", "rolling_calendar"):
-        raise ValueError(
-            "training_window_mode must be full_snapshot, fixed_window or rolling_calendar."
-        )
+def _validate_rolling_window(config: dict[str, Any]) -> None:
+    """Validate calendar history, holdout duration and timezone in that order."""
+    months = config.get("monthly_lookback_months")
+    minimum = 2 if config.get("split_strategy") == "temporal" else 1
+    if type(months) is not int or not minimum <= months <= 120:
+        raise ValueError(f"monthly_lookback_months must be an integer from {minimum} to 120.")
+    if config.get("split_strategy") == "temporal":
+        holdout = config.get("holdout_months", 1)
+        if type(holdout) is not int or not 1 <= holdout < months:
+            raise ValueError(
+                "holdout_months must be an integer from 1 to monthly_lookback_months - 1."
+            )
+    zone = config.get("window_timezone")
+    if not isinstance(zone, str) or not zone:
+        raise ValueError("Rolling-calendar selection requires window_timezone.")
+    try:
+        ZoneInfo(zone)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError("window_timezone must name an IANA timezone.") from exc
+
+
+def _validate_result_lag(config: dict[str, Any]) -> None:
+    """Reject unavailable-result lag settings outside their active policy."""
+    if config.get("filter_unavailable_results") is True:
+        lag = config.get("result_availability_lag_hours", 0)
+        if type(lag) is not int or not 0 <= lag <= 87600:
+            raise ValueError("result_availability_lag_hours must be an integer from 0 to 87600.")
+    elif config.get("result_availability_lag_hours") is not None:
+        raise ValueError("Inactive result filtering requires null result_availability_lag_hours.")
+
+
+def _validate_window_event(config: dict[str, Any], mode: str) -> None:
+    """Require event columns only for time-based source selection."""
     if mode == "full_snapshot":
         if (
             config.get("event_column") is not None
@@ -293,24 +323,18 @@ def _training_window_mode(config: dict[str, Any]) -> str:
             )
     elif not config.get("event_column"):
         raise ValueError("Window selection requires an explicit event_column.")
+
+
+def _training_window_mode(config: dict[str, Any]) -> str:
+    """Validate source selection independently of the random/temporal evaluation split."""
+    mode = config.get("training_window_mode", "full_snapshot")
+    if mode not in ("full_snapshot", "fixed_window", "rolling_calendar"):
+        raise ValueError(
+            "training_window_mode must be full_snapshot, fixed_window or rolling_calendar."
+        )
+    _validate_window_event(config, mode)
     if mode == "rolling_calendar":
-        months = config.get("monthly_lookback_months")
-        minimum = 2 if config.get("split_strategy") == "temporal" else 1
-        if type(months) is not int or not minimum <= months <= 120:
-            raise ValueError(f"monthly_lookback_months must be an integer from {minimum} to 120.")
-        if config.get("split_strategy") == "temporal":
-            holdout = config.get("holdout_months", 1)
-            if type(holdout) is not int or not 1 <= holdout < months:
-                raise ValueError(
-                    "holdout_months must be an integer from 1 to monthly_lookback_months - 1."
-                )
-        zone = config.get("window_timezone")
-        if not isinstance(zone, str) or not zone:
-            raise ValueError("Rolling-calendar selection requires window_timezone.")
-        try:
-            ZoneInfo(zone)
-        except ZoneInfoNotFoundError as exc:
-            raise ValueError("window_timezone must name an IANA timezone.") from exc
+        _validate_rolling_window(config)
     elif (
         config.get("monthly_lookback_months") is not None
         or config.get("window_timezone") is not None
@@ -322,12 +346,7 @@ def _training_window_mode(config: dict[str, Any]) -> str:
         "holdout_months"
     ) is not None:
         raise ValueError("holdout_months must be null outside rolling temporal selection.")
-    if config.get("filter_unavailable_results") is True:
-        lag = config.get("result_availability_lag_hours", 0)
-        if type(lag) is not int or not 0 <= lag <= 87600:
-            raise ValueError("result_availability_lag_hours must be an integer from 0 to 87600.")
-    elif config.get("result_availability_lag_hours") is not None:
-        raise ValueError("Inactive result filtering requires null result_availability_lag_hours.")
+    _validate_result_lag(config)
     return mode
 
 
@@ -482,6 +501,13 @@ def _automatic_promotion(
         expected_challenger_version=report.candidate_version,
         **options,
     )
+    return _promote_staged_candidate(report, native, options, promote)
+
+
+def _promote_staged_candidate(
+    report: Any, native: Any, options: dict[str, Any], promote: bool
+) -> AliasChangeReceipt | None:
+    """Apply promotion policy after contender evidence has been staged."""
     if not promote:
         return None
     if report.champion_version is None:
@@ -604,6 +630,29 @@ def _run_scoring_action(
     return result
 
 
+def _run_rollback_action(
+    config: dict[str, Any],
+    promotion_receipt: AliasChangeReceipt | None,
+    expected_champion_version: str | None,
+    tracking_uri: str,
+    registry_uri: str,
+) -> AliasChangeReceipt:
+    """Validate rollback identity before attempting its alias transition."""
+    if (
+        not isinstance(promotion_receipt, AliasChangeReceipt)
+        or promotion_receipt.model_name != config["model_name"]
+        or not isinstance(expected_champion_version, str)
+    ):
+        raise ValueError("Rollback needs a receipt for the configured model and expected champion.")
+    return rollback_promotion(
+        promotion_receipt,
+        expected_current_version=expected_champion_version,
+        admission=ExclusiveAliasWriterAdmission(),
+        tracking_uri=tracking_uri,
+        registry_uri=registry_uri,
+    )
+
+
 def run_action(
     spark: Any,
     config: dict[str, Any],
@@ -623,20 +672,8 @@ def run_action(
     registry_uri = config.get("registry_uri", "databricks-uc")
     selection, policy = _workflow_policies(config)
     if action == "rollback":
-        if (
-            not isinstance(promotion_receipt, AliasChangeReceipt)
-            or promotion_receipt.model_name != config["model_name"]
-            or not isinstance(expected_champion_version, str)
-        ):
-            raise ValueError(
-                "Rollback needs a receipt for the configured model and expected champion."
-            )
-        return rollback_promotion(
-            promotion_receipt,
-            expected_current_version=expected_champion_version,
-            admission=ExclusiveAliasWriterAdmission(),
-            tracking_uri=tracking_uri,
-            registry_uri=registry_uri,
+        return _run_rollback_action(
+            config, promotion_receipt, expected_champion_version, tracking_uri, registry_uri
         )
     if action == "reject":
         return reject_local_candidate(

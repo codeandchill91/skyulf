@@ -48,14 +48,7 @@ class ChallengerLifecycle:
         if not isinstance(candidate, ResolvedModel) or candidate.name != self.model_name:
             raise ValueError("Registered candidate must belong to the lifecycle model.")
         _admission(self.admission, self.registry_uri)
-        fresh = resolve_model(
-            candidate.name,
-            version=candidate.version,
-            tracking_uri=self.tracking_uri,
-            registry_uri=self.registry_uri,
-        )
-        if fresh.digest != candidate.digest or not candidate.digest:
-            raise ValueError("Candidate artifact digest changed before nomination.")
+        _verify_nomination_digest(candidate, self.tracking_uri, self.registry_uri)
         client = _make_client(_require_mlflow(), self.tracking_uri, self.registry_uri)
         with self.admission.hold(alias_resource_id(candidate.name)):
             _assert_not_rejected(client, candidate.name, candidate.version)
@@ -146,3 +139,17 @@ class ChallengerLifecycle:
                     "promotion_status": "not_promoted",
                 },
             )
+
+
+def _verify_nomination_digest(
+    candidate: ResolvedModel, tracking_uri: str | None, registry_uri: str | None
+) -> None:
+    """Resolve and verify the nominated artifact before acquiring alias admission."""
+    fresh = resolve_model(
+        candidate.name,
+        version=candidate.version,
+        tracking_uri=tracking_uri,
+        registry_uri=registry_uri,
+    )
+    if fresh.digest != candidate.digest or not candidate.digest:
+        raise ValueError("Candidate artifact digest changed before nomination.")

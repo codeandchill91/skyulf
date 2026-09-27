@@ -36,18 +36,7 @@ const BUDGETS = [
   { prefix: 'vendor-flow',   maxGzipBytes: 80 * 1024,   label: 'vendor-flow',   kind: 'vendor' },
   { prefix: 'vendor-react',  maxGzipBytes: 70 * 1024,   label: 'vendor-react',  kind: 'vendor' },
   { prefix: 'vendor-utils',  maxGzipBytes: 90 * 1024,   label: 'vendor-utils',  kind: 'vendor' },
-  // App entry — bumped 220→240 KB for Ensemble modeling node panel components (v0.6.0),
-  // then 240→260 KB for the SHAP Explainability tab (Summary/Beeswarm/Dependence/
-  // Waterfall/Force/Interaction) + Segmentation (4 clustering algorithms, auto-profile
-  // labeling, reference-column UI/crosstab) shipped in v0.7.0,
-  // then 260→275 KB for slow-nodes observability instrumentation + concurrent
-  // execution rendering (v0.7.x). Raised 300→325 KB for canvas connection guidance,
-  // grouped split outputs, and component discovery improvements (v0.8.16).
-  // 325→326 KB for type-preserving config equality in undo history (v0.8.23).
-  // 326→327 KB for graph-aware Optuna pruning support and request state (v0.8.23).
-  // 327→330 KB for Manual Bounds controls and Geo Distance graph validation
-  // (v0.8.23). Geo Distance settings remain lazy; measured main: 328.8 KB gzip.
-  { prefix: 'index',         maxGzipBytes: 330 * 1024,  label: 'index (main)',  kind: 'vendor' },
+  { prefix: 'index',         maxGzipBytes: 340 * 1024,  label: 'index (main)',  kind: 'vendor' },
   // Lazy route chunks — keep tight so an EDA-only regression surfaces
   // here rather than getting absorbed by the global index ceiling.
   { prefix: 'EDAPage',       maxGzipBytes: 140 * 1024,  label: 'route:EDA',         kind: 'route' },

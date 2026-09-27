@@ -49,6 +49,25 @@ def predict_spark(
     the caller's session separately; this function never changes that setting.
     Estimator pickle payloads must come from a trusted producer.
     """
+    _validate_execution(frame_spec, options, mode)
+    _validate_bundle(bundle, options)
+    manifest = bundle.manifest
+    if manifest.input_stage != "raw":
+        raise ValueError(f"{mode} currently requires a raw input_stage bundle.")
+    native = _native(frame)
+    if native.isStreaming:
+        raise UnsupportedExecutionError(
+            "inference", "predict", "spark", "Streaming inference is not supported."
+        )
+    _validate_names_and_keys(native, manifest, frame_spec)
+    selected = _select_input(native, manifest, frame_spec, mode)
+    if mode == "python_pipeline":
+        return _predict_python_pipeline(native, selected, bundle, frame_spec, options)
+    return _predict_native_features(native, selected, bundle, frame_spec, options)
+
+
+def _validate_execution(frame_spec: FrameSpec, options: ExecutionOptions, mode: str) -> None:
+    """Validate the requested Spark inference context before inspecting bundle payloads."""
     if not isinstance(frame_spec, FrameSpec):
         raise TypeError("frame_spec must be FrameSpec.")
     if not isinstance(options, ExecutionOptions) or options.engine != "spark":
@@ -62,16 +81,10 @@ def predict_spark(
             "spark",
             "Only mode='native_features' or mode='python_pipeline' is implemented.",
         )
-    _validate_bundle(bundle, options)
-    manifest = bundle.manifest
-    if manifest.input_stage != "raw":
-        raise ValueError(f"{mode} currently requires a raw input_stage bundle.")
-    native = _native(frame)
-    if native.isStreaming:
-        raise UnsupportedExecutionError(
-            "inference", "predict", "spark", "Streaming inference is not supported."
-        )
-    _validate_names_and_keys(native, manifest, frame_spec)
+
+
+def _select_input(native: Any, manifest: BundleManifest, frame_spec: FrameSpec, mode: str) -> Any:
+    """Validate model input positions before projecting worker keys and raw features."""
     input_names = {column.name for column in manifest.input_schema}
     raw = native.select(*[_column(native, name) for name in native.columns if name in input_names])
     _validate_frame(raw, manifest.input_schema, "bundle input")
@@ -81,24 +94,45 @@ def predict_spark(
         if mode == "python_pipeline"
         else tuple(frame_spec.record_key_columns) + tuple(raw.columns)
     )
-    selected = native.select(*[_column(native, name) for name in selected_names])
-    if mode == "python_pipeline":
-        _validate_python_input_transport(native, manifest)
-        engineer = FeatureEngineer.from_state(
-            bundle.feature_state,
-            execution_options=ExecutionOptions("pandas", state_max_bytes=options.state_max_bytes),
-        )
-        _validate_python_pipeline(engineer)
-        _validate_keys(native, frame_spec)
-        worker = _python_pipeline_prediction_iterator(
-            bundle.feature_state,
-            bundle.model_payload,
-            manifest,
-            frame_spec.record_key_columns,
-            options.python_batch_rows,
-            options.state_max_bytes,
-        )
-        return selected.mapInPandas(worker, schema=_prediction_schema(native, manifest, frame_spec))
+    return native.select(*[_column(native, name) for name in selected_names])
+
+
+def _predict_python_pipeline(
+    native: Any,
+    selected: Any,
+    bundle: InferenceBundle,
+    frame_spec: FrameSpec,
+    options: ExecutionOptions,
+) -> Any:
+    """Validate worker-local FE and key transport before distributing frozen payloads."""
+    manifest = bundle.manifest
+    _validate_python_input_transport(native, manifest)
+    engineer = FeatureEngineer.from_state(
+        bundle.feature_state,
+        execution_options=ExecutionOptions("pandas", state_max_bytes=options.state_max_bytes),
+    )
+    _validate_python_pipeline(engineer)
+    _validate_keys(native, frame_spec)
+    worker = _python_pipeline_prediction_iterator(
+        bundle.feature_state,
+        bundle.model_payload,
+        manifest,
+        frame_spec.record_key_columns,
+        options.python_batch_rows,
+        options.state_max_bytes,
+    )
+    return selected.mapInPandas(worker, schema=_prediction_schema(native, manifest, frame_spec))
+
+
+def _predict_native_features(
+    native: Any,
+    selected: Any,
+    bundle: InferenceBundle,
+    frame_spec: FrameSpec,
+    options: ExecutionOptions,
+) -> Any:
+    """Preview native FE schemas, transform rows and distribute model prediction."""
+    manifest = bundle.manifest
     engineer = FeatureEngineer.from_state(
         bundle.feature_state, execution_options=options, frame_spec=frame_spec
     )
@@ -272,6 +306,11 @@ def _validate_names_and_keys(frame: Any, manifest: BundleManifest, spec: FrameSp
         raise ValueError("Input and prediction output columns collide.")
     if len(raw) != len(manifest.input_schema) or len(features) != len(manifest.feature_order):
         raise ValueError("Duplicate Spark feature names in bundle schema.")
+    _validate_key_types(frame, spec)
+
+
+def _validate_key_types(frame: Any, spec: FrameSpec) -> None:
+    """Require all declared record keys and primitive Arrow-compatible key types."""
     missing = set(spec.record_key_columns).difference(frame.columns)
     if missing:
         raise ValueError(f"Missing Spark record_key_columns: {sorted(missing)}")

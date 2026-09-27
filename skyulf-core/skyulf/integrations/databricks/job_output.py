@@ -137,6 +137,70 @@ def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
         if isinstance(value, (str, int, float, bool)) and not key.endswith(("sha256", "digest"))
     ]
     sections = [f"<h2>{_text(titles.get(phase, phase))}</h2>", _table(("Result", "Value"), rows)]
+    _append_training_output(sections, payload)
+    candidate = payload.get("candidate", payload)
+    if "candidate" in payload:
+        sections.append(
+            f"<p><strong>Candidate:</strong> {_text(candidate.get('model_name', ''))} "
+            f"v{_text(candidate.get('model_version', ''))}</p>"
+        )
+    sections.extend(_comparison_summary(candidate))
+    receipt = payload.get("alias_change") or payload.get("result") or {}
+    if phase == "operator" and receipt.get("model_name"):
+        sections.append(f"<p><strong>Model:</strong> {_text(receipt['model_name'])}</p>")
+    sections.extend(_receipt_summary(receipt))
+    _append_lifecycle_actions(sections, phase, payload)
+    raw = json.dumps(payload, indent=2, default=str, allow_nan=False)
+    sections.append(
+        f"<details><summary>Technical details (JSON)</summary><pre>{_text(raw)}</pre></details>"
+    )
+    return '<div style="font-family:system-ui;line-height:1.5">' + "".join(sections) + "</div>"
+
+
+def render_bundle_output(payload: dict[str, Any]) -> str:
+    """Present lifecycle, comparison, scoring and next steps with raw JSON in a disclosure.
+
+    The report describes only this task's completed work. A handoff request
+    does not imply success of the separate score job. No-op manifests describe
+    the previous prediction write, not the model selected by the current run.
+    """
+    action = payload["action"]
+    result = payload["result"]
+    candidate = result.get("candidate", result)
+    receipt = result.get("alias_change") or result
+    sections = [f"<h2>{_text(action.replace('_', ' ').title())} completed</h2>"]
+    sections.extend(_receipt_summary(receipt))
+    name = candidate.get("model_name") or receipt.get("model_name")
+    if name:
+        sections.append(f"<p><strong>Model:</strong> {_text(name)}</p>")
+    if action.startswith("train"):
+        sections.append(
+            f"<p><strong>Candidate version:</strong> {_text(candidate.get('model_version'))}</p>"
+        )
+        sections.extend(_comparison_summary(candidate))
+    if action == "score":
+        _append_scoring_output(sections, result)
+    elif payload["score_requested"]:
+        sections.append("<p>Scoring requested. Check the child score run for its result.</p>")
+    else:
+        sections.append("<p>This action did not request scoring.</p>")
+    _append_operator_options(sections, payload, receipt)
+    raw = json.dumps(payload, indent=2, default=str, allow_nan=False)
+    sections.append(
+        f"<details><summary>Technical details (JSON)</summary><pre>{_text(raw)}</pre></details>"
+    )
+    return (
+        '<div style="font-family:system-ui;max-width:1000px;line-height:1.5">'
+        "<style>td,th{padding:8px;text-align:left;vertical-align:top;"
+        "border-bottom:1px solid #ddd;overflow-wrap:anywhere}table{border-collapse:collapse;"
+        "width:100%}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>"
+        + "".join(sections)
+        + "</div>"
+    )
+
+
+def _append_training_output(sections: list[str], payload: dict[str, Any]) -> None:
+    """Render measured training metrics, tuning evidence and optional explanations."""
     metrics = payload.get("metrics")
     if isinstance(metrics, dict):
         sections.append(_table(("Metric", "Value"), list(metrics.items())))
@@ -167,17 +231,10 @@ def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
     if isinstance(explanation, dict):
         sections.append("<h3>Model explanations</h3>")
         sections.append(_table(("Result", "Value"), list(explanation.items())))
-    candidate = payload.get("candidate", payload)
-    if "candidate" in payload:
-        sections.append(
-            f"<p><strong>Candidate:</strong> {_text(candidate.get('model_name', ''))} "
-            f"v{_text(candidate.get('model_version', ''))}</p>"
-        )
-    sections.extend(_comparison_summary(candidate))
-    receipt = payload.get("alias_change") or payload.get("result") or {}
-    if phase == "operator" and receipt.get("model_name"):
-        sections.append(f"<p><strong>Model:</strong> {_text(receipt['model_name'])}</p>")
-    sections.extend(_receipt_summary(receipt))
+
+
+def _append_lifecycle_actions(sections: list[str], phase: str, payload: dict[str, Any]) -> None:
+    """Explain unchanged aliases and point operators to the final report."""
     if phase in {"decide", "compare_decide"} and not payload.get("alias_change"):
         sections.append(
             "<p>Awaiting manual review. Champion is unchanged.</p>"
@@ -189,72 +246,49 @@ def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
             "<p>Open <strong>finalize_and_report</strong> for the final decision "
             "and operator actions.</p>"
         )
-    raw = json.dumps(payload, indent=2, default=str, allow_nan=False)
+
+
+def _append_scoring_output(sections: list[str], result: dict[str, Any]) -> None:
+    """Distinguish this run's scoring result from a previous no-op manifest."""
+    if result.get("selected_model_version"):
+        sections.append(
+            "<p><strong>Selected model for this run:</strong> "
+            f"{_text(result.get('selected_model_name'))} "
+            f"v{_text(result['selected_model_version'])}</p>"
+        )
+    noop = result.get("noop", False)
     sections.append(
-        f"<details><summary>Technical details (JSON)</summary><pre>{_text(raw)}</pre></details>"
+        "<p><strong>No new predictions written.</strong></p>"
+        if noop
+        else "<p><strong>Prediction write completed.</strong></p>"
     )
-    return '<div style="font-family:system-ui;line-height:1.5">' + "".join(sections) + "</div>"
+    sections.append(
+        _table(
+            ("Result", "Value"),
+            [
+                (label, result[key])
+                for key, label in (
+                    ("input_count", "Input rows"),
+                    ("output_count", "Output rows"),
+                    ("commit_version", "Prediction table Delta version"),
+                )
+                if key in result
+            ],
+        )
+    )
+    manifest = result.get("manifest", {})
+    if manifest:
+        label = "Model recorded by the previous write" if noop else "Prediction model"
+        sections.append(
+            f"<p><strong>{label}:</strong> {_text(manifest.get('model_name'))} "
+            f"v{_text(manifest.get('model_version'))}</p>"
+        )
 
 
-def render_bundle_output(payload: dict[str, Any]) -> str:
-    """Present lifecycle, comparison, scoring and next steps with raw JSON in a disclosure.
-
-    The report describes only this task's completed work. A handoff request
-    does not imply success of the separate score job. No-op manifests describe
-    the previous prediction write, not the model selected by the current run.
-    """
-    action = payload["action"]
-    result = payload["result"]
-    candidate = result.get("candidate", result)
-    receipt = result.get("alias_change") or result
-    sections = [f"<h2>{_text(action.replace('_', ' ').title())} completed</h2>"]
-    sections.extend(_receipt_summary(receipt))
-    name = candidate.get("model_name") or receipt.get("model_name")
-    if name:
-        sections.append(f"<p><strong>Model:</strong> {_text(name)}</p>")
-    if action.startswith("train"):
-        sections.append(
-            f"<p><strong>Candidate version:</strong> {_text(candidate.get('model_version'))}</p>"
-        )
-        sections.extend(_comparison_summary(candidate))
-    if action == "score":
-        if result.get("selected_model_version"):
-            sections.append(
-                "<p><strong>Selected model for this run:</strong> "
-                f"{_text(result.get('selected_model_name'))} "
-                f"v{_text(result['selected_model_version'])}</p>"
-            )
-        noop = result.get("noop", False)
-        sections.append(
-            "<p><strong>No new predictions written.</strong></p>"
-            if noop
-            else "<p><strong>Prediction write completed.</strong></p>"
-        )
-        sections.append(
-            _table(
-                ("Result", "Value"),
-                [
-                    (label, result[key])
-                    for key, label in (
-                        ("input_count", "Input rows"),
-                        ("output_count", "Output rows"),
-                        ("commit_version", "Prediction table Delta version"),
-                    )
-                    if key in result
-                ],
-            )
-        )
-        manifest = result.get("manifest", {})
-        if manifest:
-            label = "Model recorded by the previous write" if noop else "Prediction model"
-            sections.append(
-                f"<p><strong>{label}:</strong> {_text(manifest.get('model_name'))} "
-                f"v{_text(manifest.get('model_version'))}</p>"
-            )
-    elif payload["score_requested"]:
-        sections.append("<p>Scoring requested. Check the child score run for its result.</p>")
-    else:
-        sections.append("<p>This action did not request scoring.</p>")
+def _append_operator_options(
+    sections: list[str], payload: dict[str, Any], receipt: dict[str, Any]
+) -> None:
+    """Render explicit next actions and the guarded rollback target."""
     for next_action, parameters in payload.get("next_actions", {}).items():
         rollback = next_action == "rollback"
         if rollback:
@@ -290,15 +324,3 @@ def render_bundle_output(payload: dict[str, Any]) -> str:
         sections.append(_table(("Parameter", "Value"), rows))
         if rollback:
             sections.append("</details>")
-    raw = json.dumps(payload, indent=2, default=str, allow_nan=False)
-    sections.append(
-        f"<details><summary>Technical details (JSON)</summary><pre>{_text(raw)}</pre></details>"
-    )
-    return (
-        '<div style="font-family:system-ui;max-width:1000px;line-height:1.5">'
-        "<style>td,th{padding:8px;text-align:left;vertical-align:top;"
-        "border-bottom:1px solid #ddd;overflow-wrap:anywhere}table{border-collapse:collapse;"
-        "width:100%}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>"
-        + "".join(sections)
-        + "</div>"
-    )

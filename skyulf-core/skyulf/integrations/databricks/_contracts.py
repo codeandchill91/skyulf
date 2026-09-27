@@ -64,40 +64,9 @@ class BatchSpec:
 
     def __post_init__(self) -> None:
         """Reject ambiguity before any Spark action or table modification."""
-        for name in ("period_start", "period_end", "as_of"):
-            value = getattr(self, name)
-            if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-                raise ValueError(f"{name} must be timezone-aware.")
-            # Reject nonexistent local times; fold explicitly resolves ambiguous times.
-            if value.astimezone(UTC).astimezone(value.tzinfo).replace(tzinfo=None) != value.replace(
-                tzinfo=None
-            ):
-                raise ValueError(f"{name} is not a valid local instant.")
-        if self.period_start_utc >= self.period_end_utc:
-            raise ValueError("period_start must precede period_end.")
-        table_name(self.output_table)
-        column_name(self.period_column)
-        if type(self.record_key_columns) is not tuple or not self.record_key_columns:
-            raise ValueError("record_key_columns must be a nonempty tuple.")
-        for key in self.record_key_columns:
-            column_name(key)
-        names = [key.lower() for key in self.record_key_columns]
-        if len(set(names)) != len(names) or self.period_column.lower() in names:
-            raise ValueError("record_key_columns and period_column must be distinct.")
-        if any(
-            name in PREDICTION_METADATA_COLUMNS for name in (*names, self.period_column.lower())
-        ):
-            raise ValueError(
-                "record_key_columns and period_column collide with prediction metadata."
-            )
-        for name in ("model_name", "code_version", "run_id"):
-            value = getattr(self, name)
-            if type(value) is not str or not value.strip() or len(value) > 512:
-                raise ValueError(f"{name} must be a nonempty string of at most 512 characters.")
-        if type(self.model_version) is not str or not re.fullmatch(
-            r"[1-9][0-9]*", self.model_version
-        ):
-            raise ValueError("model_version must be a concrete positive version, not an alias.")
+        _validate_batch_period(self)
+        _validate_batch_columns(self)
+        _validate_batch_model_identity(self)
         for name in ("source_version", "expected_target_version"):
             value = getattr(self, name)
             if type(value) is not int or value < 0:
@@ -143,3 +112,43 @@ class BatchResult:
     commit_version: int
     manifest: dict[str, Any]
     replayed: bool = False
+
+
+def _validate_batch_period(spec: BatchSpec) -> None:
+    """Validate aware period instants and their chronological order."""
+    for name in ("period_start", "period_end", "as_of"):
+        value = getattr(spec, name)
+        if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{name} must be timezone-aware.")
+        # Reject nonexistent local times; fold explicitly resolves ambiguous times.
+        if value.astimezone(UTC).astimezone(value.tzinfo).replace(tzinfo=None) != value.replace(
+            tzinfo=None
+        ):
+            raise ValueError(f"{name} is not a valid local instant.")
+    if spec.period_start_utc >= spec.period_end_utc:
+        raise ValueError("period_start must precede period_end.")
+
+
+def _validate_batch_columns(spec: BatchSpec) -> None:
+    """Validate target identifiers and distinct control columns."""
+    table_name(spec.output_table)
+    column_name(spec.period_column)
+    if type(spec.record_key_columns) is not tuple or not spec.record_key_columns:
+        raise ValueError("record_key_columns must be a nonempty tuple.")
+    for key in spec.record_key_columns:
+        column_name(key)
+    names = [key.lower() for key in spec.record_key_columns]
+    if len(set(names)) != len(names) or spec.period_column.lower() in names:
+        raise ValueError("record_key_columns and period_column must be distinct.")
+    if any(name in PREDICTION_METADATA_COLUMNS for name in (*names, spec.period_column.lower())):
+        raise ValueError("record_key_columns and period_column collide with prediction metadata.")
+
+
+def _validate_batch_model_identity(spec: BatchSpec) -> None:
+    """Validate bounded model identity strings and the concrete model version."""
+    for name in ("model_name", "code_version", "run_id"):
+        value = getattr(spec, name)
+        if type(value) is not str or not value.strip() or len(value) > 512:
+            raise ValueError(f"{name} must be a nonempty string of at most 512 characters.")
+    if type(spec.model_version) is not str or not re.fullmatch(r"[1-9][0-9]*", spec.model_version):
+        raise ValueError("model_version must be a concrete positive version, not an alias.")

@@ -84,6 +84,12 @@ def _config(node: str, raw: Any, state: dict) -> dict[str, Any]:
     )
     params = {**defaults, **params}
     keys = ("strategy",) if node == "SimpleImputer" else ("with_mean", "with_std")
+    _validate_config(node, params, state, keys)
+    return params
+
+
+def _validate_config(node: str, params: dict, state: dict, keys: tuple[str, ...]) -> None:
+    """Check resolved settings against learned state and supported node options."""
     for key in keys:
         if state and (type(params[key]) is not type(state[key]) or params[key] != state[key]):
             raise ValueError("Portable config disagrees with fitted state.")
@@ -91,7 +97,6 @@ def _config(node: str, raw: Any, state: dict) -> dict[str, Any]:
         raise ValueError("Unsupported portable SimpleImputer strategy.")
     if node == "StandardScaler" and any(type(params[key]) is not bool for key in keys):
         raise ValueError("Scaler flags must be booleans.")
-    return params
 
 
 def _validate_envelope(document: Any) -> None:

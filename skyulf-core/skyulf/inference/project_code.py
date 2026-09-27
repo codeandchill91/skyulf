@@ -64,6 +64,25 @@ def custom_step(
     must live in the same source file. Pre-split use requires an explicit
     filter-only declaration; it is an assertion by trusted project code.
     """
+    _validate_custom_classes(calculator, applier)
+    if pre_split is not None:
+        _validate_pre_split(pre_split)
+    identity = f"{calculator.__module__}.{calculator.__qualname__}.{applier.__qualname__}"
+    try:
+        registered = NodeRegistry.get_calculator(identity)
+    except ValueError:
+        NodeRegistry.register(identity, applier)(calculator)
+    else:
+        if registered is not calculator or NodeRegistry.get_applier(identity) is not applier:
+            raise ValueError("Custom step identity conflicts with an existing registration.")
+    step = {"name": name, "transformer": identity, "params": {} if params is None else params}
+    if pre_split is not None:
+        step["pre_split"] = deepcopy(pre_split)
+    return step
+
+
+def _validate_custom_classes(calculator: type, applier: type) -> None:
+    """Require project-owned top-level implementations of the fit/apply pair."""
     if (
         not isinstance(calculator, type)
         or not isinstance(applier, type)
@@ -77,40 +96,37 @@ def custom_step(
         getattr(applier, "apply", None)
     ):
         raise ValueError("Custom preprocessing needs calculator.fit and applier.apply.")
-    if pre_split is not None:
-        columns = pre_split.get("required_columns") if type(pre_split) is dict else None
-        if (
-            type(pre_split) is not dict
-            or set(pre_split) != {"effect", "required_columns", "learns_from_data"}
-            or pre_split["effect"] != "filter"
-            or pre_split["learns_from_data"] is not False
-            or type(columns) is not list
-            or not columns
-            or any(
-                type(column) is not str
-                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", column)
-                or column.casefold().startswith("__skyulf_")
-                for column in columns
-            )
-            or len({column.casefold() for column in columns}) != len(columns)
-        ):
-            raise ValueError(
-                "Custom pre_split declaration requires effect='filter', distinct simple "
-                "required_columns, and learns_from_data=False; use ordinary custom "
-                "preprocessing for value changes."
-            )
-    identity = f"{calculator.__module__}.{calculator.__qualname__}.{applier.__qualname__}"
-    try:
-        registered = NodeRegistry.get_calculator(identity)
-    except ValueError:
-        NodeRegistry.register(identity, applier)(calculator)
-    else:
-        if registered is not calculator or NodeRegistry.get_applier(identity) is not applier:
-            raise ValueError("Custom step identity conflicts with an existing registration.")
-    step = {"name": name, "transformer": identity, "params": {} if params is None else params}
-    if pre_split is not None:
-        step["pre_split"] = deepcopy(pre_split)
-    return step
+
+
+def _validate_pre_split(pre_split: dict[str, Any]) -> None:
+    """Require an explicit filter-only declaration with valid required columns."""
+    columns = pre_split.get("required_columns") if type(pre_split) is dict else None
+    if (
+        type(pre_split) is not dict
+        or set(pre_split) != {"effect", "required_columns", "learns_from_data"}
+        or pre_split["effect"] != "filter"
+        or pre_split["learns_from_data"] is not False
+        or not _valid_required_columns(columns)
+    ):
+        raise ValueError(
+            "Custom pre_split declaration requires effect='filter', distinct simple "
+            "required_columns, and learns_from_data=False; use ordinary custom "
+            "preprocessing for value changes."
+        )
+
+
+def _valid_required_columns(columns: Any) -> bool:
+    """Recognize distinct simple column identifiers outside the reserved namespace."""
+    if type(columns) is not list or not columns:
+        return False
+    if any(
+        type(column) is not str
+        or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", column)
+        or column.casefold().startswith("__skyulf_")
+        for column in columns
+    ):
+        return False
+    return len({column.casefold() for column in columns}) == len(columns)
 
 
 def is_registered_project_step(identity: str) -> bool:

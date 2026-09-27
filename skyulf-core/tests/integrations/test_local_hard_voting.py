@@ -21,7 +21,6 @@ from skyulf.integrations.databricks.local_sdk import (
     OutputSink,
     preflight_local,
 )
-from skyulf.integrations.mlflow.local_model import SkyulfLocalPythonModel, _signature
 from skyulf.pipeline import SkyulfPipeline
 
 
@@ -68,12 +67,6 @@ def test_hard_voting_artifact_predicts_labels_and_evaluates_without_probabilitie
     )
     assert preflight_local(config, artifact=artifact).output_columns == ("prediction",)
 
-    signature = _signature(artifact)
-    assert [column.name for column in signature.outputs.inputs] == ["prediction"]
-    pyfunc = SkyulfLocalPythonModel()
-    pyfunc._artifact = artifact
-    assert pyfunc.predict(None, holdout[["x"]]).columns.tolist() == ["prediction"]
-
 
 def test_probability_capability_preserves_soft_voting_and_legacy_manifests(tmp_path):
     """Old manifest files load with the existing classifier probability contract."""
@@ -84,16 +77,27 @@ def test_probability_capability_preserves_soft_voting_and_legacy_manifests(tmp_p
         "probability_0",
         "probability_1",
     ]
-    assert [column.name for column in _signature(artifact).outputs.inputs] == [
-        "prediction",
-        "probability_0",
-        "probability_1",
-    ]
     metadata = path / "manifest.json"
     document = json.loads(metadata.read_text(encoding="utf-8"))
     document.pop("classification_probabilities")
     metadata.write_text(json.dumps(document), encoding="utf-8")
     assert load_local_pipeline(path).manifest.classification_probabilities is True
+
+
+@pytest.mark.parametrize("voting", ["hard", "soft"])
+def test_mlflow_voting_signature_matches_pyfunc_predictions(tmp_path, voting):
+    """Optional MLflow exposes only the probabilities supported by each voting mode."""
+    pytest.importorskip("mlflow")
+    from skyulf.integrations.mlflow.local_model import SkyulfLocalPythonModel, _signature
+
+    _, artifact, holdout = _fit(tmp_path, voting=voting)
+    expected = ["prediction"]
+    if voting == "soft":
+        expected += ["probability_0", "probability_1"]
+    assert [column.name for column in _signature(artifact).outputs.inputs] == expected
+    pyfunc = SkyulfLocalPythonModel()
+    pyfunc._artifact = artifact
+    assert pyfunc.predict(None, holdout[["x"]]).columns.tolist() == expected
 
 
 def test_probability_capability_is_checked_against_fitted_model(tmp_path):

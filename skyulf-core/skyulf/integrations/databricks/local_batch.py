@@ -48,23 +48,8 @@ class LocalSourceSpec:
         table_name(self.table)
         if type(self.version) is not int or self.version < 0:
             raise ValueError("version must be a nonnegative Delta snapshot version.")
-        for name in ("period_start", "period_end"):
-            value = getattr(self, name)
-            if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-                raise ValueError(f"{name} must be timezone-aware.")
-            if value.astimezone(UTC).astimezone(value.tzinfo).replace(tzinfo=None) != value.replace(
-                tzinfo=None
-            ):
-                raise ValueError(f"{name} is not a valid local instant.")
-        if self.period_start.astimezone(UTC) >= self.period_end.astimezone(UTC):
-            raise ValueError("period_start must precede period_end.")
-        for name in (*self.record_key_columns, *self.input_columns, self.period_column):
-            column_name(name)
-        if not self.record_key_columns or not self.input_columns:
-            raise ValueError("record_key_columns and input_columns must be nonempty.")
-        names = [*self.record_key_columns, *self.input_columns, self.period_column]
-        if len({name.lower() for name in names}) != len(names):
-            raise ValueError("Row keys, input columns and period column must be distinct.")
+        _validate_source_period(self)
+        _validate_source_columns(self)
         if type(self.max_rows) is not int or self.max_rows <= 0:
             raise ValueError("max_rows must be positive.")
         if type(self.max_bytes) is not int or self.max_bytes <= 0:
@@ -108,16 +93,7 @@ def fit_local_workflow(
         raise ValueError("max_rows must be positive.")
     if type(max_bytes) is not int or max_bytes <= 0:
         raise ValueError("max_bytes must be positive.")
-    frames = (data.train, data.test, data.validation)
-    if any(
-        frame is not None and not isinstance(frame, pd.DataFrame | pl.DataFrame) for frame in frames
-    ):
-        raise TypeError("Training splits must be pandas or Polars DataFrames.")
-    present = [frame for frame in frames if isinstance(frame, pd.DataFrame | pl.DataFrame)]
-    if sum(len(frame) for frame in present) > max_rows:
-        raise ValueError("Training input exceeds max_rows.")
-    if sum(_frame_bytes(frame) for frame in present) > max_bytes:
-        raise ValueError("Training input exceeds max_bytes.")
+    _validate_training_frames(data, max_rows, max_bytes)
     pipeline = SkyulfPipeline(config)
     pipeline.fit(data, target_column=target_column)
     save_local_pipeline(pipeline, artifact_path)
@@ -162,20 +138,7 @@ def score_local_source(
     spark: Any, spec: LocalSourceSpec, prepared: PreparedLocalWorkflow
 ) -> LocalScoreResult:
     """Score one pinned period without refitting FE or writing a Delta table."""
-    if not isinstance(prepared, PreparedLocalWorkflow):
-        raise TypeError("prepared must be a PreparedLocalWorkflow.")
-    source = prepared.config.source
-    if source.kind != "uc_table" or source.table != spec.table or source.version != spec.version:
-        raise ValueError("Prepared source must match the pinned Delta table and version.")
-    if spec.max_rows > source.max_rows or spec.max_bytes > source.max_bytes:
-        raise ValueError("Source budget exceeds the prepared workflow budget.")
-    expected = (
-        prepared.artifact.manifest.input_columns
-        if isinstance(prepared.artifact, LocalPipelineArtifact)
-        else tuple(column.name for column in prepared.artifact.manifest.input_schema)
-    )
-    if spec.input_columns != expected:
-        raise ValueError("Source inputs must match the saved model's raw column order.")
+    _validate_scoring_source(spec, prepared)
     frame = read_local_source(spark, spec)
     predictions = (
         pd.DataFrame(columns=pd.Index(prepared.preflight.output_columns))
@@ -204,3 +167,60 @@ def score_local_source(
         "row_count": len(result),
     }
     return LocalScoreResult(result, diagnostics)
+
+
+def _validate_source_period(spec: LocalSourceSpec) -> None:
+    """Validate period instants and ordering before column and budget checks."""
+    for name in ("period_start", "period_end"):
+        value = getattr(spec, name)
+        if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{name} must be timezone-aware.")
+        if value.astimezone(UTC).astimezone(value.tzinfo).replace(tzinfo=None) != value.replace(
+            tzinfo=None
+        ):
+            raise ValueError(f"{name} is not a valid local instant.")
+    if spec.period_start.astimezone(UTC) >= spec.period_end.astimezone(UTC):
+        raise ValueError("period_start must precede period_end.")
+
+
+def _validate_training_frames(data: SplitDataset, max_rows: int, max_bytes: int) -> None:
+    """Check supported split frames and aggregate read budgets before fitting."""
+    frames = (data.train, data.test, data.validation)
+    if any(
+        frame is not None and not isinstance(frame, pd.DataFrame | pl.DataFrame) for frame in frames
+    ):
+        raise TypeError("Training splits must be pandas or Polars DataFrames.")
+    present = [frame for frame in frames if isinstance(frame, pd.DataFrame | pl.DataFrame)]
+    if sum(len(frame) for frame in present) > max_rows:
+        raise ValueError("Training input exceeds max_rows.")
+    if sum(_frame_bytes(frame) for frame in present) > max_bytes:
+        raise ValueError("Training input exceeds max_bytes.")
+
+
+def _validate_scoring_source(spec: LocalSourceSpec, prepared: PreparedLocalWorkflow) -> None:
+    """Bind scoring to the prepared source, budgets and raw input column order."""
+    if not isinstance(prepared, PreparedLocalWorkflow):
+        raise TypeError("prepared must be a PreparedLocalWorkflow.")
+    source = prepared.config.source
+    if source.kind != "uc_table" or source.table != spec.table or source.version != spec.version:
+        raise ValueError("Prepared source must match the pinned Delta table and version.")
+    if spec.max_rows > source.max_rows or spec.max_bytes > source.max_bytes:
+        raise ValueError("Source budget exceeds the prepared workflow budget.")
+    expected = (
+        prepared.artifact.manifest.input_columns
+        if isinstance(prepared.artifact, LocalPipelineArtifact)
+        else tuple(column.name for column in prepared.artifact.manifest.input_schema)
+    )
+    if spec.input_columns != expected:
+        raise ValueError("Source inputs must match the saved model's raw column order.")
+
+
+def _validate_source_columns(spec: LocalSourceSpec) -> None:
+    """Require valid, nonempty and distinct row keys, inputs and period column."""
+    for name in (*spec.record_key_columns, *spec.input_columns, spec.period_column):
+        column_name(name)
+    if not spec.record_key_columns or not spec.input_columns:
+        raise ValueError("record_key_columns and input_columns must be nonempty.")
+    names = [*spec.record_key_columns, *spec.input_columns, spec.period_column]
+    if len({name.lower() for name in names}) != len(names):
+        raise ValueError("Row keys, input columns and period column must be distinct.")

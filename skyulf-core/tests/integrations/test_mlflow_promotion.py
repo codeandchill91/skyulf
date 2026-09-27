@@ -13,6 +13,9 @@ import pytest
 
 from skyulf.data.dataset import SplitDataset
 from skyulf.inference.local_pipeline import save_local_pipeline
+
+mlflow = pytest.importorskip("mlflow")
+
 from skyulf.integrations.mlflow.local_model import log_local_model
 from skyulf.integrations.mlflow.promotion import (
     AliasChangeReceipt,
@@ -38,8 +41,6 @@ from skyulf.integrations.mlflow.validation import (
     compare_registered_local_models,
 )
 from skyulf.pipeline import SkyulfPipeline
-
-mlflow = pytest.importorskip("mlflow")
 
 
 @pytest.fixture

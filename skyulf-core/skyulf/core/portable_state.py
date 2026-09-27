@@ -189,6 +189,11 @@ def _validate_imputer(params: dict[str, Any]) -> None:
         for value in params["fill_values"].values()
     ):
         raise ValueError("Imputer fill values must be scalars.")
+    _validate_missing_counts(params)
+
+
+def _validate_missing_counts(params: dict[str, Any]) -> None:
+    """Check nonnegative per-column counts and their recorded total."""
     counts = [*params["missing_counts"].values(), params["total_missing"]]
     if any(type(value) is not int or value < 0 for value in counts):
         raise ValueError("Missing counts must be nonnegative integers.")
@@ -256,11 +261,17 @@ def _unpack_scalar(kind: Any, value: Any) -> Any:
         if str(result) == value:
             return result
     if kind == "float" and type(value) is str:
-        result = {"nan": math.nan, "+inf": math.inf, "-inf": -math.inf}.get(value)
-        if result is None:
-            result = float.fromhex(value)
-        if _float_token(result) == value:
-            return result
+        return _unpack_float(value)
+    raise ValueError("Unknown or malformed portable scalar tag.")
+
+
+def _unpack_float(value: str) -> float:
+    """Decode a canonical finite or explicitly tagged non-finite floating value."""
+    result = {"nan": math.nan, "+inf": math.inf, "-inf": -math.inf}.get(value)
+    if result is None:
+        result = float.fromhex(value)
+    if _float_token(result) == value:
+        return result
     raise ValueError("Unknown or malformed portable scalar tag.")
 
 

@@ -61,19 +61,8 @@ def _json_value(value: Any) -> Any:
     raise ValueError("Tuning evidence contains a non-JSON value.")
 
 
-def tuning_evidence(artifact: LocalPipelineArtifact) -> dict[str, Any] | None:
-    """Return the fitted tuning result and effective search recipe as JSON-safe evidence."""
-    config = artifact.pipeline.config
-    modeling = config.get("modeling", {})
-    if modeling.get("type") != "hyperparameter_tuner":
-        return None
-    estimator = artifact.pipeline.model_estimator
-    fitted = estimator.model if estimator is not None else None
-    if not isinstance(fitted, tuple) or len(fitted) != 2 or not isinstance(fitted[1], TuningResult):
-        raise ValueError("Fitted search artifact lacks a Core TuningResult.")
-    result = fitted[1]
-    if not math.isfinite(result.best_score):
-        raise ValueError("Fitted search has no finite best score.")
+def _trial_evidence(result: TuningResult) -> list[dict[str, Any]]:
+    """Normalize failed trial scores without allowing nonfinite JSON numbers."""
     trials = []
     for trial in result.trials:
         score = trial.get("score")
@@ -89,6 +78,23 @@ def tuning_evidence(artifact: LocalPipelineArtifact) -> dict[str, Any] | None:
                 "status": "completed" if finite else "failed",
             }
         )
+    return trials
+
+
+def tuning_evidence(artifact: LocalPipelineArtifact) -> dict[str, Any] | None:
+    """Return the fitted tuning result and effective search recipe as JSON-safe evidence."""
+    config = artifact.pipeline.config
+    modeling = config.get("modeling", {})
+    if modeling.get("type") != "hyperparameter_tuner":
+        return None
+    estimator = artifact.pipeline.model_estimator
+    fitted = estimator.model if estimator is not None else None
+    if not isinstance(fitted, tuple) or len(fitted) != 2 or not isinstance(fitted[1], TuningResult):
+        raise ValueError("Fitted search artifact lacks a Core TuningResult.")
+    result = fitted[1]
+    if not math.isfinite(result.best_score):
+        raise ValueError("Fitted search has no finite best score.")
+    trials = _trial_evidence(result)
     evidence = {
         "status": "completed",
         "modeling": _json_value(modeling),

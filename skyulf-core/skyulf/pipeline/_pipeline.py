@@ -368,10 +368,7 @@ class SkyulfPipeline:
         input_schema = None
         fitted_engine = None
         if self.model_estimator is not None:
-            raw_train = data.train if isinstance(data, SplitDataset) else data
-            raw_features = raw_train[0] if isinstance(raw_train, tuple) else raw_train
-            input_schema = SkyulfSchema.from_dataframe(raw_features).drop((target_column,))
-            fitted_engine = str(get_engine(raw_features).name)
+            input_schema, fitted_engine = self._fit_input_metadata(data, target_column)
 
         # 1. Feature Engineering
         logger.info("Starting Feature Engineering...")
@@ -396,51 +393,74 @@ class SkyulfPipeline:
 
         # 2. Modeling
         if self.model_estimator:
-            logger.info("Starting Model Training...")
-
-            # Ensure transformed_data is SplitDataset for modeling
-            if isinstance(transformed_data, SplitDataset):
-                dataset = transformed_data
-            else:
-                # If we only have a DataFrame, we can't really evaluate properly without a split
-                # But we can fit on it.
-                # Ideally, the user should provide a SplitDataset or use a Splitter node in preprocessing.
-                # If preprocessing didn't split, we wrap it.
-                engine = get_engine(transformed_data)
-                empty_df = engine.create_dataframe({})
-                dataset = SplitDataset(train=transformed_data, test=empty_df, validation=None)
-
-            # Observe the actual training representation before sklearn loses
-            # its column names. Schemas contain metadata only, never samples.
-            model_schema = SkyulfSchema.from_dataframe(extract_xy(dataset.train, target_column)[0])
-
-            # Fit the model
-            # Note: fit_predict updates self.model_estimator.model in-memory
-            if not is_tuning:
-                _ = self.model_estimator.fit_predict(
-                    dataset=dataset,
-                    target_column=target_column,
-                    config=cast(dict[str, Any], self.modeling_config),
-                )
-
-            # Evaluate
-            # We can run evaluation if we have test/validation sets
-            try:
-                eval_report = self.model_estimator.evaluate(
-                    dataset=dataset, target_column=target_column
-                )
-                metrics["modeling"] = eval_report
-            except Exception as e:  # noqa: BLE001 - evaluation failure is recorded as modeling_error; fit must continue
-                logger.warning(f"Evaluation failed: {e}")
-                metrics["modeling_error"] = str(e)
-
-            if self.model_estimator.model is not None and input_schema is not None:
-                self._inference_schemas = (input_schema, model_schema)
-                self._fitted_engine = fitted_engine
+            self._fit_model(
+                transformed_data, target_column, is_tuning, metrics, input_schema, fitted_engine
+            )
 
         self._fit_metrics = metrics
         self._target_column = target_column
         return metrics
+
+    @staticmethod
+    def _fit_input_metadata(data: Any, target_column: str) -> tuple[SkyulfSchema, str]:
+        """Record the training feature schema and execution engine before preprocessing."""
+        raw_train = data.train if isinstance(data, SplitDataset) else data
+        raw_features = raw_train[0] if isinstance(raw_train, tuple) else raw_train
+        schema = SkyulfSchema.from_dataframe(raw_features).drop((target_column,))
+        return schema, str(get_engine(raw_features).name)
+
+    def _fit_model(
+        self,
+        transformed_data: Any,
+        target_column: str,
+        is_tuning: bool,
+        metrics: dict[str, Any],
+        input_schema: SkyulfSchema | None,
+        fitted_engine: str | None,
+    ) -> None:
+        """Fit and evaluate the model before publishing successful inference metadata."""
+        assert self.model_estimator is not None
+        logger.info("Starting Model Training...")
+
+        # Ensure transformed_data is SplitDataset for modeling
+        if isinstance(transformed_data, SplitDataset):
+            dataset = transformed_data
+        else:
+            # If we only have a DataFrame, we can't really evaluate properly without a split
+            # But we can fit on it.
+            # Ideally, the user should provide a SplitDataset or use a Splitter node in preprocessing.
+            # If preprocessing didn't split, we wrap it.
+            engine = get_engine(transformed_data)
+            empty_df = engine.create_dataframe({})
+            dataset = SplitDataset(train=transformed_data, test=empty_df, validation=None)
+
+        # Observe the actual training representation before sklearn loses
+        # its column names. Schemas contain metadata only, never samples.
+        model_schema = SkyulfSchema.from_dataframe(extract_xy(dataset.train, target_column)[0])
+
+        # Fit the model
+        # Note: fit_predict updates self.model_estimator.model in-memory
+        if not is_tuning:
+            _ = self.model_estimator.fit_predict(
+                dataset=dataset,
+                target_column=target_column,
+                config=cast(dict[str, Any], self.modeling_config),
+            )
+
+        # Evaluate
+        # We can run evaluation if we have test/validation sets
+        try:
+            eval_report = self.model_estimator.evaluate(
+                dataset=dataset, target_column=target_column
+            )
+            metrics["modeling"] = eval_report
+        except Exception as e:  # noqa: BLE001 - evaluation failure is recorded as modeling_error; fit must continue
+            logger.warning(f"Evaluation failed: {e}")
+            metrics["modeling_error"] = str(e)
+
+        if self.model_estimator.model is not None and input_schema is not None:
+            self._inference_schemas = (input_schema, model_schema)
+            self._fitted_engine = fitted_engine
 
     def get_fitted_split(
         self,

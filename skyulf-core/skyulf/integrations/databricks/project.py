@@ -19,9 +19,7 @@ from .local_search import _bounded_space
 def _strict_json_value(value: Any) -> Any:
     """Copy only finite JSON values from trusted project hook output."""
     if type(value) is dict:
-        if any(type(key) is not str for key in value):
-            raise ValueError("ensemble.py must return a JSON object with string keys.")
-        return {key: _strict_json_value(item) for key, item in value.items()}
+        return _strict_json_object(value)
     if type(value) is list:
         return [_strict_json_value(item) for item in value]
     if value is None or type(value) in {str, bool, int}:
@@ -29,6 +27,13 @@ def _strict_json_value(value: Any) -> Any:
     if type(value) is float and math.isfinite(value):
         return value
     raise ValueError("ensemble.py must return finite JSON values.")
+
+
+def _strict_json_object(value: dict[Any, Any]) -> dict[str, Any]:
+    """Copy nested hook mappings while rejecting non-string JSON keys."""
+    if any(type(key) is not str for key in value):
+        raise ValueError("ensemble.py must return a JSON object with string keys.")
+    return {key: _strict_json_value(item) for key, item in value.items()}
 
 
 def _load_ensemble_hook(result: dict[str, Any], preprocessing_path: Path) -> None:

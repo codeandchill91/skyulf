@@ -960,6 +960,20 @@ class NodeRunnersMixin:
             if last_point.get("direction"):
                 metrics["iteration_direction"] = last_point["direction"]
 
+    @staticmethod
+    def _require_nested_fold_preprocessing(
+        tuning_params: dict[str, Any], refit_fallback: str | None
+    ) -> None:
+        """Reject nested evaluation when preprocessing cannot be refit within each fold."""
+        if (
+            tuning_params.get("cv_enabled", False)
+            and tuning_params.get("cv_type") == "nested_cv"
+            and refit_fallback is not None
+        ):
+            raise ValueError(
+                f"Nested CV requires fold-local preprocessing; cannot use {refit_fallback}."
+            )
+
     def _run_training_tuned(
         self,
         node: NodeConfig,
@@ -1016,14 +1030,7 @@ class NodeRunnersMixin:
         # Unsupported learned graphs fail closed. Explicit warn/ignore mode
         # permits fallback, recorded by the stable reason code in the metrics.
         fold_preprocessing, refit_fallback = self._resolve_fold_preprocessing(node, target_col)
-        if (
-            tuning_params.get("cv_enabled", False)
-            and tuning_params.get("cv_type") == "nested_cv"
-            and refit_fallback is not None
-        ):
-            raise ValueError(
-                f"Nested CV requires fold-local preprocessing; cannot use {refit_fallback}."
-            )
+        self._require_nested_fold_preprocessing(tuning_params, refit_fallback)
 
         # Audit telemetry (findings 2026-08-26 §3/B): record the input row
         # count of every per-fold fit/transform so the run can be audited

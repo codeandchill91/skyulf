@@ -201,36 +201,11 @@ def _read_challenger_history(client: Any, name: str) -> str | None:
             raise AliasConflictError("Challenger history alias lacks a controlled receipt.")
         return None
     try:
-        marker = json.loads(raw)
-        if (
-            not isinstance(marker, dict)
-            or not isinstance(marker.get("event_id"), str)
-            or not marker["event_id"]
-            or not isinstance(marker.get("version"), str)
-            or not marker["version"].isascii()
-            or not marker["version"].isdigit()
-        ):
-            raise ValueError
+        marker = _parse_history_marker(raw)
         tags = client.get_model_version(name, marker["version"]).tags or {}
         history = json.loads(tags[f"challenger_history_{marker['event_id']}"])
         event = _read_event(tags[_event_tag(marker["event_id"])])
-        if (
-            history["state"] != "committed"
-            or event["s"] != "committed"
-            or history["to_version"] != current
-            or event["k"] not in {"nomination", "challenger", "initial", "promotion", "rollback"}
-        ):
-            raise ValueError
-        if current is not None:
-            if event["k"] not in {"nomination", "challenger"} or event["p"] != current:
-                raise ValueError
-            if current in {
-                _read_optional_alias(client, name, _ALIAS),
-                _read_optional_alias(client, name, _CHALLENGER),
-            }:
-                raise ValueError
-        elif history["from_version"] != marker["version"]:
-            raise ValueError
+        _verify_history_transition(client, name, current, marker, history, event)
     except (TypeError, ValueError, KeyError) as exc:
         raise AliasConflictError(
             "Challenger history disagrees with its committed receipt."
@@ -308,23 +283,7 @@ def controlled_champion_version(
         if tags.get(_ACTIVE_TAG):
             raise AliasConflictError("Champion receipt exists without its alias.")
         return None
-    event_id = _active_marker(client, model_name, current)
-    if event_id is None:
-        raise AliasConflictError("Champion alias lacks a controlled committed receipt.")
-    try:
-        version_tags = client.get_model_version(model_name, current).tags or {}
-    except Exception as exc:  # noqa: BLE001 - registry transport boundary
-        raise _translate_error(exc, name=model_name, version=current) from exc
-    try:
-        event = _read_event(version_tags.get(_event_tag(event_id)))
-    except (TypeError, ValueError) as exc:
-        raise AliasConflictError("Champion receipt is malformed.") from exc
-    if (
-        not isinstance(event, dict)
-        or event.get("s") != "committed"
-        or event.get("k") not in ("initial", "promotion", "rollback")
-    ):
-        raise AliasConflictError("Champion lacks a committed lifecycle receipt.")
+    _verify_champion_receipt(client, model_name, current)
     return current
 
 
@@ -579,17 +538,7 @@ def _validated_report(
     """Re-evaluate the pinned candidate and return its comparison digest."""
     if not isinstance(report, ModelComparisonReport):
         raise TypeError("report must be a ModelComparisonReport.")
-    if expected_champion_version != report.champion_version or (
-        expected_champion_version is not None
-        and (
-            type(expected_champion_version) is not str
-            or not expected_champion_version.isascii()
-            or not expected_champion_version.isdigit()
-        )
-    ):
-        raise ValueError("Expected champion version must match the comparison report.")
-    if require_eligible and (not report.eligible or report.reason != "candidate_improved"):
-        raise ValueError("Comparison does not approve candidate promotion.")
+    _validate_report_approval(report, expected_champion_version, require_eligible)
     candidate = resolve_model(
         report.model_name,
         version=report.candidate_version,
@@ -687,15 +636,7 @@ def initialize_champion(
             comparison_sha256=digest,
             parent_event_id=None,
         )
-        challenger = _read_optional_alias(client, report.model_name, _CHALLENGER)
-        if challenger is not None and challenger != report.candidate_version:
-            raise AliasConflictError("A different challenger exists before initialization.")
-        updates: list[tuple[str, str | None, str | None]] = [
-            (_ALIAS, report.candidate_version, None)
-        ]
-        if challenger is not None:
-            _checked_challenger_event(client, report.model_name, challenger)
-            updates.append((_CHALLENGER, None, challenger))
+        updates = _initial_alias_updates(client, report)
         _commit_change(client, receipt, updates)
         return receipt
 
@@ -752,21 +693,7 @@ def stage_challenger(
                 else None
             ),
         )
-        passed = report.eligible
-        reason = {
-            "candidate_improved": "Improved over champion",
-            "insufficient_improvement": "No improvement over champion",
-            "quality_gate_failed": "Quality threshold not met",
-        }.get(report.reason, report.reason)
-        if report.reason == "insufficient_improvement" and (report.improvement or 0) > 0:
-            reason = "Improvement below required minimum"
-        if report.champion_version is None:
-            passed = report.quality_threshold is not None and quality_gates_pass(report)
-            reason = (
-                "First model passed quality threshold"
-                if passed
-                else "First model quality not approved"
-            )
+        passed, reason = _staging_decision(report)
         _commit_change(
             client,
             receipt,
@@ -914,46 +841,12 @@ def rollback_promotion(
         legacy = _verify_original_receipt(client, receipt)
         current = _read_alias(client, receipt.model_name)
         if current == receipt.prior_version:
-            event_id = _active_marker(client, receipt.model_name, current)
-            if event_id is None:
-                raise AliasConflictError("Rollback replay lacks a controlled receipt.")
-            reversal = AliasChangeReceipt(
-                event_id=event_id,
-                kind="rollback",
-                model_name=receipt.model_name,
-                alias=_ALIAS,
-                prior_version=receipt.new_version,
-                new_version=receipt.prior_version,
-                comparison_sha256=receipt.comparison_sha256,
-                parent_event_id=receipt.event_id,
-                previous_champion_version=receipt.previous_champion_version,
-            )
-            _verify_original_receipt(client, reversal)
-            if (
-                not legacy
-                and _read_optional_alias(client, receipt.model_name, _PREVIOUS)
-                != receipt.previous_champion_version
-            ):
-                raise AliasConflictError("Previous champion changed after rollback.")
-            challenger = _read_optional_alias(client, receipt.model_name, _CHALLENGER)
-            if challenger is not None:
-                _checked_challenger_event(client, receipt.model_name, challenger)
-                if challenger == current:
-                    raise AliasConflictError("Challenger conflicts with the restored champion.")
-            return reversal
+            return _replayed_rollback(client, receipt, current, legacy, receipt.prior_version)
         if current != expected_current_version:
             raise AliasConflictError("Champion alias differs from expected current version.")
         if _active_marker(client, receipt.model_name, current) != receipt.event_id:
             raise AliasConflictError("A newer promotion superseded this rollback receipt.")
-        challenger = _read_optional_alias(client, receipt.model_name, _CHALLENGER)
-        if challenger is not None:
-            _checked_challenger_event(client, receipt.model_name, challenger)
-            if challenger in {current, receipt.prior_version}:
-                raise AliasConflictError("Challenger conflicts with the rollback versions.")
-        if not legacy and (
-            _read_optional_alias(client, receipt.model_name, _PREVIOUS) != receipt.prior_version
-        ):
-            raise AliasConflictError("Previous champion alias differs from promotion receipt.")
+        _verify_rollback_roles(client, receipt, current, legacy)
         # The previous version must still exist before changing the alias.
         resolve_model(
             receipt.model_name,
@@ -979,3 +872,164 @@ def rollback_promotion(
             updates.append((_PREVIOUS, receipt.previous_champion_version, receipt.prior_version))
         _commit_change(client, reversal, updates)
         return reversal
+
+
+def _parse_history_marker(raw: str) -> dict[str, Any]:
+    """Decode a complete challenger history pointer before reading its version."""
+    marker = json.loads(raw)
+    if (
+        not isinstance(marker, dict)
+        or not isinstance(marker.get("event_id"), str)
+        or not marker["event_id"]
+        or not isinstance(marker.get("version"), str)
+        or not marker["version"].isascii()
+        or not marker["version"].isdigit()
+    ):
+        raise ValueError
+    return marker
+
+
+def _verify_history_transition(
+    client: Any,
+    name: str,
+    current: str | None,
+    marker: dict[str, Any],
+    history: dict[str, Any],
+    event: dict[str, Any],
+) -> None:
+    """Verify committed history evidence against current alias roles."""
+    if (
+        history["state"] != "committed"
+        or event["s"] != "committed"
+        or history["to_version"] != current
+        or event["k"] not in {"nomination", "challenger", "initial", "promotion", "rollback"}
+    ):
+        raise ValueError
+    if current is not None:
+        if event["k"] not in {"nomination", "challenger"} or event["p"] != current:
+            raise ValueError
+        if current in {
+            _read_optional_alias(client, name, _ALIAS),
+            _read_optional_alias(client, name, _CHALLENGER),
+        }:
+            raise ValueError
+    elif history["from_version"] != marker["version"]:
+        raise ValueError
+
+
+def _verify_champion_receipt(client: Any, model_name: str, current: str) -> None:
+    """Require the current champion to have a committed lifecycle receipt."""
+    event_id = _active_marker(client, model_name, current)
+    if event_id is None:
+        raise AliasConflictError("Champion alias lacks a controlled committed receipt.")
+    try:
+        version_tags = client.get_model_version(model_name, current).tags or {}
+    except Exception as exc:  # noqa: BLE001 - registry transport boundary
+        raise _translate_error(exc, name=model_name, version=current) from exc
+    try:
+        event = _read_event(version_tags.get(_event_tag(event_id)))
+    except (TypeError, ValueError) as exc:
+        raise AliasConflictError("Champion receipt is malformed.") from exc
+    if (
+        not isinstance(event, dict)
+        or event.get("s") != "committed"
+        or event.get("k") not in ("initial", "promotion", "rollback")
+    ):
+        raise AliasConflictError("Champion lacks a committed lifecycle receipt.")
+
+
+def _validate_report_approval(
+    report: ModelComparisonReport, expected_champion_version: str | None, require_eligible: bool
+) -> None:
+    """Check comparison identity and requested promotion approval before re-evaluation."""
+    if expected_champion_version != report.champion_version or (
+        expected_champion_version is not None
+        and (
+            type(expected_champion_version) is not str
+            or not expected_champion_version.isascii()
+            or not expected_champion_version.isdigit()
+        )
+    ):
+        raise ValueError("Expected champion version must match the comparison report.")
+    if require_eligible and (not report.eligible or report.reason != "candidate_improved"):
+        raise ValueError("Comparison does not approve candidate promotion.")
+
+
+def _initial_alias_updates(
+    client: Any, report: ModelComparisonReport
+) -> list[tuple[str, str | None, str | None]]:
+    """Check an existing contender and plan initial champion alias updates."""
+    challenger = _read_optional_alias(client, report.model_name, _CHALLENGER)
+    if challenger is not None and challenger != report.candidate_version:
+        raise AliasConflictError("A different challenger exists before initialization.")
+    updates: list[tuple[str, str | None, str | None]] = [(_ALIAS, report.candidate_version, None)]
+    if challenger is not None:
+        _checked_challenger_event(client, report.model_name, challenger)
+        updates.append((_CHALLENGER, None, challenger))
+    return updates
+
+
+def _staging_decision(report: ModelComparisonReport) -> tuple[bool, str]:
+    """Describe contender quality independently of committing the alias event."""
+    passed = report.eligible
+    reason = {
+        "candidate_improved": "Improved over champion",
+        "insufficient_improvement": "No improvement over champion",
+        "quality_gate_failed": "Quality threshold not met",
+    }.get(report.reason, report.reason)
+    if report.reason == "insufficient_improvement" and (report.improvement or 0) > 0:
+        reason = "Improvement below required minimum"
+    if report.champion_version is None:
+        passed = report.quality_threshold is not None and quality_gates_pass(report)
+        reason = (
+            "First model passed quality threshold" if passed else "First model quality not approved"
+        )
+    return passed, reason
+
+
+def _replayed_rollback(
+    client: Any, receipt: AliasChangeReceipt, current: str, legacy: bool, prior_version: str
+) -> AliasChangeReceipt:
+    """Verify a still-current rollback receipt and all related alias roles."""
+    event_id = _active_marker(client, receipt.model_name, current)
+    if event_id is None:
+        raise AliasConflictError("Rollback replay lacks a controlled receipt.")
+    reversal = AliasChangeReceipt(
+        event_id=event_id,
+        kind="rollback",
+        model_name=receipt.model_name,
+        alias=_ALIAS,
+        prior_version=receipt.new_version,
+        new_version=prior_version,
+        comparison_sha256=receipt.comparison_sha256,
+        parent_event_id=receipt.event_id,
+        previous_champion_version=receipt.previous_champion_version,
+    )
+    _verify_original_receipt(client, reversal)
+    if (
+        not legacy
+        and _read_optional_alias(client, receipt.model_name, _PREVIOUS)
+        != receipt.previous_champion_version
+    ):
+        raise AliasConflictError("Previous champion changed after rollback.")
+    challenger = _read_optional_alias(client, receipt.model_name, _CHALLENGER)
+    if challenger is not None:
+        _checked_challenger_event(client, receipt.model_name, challenger)
+        if challenger == current:
+            raise AliasConflictError("Challenger conflicts with the restored champion.")
+    return reversal
+
+
+def _verify_rollback_roles(
+    client: Any, receipt: AliasChangeReceipt, current: str, legacy: bool
+) -> None:
+    """Reject challenger or previous-champion conflicts before restoring a version."""
+    challenger = _read_optional_alias(client, receipt.model_name, _CHALLENGER)
+    if challenger is not None:
+        _checked_challenger_event(client, receipt.model_name, challenger)
+        if challenger in {current, receipt.prior_version}:
+            raise AliasConflictError("Challenger conflicts with the rollback versions.")
+    if not legacy and (
+        _read_optional_alias(client, receipt.model_name, _PREVIOUS) != receipt.prior_version
+    ):
+        raise AliasConflictError("Previous champion alias differs from promotion receipt.")

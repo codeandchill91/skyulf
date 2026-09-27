@@ -18,7 +18,7 @@ from .admission import BatchConflictError, PublishAdmission, validate_admission
 from .delta import DeltaPublishError, history, table_identity
 from .local_batch import _frame_bytes
 from .local_publish import _check_target, _scalar
-from .local_sdk import PreparedLocalWorkflow
+from .local_sdk import LocalWorkflowConfig, PreparedLocalWorkflow
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,39 +75,10 @@ def _validate_prepared(
     if not isinstance(prepared, PreparedLocalWorkflow):
         raise TypeError("prepared must be a PreparedLocalWorkflow.")
     config = prepared.config
-    if (
-        config.runtime != "databricks"
-        or config.source.kind != "uc_table"
-        or config.source.read_mode != "incremental"
-        or config.source.version is not None
-        or config.sink.kind != "uc_delta"
-        or not config.source.table
-        or not config.sink.table
-        or config.source.table == config.sink.table
-    ):
-        raise ValueError("Incremental scoring requires unpinned UC source and UC Delta sink.")
-    if (
-        config.model.kind != "local_pipeline"
-        or not config.model.name
-        or not config.model.version
-        or not prepared.preflight.ready
-        or not isinstance(prepared.artifact, LocalPipelineArtifact)
-        or prepared.preflight.model_version != config.model.version
-        or prepared.preflight.model_digest != prepared.artifact.manifest.pipeline_sha256
-    ):
-        raise ValueError("Incremental scoring requires a pinned, ready local pipeline model.")
-    if type(record_key_columns) is not tuple or not record_key_columns:
-        raise ValueError("record_key_columns must be a nonempty tuple.")
-    for name in record_key_columns:
-        column_name(name)
-    if period_column is not None:
-        column_name(period_column)
-    names = (*record_key_columns, *((period_column,) if period_column is not None else ()))
-    if len({name.lower() for name in names}) != len(names):
-        raise ValueError("record_key_columns and period_column must be distinct.")
-    if any(name.lower() in PREDICTION_METADATA_COLUMNS for name in names):
-        raise ValueError("record_key_columns and period_column collide with prediction metadata.")
-    inputs = prepared.artifact.manifest.input_columns
+    _validate_incremental_source(config)
+    artifact = _validate_incremental_model(prepared, config)
+    _validate_incremental_keys(record_key_columns, period_column)
+    inputs = artifact.manifest.input_columns
     if any(key in inputs for key in record_key_columns) or (
         period_column is not None and period_column in inputs
     ):
@@ -168,18 +139,10 @@ def run_incremental_local_batch(
     config = prepared.config
     source_table = config.source.table
     target_table = config.sink.table
-    assert source_table is not None and target_table is not None
-    source_id = table_identity(spark, source_table)
-    target_id = table_identity(spark, target_table)
-    if source_id == target_id:
-        raise ValueError("Source and prediction target must be different Delta tables.")
-    detail = spark.sql(f"DESCRIBE DETAIL {table_name(source_table)}").first()
-    properties = detail["properties"] or {}
-    if not any(
-        key.lower() == "delta.enablechangedatafeed" and str(value).lower() == "true"
-        for key, value in properties.items()
-    ):
-        raise ValueError("Source Delta Change Data Feed must be enabled before scoring.")
+    source_table, target_table, source_id, target_id = _incremental_table_ids(
+        spark, source_table, target_table
+    )
+    _require_incremental_change_feed(spark, source_table)
     functions = importlib.import_module("pyspark.sql.functions")
 
     with admission.hold(target_id):
@@ -190,22 +153,7 @@ def run_incremental_local_batch(
             raise BatchConflictError("Source or target table identity changed during admission.")
         target_latest = _latest(spark, target_table)
         previous = _last_receipt(target_latest, source_id, target_id)
-        if previous is None:
-            older_receipt = (
-                history(spark, target_table)
-                .where(
-                    functions.get_json_object("userMetadata", "$.skyulf_mode")
-                    == "incremental_append"
-                )
-                .limit(1)
-                .count()
-            )
-            if older_receipt:
-                raise BatchConflictError("Target changed outside the incremental receipt protocol.")
-            if spark.table(target_table).limit(1).count():
-                raise BatchConflictError(
-                    "Incremental bootstrap requires an empty target with no prior predictions."
-                )
+        _check_incremental_bootstrap(spark, target_table, previous, functions)
         prior_version = int(previous["source_end_version"]) if previous else None
         upper_version = int(_latest(spark, source_table)["version"])
         if prior_version is not None and upper_version < prior_version:
@@ -222,26 +170,9 @@ def run_incremental_local_batch(
                 config.model.name,
                 config.model.version,
             )
-        if prior_version is None:
-            selected = (
-                spark.read.format("delta").option("versionAsOf", upper_version).table(source_table)
-            )
-        else:
-            selected = (
-                spark.read.format("delta")
-                .option("readChangeFeed", "true")
-                .option("startingVersion", prior_version + 1)
-                .option("endingVersion", upper_version)
-                .table(source_table)
-            )
-            if selected.where(functions.col("_change_type") != "insert").limit(1).count():
-                raise ValueError("Source updates and deletes require an explicit rescore policy.")
-            selected = selected.where(functions.col("_change_type") == "insert")
-        if period_column is not None:
-            if selected.schema[period_column].dataType.typeName() != "timestamp":
-                raise ValueError("Source event time must be a Spark timestamp.")
-            if selected.where(functions.col(period_column).isNull()).limit(1).count():
-                raise ValueError("Source event time must not be null.")
+        selected = _select_incremental_rows(
+            spark, source_table, prior_version, upper_version, period_column, functions
+        )
         frame = _bounded_frame(
             selected,
             (*record_key_columns, *inputs),
@@ -265,35 +196,9 @@ def run_incremental_local_batch(
         output_names = _check_target(
             spark, selected, target, record_key_columns, period_column, prepared
         )
-        predicted = prepared.predict(frame.loc[:, list(inputs)])
-        if list(predicted.columns) != list(output_names) or len(predicted) != len(frame):
-            raise ValueError(
-                "Local prediction schema or row count differs from the model contract."
-            )
-        bridge_frame = pd.concat(
-            [
-                frame.loc[:, list(record_key_columns)].reset_index(drop=True),
-                predicted.reset_index(drop=True),
-            ],
-            axis=1,
+        bridge = _incremental_prediction_bridge(
+            spark, prepared, frame, inputs, output_names, record_key_columns, target
         )
-        if _frame_bytes(bridge_frame) > config.source.max_bytes:
-            raise ValueError("Prediction result exceeds max_bytes.")
-        bridge_columns = (*record_key_columns, *output_names)
-        bridge = spark.createDataFrame(
-            [
-                tuple(_scalar(value) for value in row)
-                for row in bridge_frame.itertuples(index=False, name=None)
-            ],
-            schema=target.select(*bridge_columns).schema,
-        )
-        if (
-            bridge.select(*record_key_columns)
-            .join(target.select(*record_key_columns), on=list(record_key_columns), how="left_semi")
-            .limit(1)
-            .count()
-        ):
-            raise BatchConflictError("Source key already has a published prediction.")
         output = (
             bridge.join(
                 selected.select(*record_key_columns, period_column),
@@ -303,58 +208,22 @@ def run_incremental_local_batch(
             if period_column is not None
             else bridge
         )
-        run_input = {
-            "skyulf_mode": "incremental_append",
-            "source_table_id": source_id,
-            "target_table_id": target_id,
-            "source_start_version": prior_version + 1 if prior_version is not None else None,
-            "source_end_version": upper_version,
-            "model_name": config.model.name,
-            "model_version": config.model.version,
-            "model_digest": prepared.preflight.model_digest,
-            "code_version": version("skyulf-core"),
-            "input_count": len(frame),
-            "output_count": len(frame),
-        }
-        digest = hashlib.sha256(
-            json.dumps(run_input, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        manifest = {**run_input, "run_id": digest, "request_digest": digest}
-        for name, value in (
-            ("run_id", digest),
-            ("model_name", config.model.name),
-            ("model_version", config.model.version),
-        ):
-            output = output.withColumn(name, functions.lit(value))
-        if {field.name: field.dataType for field in output.schema} != {
-            field.name: field.dataType for field in target.schema
-        }:
-            raise ValueError("Prediction output schema must match the Delta target exactly.")
-        output = output.select(*target.columns)
-        if output.count() != len(frame):
-            raise ValueError("Prediction keys do not match source rows.")
-        if table_identity(spark, source_table) != source_id:
-            raise BatchConflictError("Source table identity changed while scoring.")
-        if int(_latest(spark, target_table)["version"]) != int(target_latest["version"]):
-            raise BatchConflictError("Target changed while scoring; retry from the latest receipt.")
-        try:
-            (
-                output.write.format("delta")
-                .mode("append")
-                .option("mergeSchema", "false")
-                .option("txnAppId", f"skyulf-incremental:{source_id}:{target_id}")
-                .option("txnVersion", upper_version)
-                .option("userMetadata", json.dumps(manifest, sort_keys=True))
-                .saveAsTable(target_table)
-            )
-        except Exception as exc:  # noqa: BLE001 - preserve Delta's structured cause
-            if "Concurrent" in type(exc).__name__ or "DELTA_CONCURRENT" in str(exc):
-                raise BatchConflictError("Delta rejected a concurrent incremental write.") from exc
-            raise DeltaPublishError("Incremental Delta write failed.") from exc
-        committed = _latest(spark, target_table)
-        recorded = _last_receipt(committed, source_id, target_id)
-        if recorded is None or recorded.get("request_digest") != digest:
-            raise DeltaPublishError("Delta returned without a verifiable incremental receipt.")
+        run_input, digest, manifest = _incremental_manifest(
+            prepared, source_id, target_id, prior_version, upper_version, frame
+        )
+        output = _complete_incremental_output(output, target, config, digest, functions, frame)
+        committed, recorded = _commit_increment(
+            spark,
+            source_table,
+            source_id,
+            target_table,
+            target_id,
+            target_latest,
+            output,
+            upper_version,
+            manifest,
+            digest,
+        )
         return IncrementalBatchResult(
             run_input["source_start_version"],
             upper_version,
@@ -366,3 +235,261 @@ def run_incremental_local_batch(
             config.model.name,
             config.model.version,
         )
+
+
+def _validate_incremental_source(config: LocalWorkflowConfig) -> None:
+    """Require an unpinned incremental UC source and a separate UC Delta sink."""
+    if (
+        config.runtime != "databricks"
+        or config.source.kind != "uc_table"
+        or config.source.read_mode != "incremental"
+        or config.source.version is not None
+        or config.sink.kind != "uc_delta"
+        or not config.source.table
+        or not config.sink.table
+        or config.source.table == config.sink.table
+    ):
+        raise ValueError("Incremental scoring requires unpinned UC source and UC Delta sink.")
+
+
+def _validate_incremental_model(
+    prepared: PreparedLocalWorkflow, config: LocalWorkflowConfig
+) -> LocalPipelineArtifact:
+    """Require pinned ready model evidence matching the loaded local artifact."""
+    if (
+        config.model.kind != "local_pipeline"
+        or not config.model.name
+        or not config.model.version
+        or not prepared.preflight.ready
+        or not isinstance(prepared.artifact, LocalPipelineArtifact)
+        or prepared.preflight.model_version != config.model.version
+        or prepared.preflight.model_digest != prepared.artifact.manifest.pipeline_sha256
+    ):
+        raise ValueError("Incremental scoring requires a pinned, ready local pipeline model.")
+    return prepared.artifact
+
+
+def _validate_incremental_keys(
+    record_key_columns: tuple[str, ...], period_column: str | None
+) -> None:
+    """Validate distinct control columns before checking the model input schema."""
+    if type(record_key_columns) is not tuple or not record_key_columns:
+        raise ValueError("record_key_columns must be a nonempty tuple.")
+    for name in record_key_columns:
+        column_name(name)
+    if period_column is not None:
+        column_name(period_column)
+    names = (*record_key_columns, *((period_column,) if period_column is not None else ()))
+    if len({name.lower() for name in names}) != len(names):
+        raise ValueError("record_key_columns and period_column must be distinct.")
+    if any(name.lower() in PREDICTION_METADATA_COLUMNS for name in names):
+        raise ValueError("record_key_columns and period_column collide with prediction metadata.")
+
+
+def _require_incremental_change_feed(spark: Any, source_table: str) -> None:
+    """Require source change data feed before entering publication admission."""
+    detail = spark.sql(f"DESCRIBE DETAIL {table_name(source_table)}").first()
+    properties = detail["properties"] or {}
+    if not any(
+        key.lower() == "delta.enablechangedatafeed" and str(value).lower() == "true"
+        for key, value in properties.items()
+    ):
+        raise ValueError("Source Delta Change Data Feed must be enabled before scoring.")
+
+
+def _check_incremental_bootstrap(
+    spark: Any, target_table: str, previous: dict[str, Any] | None, functions: Any
+) -> None:
+    """Reject an unreceipted nonempty or previously managed target."""
+    if previous is None:
+        older_receipt = (
+            history(spark, target_table)
+            .where(
+                functions.get_json_object("userMetadata", "$.skyulf_mode") == "incremental_append"
+            )
+            .limit(1)
+            .count()
+        )
+        if older_receipt:
+            raise BatchConflictError("Target changed outside the incremental receipt protocol.")
+        if spark.table(target_table).limit(1).count():
+            raise BatchConflictError(
+                "Incremental bootstrap requires an empty target with no prior predictions."
+            )
+
+
+def _select_incremental_rows(
+    spark: Any,
+    source_table: str,
+    prior_version: int | None,
+    upper_version: int,
+    period_column: str | None,
+    functions: Any,
+) -> Any:
+    """Read one snapshot or insert-only change window and validate event time."""
+    if prior_version is None:
+        selected = (
+            spark.read.format("delta").option("versionAsOf", upper_version).table(source_table)
+        )
+    else:
+        selected = (
+            spark.read.format("delta")
+            .option("readChangeFeed", "true")
+            .option("startingVersion", prior_version + 1)
+            .option("endingVersion", upper_version)
+            .table(source_table)
+        )
+        if selected.where(functions.col("_change_type") != "insert").limit(1).count():
+            raise ValueError("Source updates and deletes require an explicit rescore policy.")
+        selected = selected.where(functions.col("_change_type") == "insert")
+    if period_column is not None:
+        if selected.schema[period_column].dataType.typeName() != "timestamp":
+            raise ValueError("Source event time must be a Spark timestamp.")
+        if selected.where(functions.col(period_column).isNull()).limit(1).count():
+            raise ValueError("Source event time must not be null.")
+    return selected
+
+
+def _incremental_prediction_bridge(
+    spark: Any,
+    prepared: PreparedLocalWorkflow,
+    frame: pd.DataFrame,
+    inputs: tuple[str, ...],
+    output_names: tuple[str, ...],
+    record_key_columns: tuple[str, ...],
+    target: Any,
+) -> Any:
+    """Score bounded rows, preserve keys and reject already published predictions."""
+    predicted = prepared.predict(frame.loc[:, list(inputs)])
+    if list(predicted.columns) != list(output_names) or len(predicted) != len(frame):
+        raise ValueError("Local prediction schema or row count differs from the model contract.")
+    bridge_frame = pd.concat(
+        [
+            frame.loc[:, list(record_key_columns)].reset_index(drop=True),
+            predicted.reset_index(drop=True),
+        ],
+        axis=1,
+    )
+    if _frame_bytes(bridge_frame) > prepared.config.source.max_bytes:
+        raise ValueError("Prediction result exceeds max_bytes.")
+    bridge_columns = (*record_key_columns, *output_names)
+    bridge = spark.createDataFrame(
+        [
+            tuple(_scalar(value) for value in row)
+            for row in bridge_frame.itertuples(index=False, name=None)
+        ],
+        schema=target.select(*bridge_columns).schema,
+    )
+    if (
+        bridge.select(*record_key_columns)
+        .join(target.select(*record_key_columns), on=list(record_key_columns), how="left_semi")
+        .limit(1)
+        .count()
+    ):
+        raise BatchConflictError("Source key already has a published prediction.")
+    return bridge
+
+
+def _incremental_manifest(
+    prepared: PreparedLocalWorkflow,
+    source_id: str,
+    target_id: str,
+    prior_version: int | None,
+    upper_version: int,
+    frame: pd.DataFrame,
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    """Fingerprint the exact increment, concrete model and prediction row count."""
+    config = prepared.config
+    run_input = {
+        "skyulf_mode": "incremental_append",
+        "source_table_id": source_id,
+        "target_table_id": target_id,
+        "source_start_version": prior_version + 1 if prior_version is not None else None,
+        "source_end_version": upper_version,
+        "model_name": config.model.name,
+        "model_version": config.model.version,
+        "model_digest": prepared.preflight.model_digest,
+        "code_version": version("skyulf-core"),
+        "input_count": len(frame),
+        "output_count": len(frame),
+    }
+    digest = hashlib.sha256(
+        json.dumps(run_input, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    manifest = {**run_input, "run_id": digest, "request_digest": digest}
+    return run_input, digest, manifest
+
+
+def _complete_incremental_output(
+    output: Any,
+    target: Any,
+    config: LocalWorkflowConfig,
+    digest: str,
+    functions: Any,
+    frame: pd.DataFrame,
+) -> Any:
+    """Attach model identity and validate final prediction schema and row membership."""
+    for name, value in (
+        ("run_id", digest),
+        ("model_name", config.model.name),
+        ("model_version", config.model.version),
+    ):
+        output = output.withColumn(name, functions.lit(value))
+    if {field.name: field.dataType for field in output.schema} != {
+        field.name: field.dataType for field in target.schema
+    }:
+        raise ValueError("Prediction output schema must match the Delta target exactly.")
+    output = output.select(*target.columns)
+    if output.count() != len(frame):
+        raise ValueError("Prediction keys do not match source rows.")
+    return output
+
+
+def _commit_increment(
+    spark: Any,
+    source_table: str,
+    source_id: str,
+    target_table: str,
+    target_id: str,
+    target_latest: Any,
+    output: Any,
+    upper_version: int,
+    manifest: dict[str, Any],
+    digest: str,
+) -> tuple[Any, dict[str, Any]]:
+    """Recheck source and target, append once and verify the persisted receipt."""
+    if table_identity(spark, source_table) != source_id:
+        raise BatchConflictError("Source table identity changed while scoring.")
+    if int(_latest(spark, target_table)["version"]) != int(target_latest["version"]):
+        raise BatchConflictError("Target changed while scoring; retry from the latest receipt.")
+    try:
+        (
+            output.write.format("delta")
+            .mode("append")
+            .option("mergeSchema", "false")
+            .option("txnAppId", f"skyulf-incremental:{source_id}:{target_id}")
+            .option("txnVersion", upper_version)
+            .option("userMetadata", json.dumps(manifest, sort_keys=True))
+            .saveAsTable(target_table)
+        )
+    except Exception as exc:  # noqa: BLE001 - preserve Delta's structured cause
+        if "Concurrent" in type(exc).__name__ or "DELTA_CONCURRENT" in str(exc):
+            raise BatchConflictError("Delta rejected a concurrent incremental write.") from exc
+        raise DeltaPublishError("Incremental Delta write failed.") from exc
+    committed = _latest(spark, target_table)
+    recorded = _last_receipt(committed, source_id, target_id)
+    if recorded is None or recorded.get("request_digest") != digest:
+        raise DeltaPublishError("Delta returned without a verifiable incremental receipt.")
+    return committed, recorded
+
+
+def _incremental_table_ids(
+    spark: Any, source_table: str | None, target_table: str | None
+) -> tuple[str, str, str, str]:
+    """Resolve immutable table identities and reject source-target aliasing."""
+    assert source_table is not None and target_table is not None
+    source_id = table_identity(spark, source_table)
+    target_id = table_identity(spark, target_table)
+    if source_id == target_id:
+        raise ValueError("Source and prediction target must be different Delta tables.")
+    return source_table, target_table, source_id, target_id

@@ -1,5 +1,6 @@
 """Explicit operator rejection of an evaluated, registered challenger."""
 
+from typing import Any
 from uuid import uuid4
 
 from .promotion import (
@@ -57,30 +58,7 @@ def reject_candidate(
             raise AliasConflictError("Challenger changed before rejection.")
         event = _checked_challenger_event(client, name, version)
         if event["k"] == "rejection":
-            tags = client.get_model_version(name, version).tags or {}
-            if (
-                event.get("h") != digest
-                or tags.get("approval_status") != "rejected"
-                or tags.get("approval_reason") != reason
-            ):
-                raise AliasConflictError(
-                    "Rejection proof, status or reason differs from the recorded decision."
-                )
-            event_id = _active_marker(client, name, version, "challenger")
-            if event_id is None:
-                raise AliasConflictError("Rejected challenger lacks an active decision receipt.")
-            receipt = AliasChangeReceipt(
-                event_id=event_id,
-                kind="rejection",
-                model_name=name,
-                alias="challenger",
-                prior_version=version,
-                new_version=version,
-                comparison_sha256=digest,
-                parent_event_id=event.get("e"),
-            )
-            _verify_original_receipt(client, receipt)
-            return receipt
+            return _replayed_rejection(client, name, version, event, digest, reason)
         stage_event = _verify_staged_challenger(client, report, digest)
         receipt = AliasChangeReceipt(
             event_id=uuid4().hex,
@@ -103,3 +81,38 @@ def reject_candidate(
             },
         )
         return receipt
+
+
+def _replayed_rejection(
+    client: Any,
+    name: str,
+    version: str,
+    event: dict[str, Any],
+    digest: str,
+    reason: str,
+) -> AliasChangeReceipt:
+    """Verify repeated rejection evidence and return its original receipt."""
+    tags = client.get_model_version(name, version).tags or {}
+    if (
+        event.get("h") != digest
+        or tags.get("approval_status") != "rejected"
+        or tags.get("approval_reason") != reason
+    ):
+        raise AliasConflictError(
+            "Rejection proof, status or reason differs from the recorded decision."
+        )
+    event_id = _active_marker(client, name, version, "challenger")
+    if event_id is None:
+        raise AliasConflictError("Rejected challenger lacks an active decision receipt.")
+    receipt = AliasChangeReceipt(
+        event_id=event_id,
+        kind="rejection",
+        model_name=name,
+        alias="challenger",
+        prior_version=version,
+        new_version=version,
+        comparison_sha256=digest,
+        parent_event_id=event.get("e"),
+    )
+    _verify_original_receipt(client, receipt)
+    return receipt

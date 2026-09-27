@@ -151,6 +151,11 @@ function getTuningConfig(job: JobInfo): TuningConfig | undefined {
   return Object.keys(saved || {}).length > 0 ? saved : node?.params?.tuning_config as TuningConfig | undefined;
 }
 
+function getInnerFoldCount(config: TuningConfig): number {
+  const outerFolds = config.cv_folds ?? 5;
+  return config.cv_inner_folds ?? (outerFolds > 2 ? Math.min(3, outerFolds - 1) : 2);
+}
+
 function TuningCrossValidation({ config }: { config: TuningConfig }) {
   return (
     <>
@@ -171,7 +176,7 @@ function TuningCrossValidation({ config }: { config: TuningConfig }) {
           {config.cv_type === 'nested_cv' && (
             <div>
               <span className="text-gray-500">Inner folds:</span>
-              <span className="ml-2 font-mono text-gray-700 dark:text-gray-300">{config.cv_inner_folds ?? ((config.cv_folds ?? 5) > 2 ? Math.min(3, (config.cv_folds ?? 5) - 1) : 2)}</span>
+              <span className="ml-2 font-mono text-gray-700 dark:text-gray-300">{getInnerFoldCount(config)}</span>
             </div>
           )}
           <div>

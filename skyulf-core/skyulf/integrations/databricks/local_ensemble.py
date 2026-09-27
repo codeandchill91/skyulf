@@ -84,6 +84,12 @@ def _voting(params: dict[str, Any], members: list[str], calculator: Any) -> None
         if set(weights) - set(members):
             raise ValueError("weights must name only selected base_estimators.")
         weights = [weights.get(name, 1) for name in members]
+    _validate_weights(weights, members)
+    params["weights"] = weights
+
+
+def _validate_weights(weights: Any, members: list[str]) -> None:
+    """Require one finite nonnegative weight per selected learner and a positive total."""
     if (
         not isinstance(weights, list)
         or len(weights) != len(members)
@@ -96,7 +102,6 @@ def _voting(params: dict[str, Any], members: list[str], calculator: Any) -> None
         raise ValueError(
             "weights need one finite nonnegative value per model and a positive total."
         )
-    params["weights"] = weights
 
 
 def _stacking(params: dict[str, Any], calculator: Any) -> None:
@@ -172,6 +177,13 @@ def merge_ensemble_fixed_space(
         f"final_estimator__{key}": value
         for key, value in params.get("final_estimator_params", {}).items()
     }
+    _merge_member_axes(space, params, fixed, automatic)
+
+
+def _merge_member_axes(
+    space: dict[str, list[Any]], params: dict[str, Any], fixed: dict[str, Any], automatic: bool
+) -> None:
+    """Check fixed nested overrides before adding scalar search axes."""
     for name, value in fixed.items():
         if name in params and params[name] != value:
             raise ValueError(f"Fixed base parameter conflicts with nested parameter: {name}.")

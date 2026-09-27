@@ -95,12 +95,7 @@ class ModelSelection(BaseModel):
             not self.name or not self.name.strip() or (self.alias is None) == (self.version is None)
         ):
             raise ValueError("A registry model needs a name and exactly one alias or version.")
-        if self.alias is not None and not self.alias.strip():
-            raise ValueError("alias must be non-empty.")
-        if self.version is not None and (
-            not self.version.isascii() or not self.version.isdigit() or int(self.version) <= 0
-        ):
-            raise ValueError("version must be a concrete positive integer string.")
+        _validate_registry_selector_values(self)
         return self
 
 
@@ -187,36 +182,7 @@ def _config_issues(config: LocalWorkflowConfig) -> list[PreflightIssue]:
                 "Choose local or databricks; use the separate Spark batch runner for Spark inference.",
             )
         )
-    if config.source.kind == "uc_table":
-        if (
-            not config.source.table
-            or (
-                config.source.read_mode == "snapshot"
-                and (config.source.version is None or config.source.version < 0)
-            )
-            or (config.source.read_mode == "incremental" and config.source.version is not None)
-        ):
-            issues.append(
-                PreflightIssue(
-                    "source_unbounded",
-                    "source",
-                    "Snapshot reads need a fixed nonnegative version; incremental reads derive it.",
-                    "Set a version for snapshot reads or omit it for incremental reads.",
-                )
-            )
-    elif (
-        config.source.table is not None
-        or config.source.version is not None
-        or config.source.read_mode != "snapshot"
-    ):
-        issues.append(
-            PreflightIssue(
-                "source_conflict",
-                "source",
-                "A caller frame cannot also select a UC table or version.",
-                "Remove table and version from caller_frame input.",
-            )
-        )
+    _collect_source_issues(config, issues)
     if config.sink.kind == "uc_delta":
         if config.runtime != "databricks":
             issues.append(
@@ -236,28 +202,7 @@ def _config_issues(config: LocalWorkflowConfig) -> list[PreflightIssue]:
                     "Choose an existing UC source table and concrete Delta version.",
                 )
             )
-        try:
-            if config.sink.table is None or len(config.sink.table.split(".")) != 3:
-                raise ValueError("A three-part UC target is required.")
-            table_name(config.sink.table)
-        except ValueError:
-            issues.append(
-                PreflightIssue(
-                    "sink_invalid_target",
-                    "sink",
-                    "UC Delta publication requires a three-part target table.",
-                    "Specify an existing catalog.schema.table target.",
-                )
-            )
-        if config.sink.table and config.sink.table.lower() == (config.source.table or "").lower():
-            issues.append(
-                PreflightIssue(
-                    "sink_source_conflict",
-                    "sink",
-                    "Source and target tables must be different.",
-                    "Choose a separate prediction target table.",
-                )
-            )
+        _collect_target_issues(config, issues)
     elif config.sink.table is not None:
         issues.append(
             PreflightIssue(
@@ -287,29 +232,7 @@ def preflight_local(
         raise TypeError("config must be a LocalWorkflowConfig.")
     issues = _config_issues(config)
     remote_checked = resolved is not None
-    if config.model.name is not None and resolved is None:
-        issues.append(
-            PreflightIssue(
-                "model_unresolved",
-                "model",
-                "Registry identity and artifact metadata have not been checked.",
-                "Call prepare_local_workflow to resolve the alias once and load its pinned version.",
-            )
-        )
-    if resolved is not None and (
-        config.model.name != resolved.name
-        or (config.model.version is not None and config.model.version != resolved.version)
-        or resolved.model_uri != f"models:/{resolved.name}/{resolved.version}"
-    ):
-        issues.append(
-            PreflightIssue(
-                "model_reference_mismatch",
-                "model",
-                "Resolved model differs from the selected concrete identity.",
-                "Resolve the configured name and selector again before this job.",
-                "remote",
-            )
-        )
+    _collect_reference_issues(config, resolved, issues)
     if artifact is None:
         issues.append(
             PreflightIssue(
@@ -321,63 +244,7 @@ def preflight_local(
         )
         return PreflightResult(tuple(issues), remote_checked)
     if config.model.kind == "local_pipeline" and isinstance(artifact, LocalPipelineArtifact):
-        manifest = artifact.manifest
-        digest = manifest.pipeline_sha256
-        feature_order = manifest.feature_columns
-        label = "float64" if manifest.task == "regression" else label_dtype(manifest.classes)
-        output = (
-            ColumnSpec(name="prediction", dtype=label),
-            *(
-                tuple(
-                    ColumnSpec(name=f"probability_{i}", dtype="float64")
-                    for i in range(len(manifest.classes))
-                )
-                if manifest.task == "classification" and manifest.classification_probabilities
-                else ()
-            ),
-        )
-        if config.engine != manifest.fitted_engine:
-            issues.append(
-                PreflightIssue(
-                    "engine_mismatch",
-                    "runtime",
-                    "Selected engine differs from the fitted local pipeline.",
-                    f"Choose engine='{manifest.fitted_engine}' or refit the pipeline.",
-                )
-            )
-        if manifest.execution_scope != "whole_frame_local":
-            issues.append(
-                PreflightIssue(
-                    "scope_unsupported",
-                    "model",
-                    "Local package is not eligible for whole-frame local scoring.",
-                    "Use a package fitted for whole_frame_local.",
-                )
-            )
-        if artifact.pipeline.preprocessing_steps != artifact.pipeline.feature_engineer.steps_config:
-            issues.append(
-                PreflightIssue(
-                    "node_contract_mismatch",
-                    "node",
-                    "Pipeline FE configuration differs from its fitted transformer.",
-                    "Reload the original fitted artifact instead of changing its steps.",
-                )
-            )
-        estimator = artifact.pipeline.model_estimator
-        if estimator is None or estimator.model is None:
-            actual_model_class = None
-        else:
-            model = estimator._unwrap_tuned_model()
-            actual_model_class = f"{type(model).__module__}.{type(model).__qualname__}"
-        if actual_model_class != manifest.model_class:
-            issues.append(
-                PreflightIssue(
-                    "model_contract_mismatch",
-                    "model",
-                    "Artifact model class differs from the fitted estimator.",
-                    "Reload a complete fitted artifact without changing its metadata.",
-                )
-            )
+        digest, feature_order, output = _local_pipeline_metadata(config, artifact, issues)
     elif config.model.kind == "portable_bundle" and isinstance(artifact, InferenceBundle):
         manifest = artifact.manifest
         digest = artifact.semantic_digest
@@ -403,22 +270,7 @@ def preflight_local(
                 "remote",
             )
         )
-    if probe_frame is not None and not issues:
-        try:
-            _check_frame_budget(probe_frame, config.source)
-            if isinstance(artifact, LocalPipelineArtifact):
-                predict_local_pipeline(probe_frame, artifact)
-            else:
-                predict_local(probe_frame, artifact)
-        except (TypeError, ValueError, RuntimeError) as exc:
-            issues.append(
-                PreflightIssue(
-                    "prediction_probe_failed",
-                    "model",
-                    str(exc),
-                    "Fix the sample schema or fitted pipeline; replay a representative batch.",
-                )
-            )
+    _probe_prediction(probe_frame, config, artifact, issues)
     return PreflightResult(
         tuple(issues),
         remote_checked,
@@ -476,21 +328,7 @@ def prepare_local_workflow(
     selection = config.model
     resolved = None
     if selection.path is not None:
-        path = Path(selection.path)
-        try:
-            artifact = (
-                load_local_pipeline(path)
-                if selection.kind == "local_pipeline"
-                else load_bundle(path)
-            )
-        except (OSError, ValueError) as exc:
-            issue = PreflightIssue(
-                "artifact_invalid",
-                "model",
-                str(exc),
-                "Select a trusted, complete artifact of the declared kind and compatible runtime.",
-            )
-            raise PreflightError(PreflightResult((issue,), False)) from exc
+        artifact = _load_selected_path(selection, selection.path)
     else:
         from ..mlflow.registry import (  # noqa: PLC0415 - optional MLflow client boundary
             load_registered_bundle,
@@ -517,17 +355,7 @@ def prepare_local_workflow(
                 resolved, tracking_uri=selection.tracking_uri, registry_uri=selection.registry_uri
             )
         except (RegistryError, OSError, ValueError) as exc:
-            if isinstance(exc, RegistryAccessError):
-                code, fix = (
-                    "registry_access_denied",
-                    "Grant model read/EXECUTE to the job identity.",
-                )
-            elif isinstance(exc, RegistryModelNotFoundError):
-                code, fix = "registry_model_missing", "Check the model name and alias or version."
-            elif isinstance(exc, RegistryDependencyError):
-                code, fix = "mlflow_unavailable", "Install the optional MLflow extra."
-            else:
-                code, fix = "registry_or_artifact_invalid", "Check the trusted package metadata."
+            code, fix = _registry_failure_help(exc)
             issue = PreflightIssue(code, "model", str(exc), fix, "remote")
             result = PreflightResult(
                 (issue,), True, resolved.version if resolved is not None else None
@@ -537,3 +365,249 @@ def prepare_local_workflow(
     if not result.ready:
         raise PreflightError(result)
     return PreparedLocalWorkflow(config, artifact, result)
+
+
+def _validate_registry_selector_values(selection: ModelSelection) -> None:
+    """Validate alias text and a concrete positive version after selector cardinality."""
+    if selection.alias is not None and not selection.alias.strip():
+        raise ValueError("alias must be non-empty.")
+    if selection.version is not None and (
+        not selection.version.isascii()
+        or not selection.version.isdigit()
+        or int(selection.version) <= 0
+    ):
+        raise ValueError("version must be a concrete positive integer string.")
+
+
+def _collect_source_issues(config: LocalWorkflowConfig, issues: list[PreflightIssue]) -> None:
+    """Append source selection issues before sink validation."""
+    if config.source.kind == "uc_table":
+        _collect_uc_source_issues(config, issues)
+    elif (
+        config.source.table is not None
+        or config.source.version is not None
+        or config.source.read_mode != "snapshot"
+    ):
+        issues.append(
+            PreflightIssue(
+                "source_conflict",
+                "source",
+                "A caller frame cannot also select a UC table or version.",
+                "Remove table and version from caller_frame input.",
+            )
+        )
+
+
+def _collect_target_issues(config: LocalWorkflowConfig, issues: list[PreflightIssue]) -> None:
+    """Check the target name and reject source-target collisions."""
+    try:
+        if config.sink.table is None or len(config.sink.table.split(".")) != 3:
+            raise ValueError("A three-part UC target is required.")
+        table_name(config.sink.table)
+    except ValueError:
+        issues.append(
+            PreflightIssue(
+                "sink_invalid_target",
+                "sink",
+                "UC Delta publication requires a three-part target table.",
+                "Specify an existing catalog.schema.table target.",
+            )
+        )
+    if config.sink.table and config.sink.table.lower() == (config.source.table or "").lower():
+        issues.append(
+            PreflightIssue(
+                "sink_source_conflict",
+                "sink",
+                "Source and target tables must be different.",
+                "Choose a separate prediction target table.",
+            )
+        )
+
+
+def _collect_reference_issues(
+    config: LocalWorkflowConfig, resolved: ResolvedModel | None, issues: list[PreflightIssue]
+) -> None:
+    """Append unresolved or mismatched registry identity issues before artifact checks."""
+    if config.model.name is not None and resolved is None:
+        issues.append(
+            PreflightIssue(
+                "model_unresolved",
+                "model",
+                "Registry identity and artifact metadata have not been checked.",
+                "Call prepare_local_workflow to resolve the alias once and load its pinned version.",
+            )
+        )
+    if resolved is not None and (
+        config.model.name != resolved.name
+        or (config.model.version is not None and config.model.version != resolved.version)
+        or resolved.model_uri != f"models:/{resolved.name}/{resolved.version}"
+    ):
+        issues.append(
+            PreflightIssue(
+                "model_reference_mismatch",
+                "model",
+                "Resolved model differs from the selected concrete identity.",
+                "Resolve the configured name and selector again before this job.",
+                "remote",
+            )
+        )
+
+
+def _local_pipeline_metadata(
+    config: LocalWorkflowConfig, artifact: LocalPipelineArtifact, issues: list[PreflightIssue]
+) -> tuple[str, tuple[str, ...], tuple[ColumnSpec, ...]]:
+    """Check local fitted contracts and return their prediction metadata."""
+    manifest = artifact.manifest
+    digest = manifest.pipeline_sha256
+    feature_order = manifest.feature_columns
+    output = _local_output_schema(artifact)
+    if config.engine != manifest.fitted_engine:
+        issues.append(
+            PreflightIssue(
+                "engine_mismatch",
+                "runtime",
+                "Selected engine differs from the fitted local pipeline.",
+                f"Choose engine='{manifest.fitted_engine}' or refit the pipeline.",
+            )
+        )
+    if manifest.execution_scope != "whole_frame_local":
+        issues.append(
+            PreflightIssue(
+                "scope_unsupported",
+                "model",
+                "Local package is not eligible for whole-frame local scoring.",
+                "Use a package fitted for whole_frame_local.",
+            )
+        )
+    if artifact.pipeline.preprocessing_steps != artifact.pipeline.feature_engineer.steps_config:
+        issues.append(
+            PreflightIssue(
+                "node_contract_mismatch",
+                "node",
+                "Pipeline FE configuration differs from its fitted transformer.",
+                "Reload the original fitted artifact instead of changing its steps.",
+            )
+        )
+    _collect_estimator_issues(artifact, issues)
+
+    return digest, feature_order, output
+
+
+def _local_output_schema(artifact: LocalPipelineArtifact) -> tuple[ColumnSpec, ...]:
+    """Derive ordered prediction columns from the saved task and classes."""
+    manifest = artifact.manifest
+    label = "float64" if manifest.task == "regression" else label_dtype(manifest.classes)
+    output = (
+        ColumnSpec(name="prediction", dtype=label),
+        *(
+            tuple(
+                ColumnSpec(name=f"probability_{i}", dtype="float64")
+                for i in range(len(manifest.classes))
+            )
+            if manifest.task == "classification" and manifest.classification_probabilities
+            else ()
+        ),
+    )
+    return output
+
+
+def _collect_estimator_issues(
+    artifact: LocalPipelineArtifact, issues: list[PreflightIssue]
+) -> None:
+    """Check the fitted estimator class without changing or unwrapping absent models."""
+    estimator = artifact.pipeline.model_estimator
+    if estimator is None or estimator.model is None:
+        actual_model_class = None
+    else:
+        model = estimator._unwrap_tuned_model()
+        actual_model_class = f"{type(model).__module__}.{type(model).__qualname__}"
+    if actual_model_class != artifact.manifest.model_class:
+        issues.append(
+            PreflightIssue(
+                "model_contract_mismatch",
+                "model",
+                "Artifact model class differs from the fitted estimator.",
+                "Reload a complete fitted artifact without changing its metadata.",
+            )
+        )
+
+
+def _registry_failure_help(exc: Exception) -> tuple[str, str]:
+    """Map registry failures to their stable preflight code and repair."""
+    if isinstance(exc, RegistryAccessError):
+        code, fix = (
+            "registry_access_denied",
+            "Grant model read/EXECUTE to the job identity.",
+        )
+    elif isinstance(exc, RegistryModelNotFoundError):
+        code, fix = "registry_model_missing", "Check the model name and alias or version."
+    elif isinstance(exc, RegistryDependencyError):
+        code, fix = "mlflow_unavailable", "Install the optional MLflow extra."
+    else:
+        code, fix = "registry_or_artifact_invalid", "Check the trusted package metadata."
+    return code, fix
+
+
+def _probe_prediction(
+    probe_frame: pd.DataFrame | pl.DataFrame | None,
+    config: LocalWorkflowConfig,
+    artifact: LocalPipelineArtifact | InferenceBundle,
+    issues: list[PreflightIssue],
+) -> None:
+    """Exercise an optional bounded prediction only after all contract checks pass."""
+    if probe_frame is not None and not issues:
+        try:
+            _check_frame_budget(probe_frame, config.source)
+            if isinstance(artifact, LocalPipelineArtifact):
+                predict_local_pipeline(probe_frame, artifact)
+            else:
+                predict_local(probe_frame, artifact)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            issues.append(
+                PreflightIssue(
+                    "prediction_probe_failed",
+                    "model",
+                    str(exc),
+                    "Fix the sample schema or fitted pipeline; replay a representative batch.",
+                )
+            )
+
+
+def _load_selected_path(
+    selection: ModelSelection, selected_path: str
+) -> LocalPipelineArtifact | InferenceBundle:
+    """Load the selected trusted local artifact and translate invalid package errors."""
+    path = Path(selected_path)
+    try:
+        artifact = (
+            load_local_pipeline(path) if selection.kind == "local_pipeline" else load_bundle(path)
+        )
+    except (OSError, ValueError) as exc:
+        issue = PreflightIssue(
+            "artifact_invalid",
+            "model",
+            str(exc),
+            "Select a trusted, complete artifact of the declared kind and compatible runtime.",
+        )
+        raise PreflightError(PreflightResult((issue,), False)) from exc
+    return artifact
+
+
+def _collect_uc_source_issues(config: LocalWorkflowConfig, issues: list[PreflightIssue]) -> None:
+    """Check pinned snapshot or automatically selected incremental source settings."""
+    if (
+        not config.source.table
+        or (
+            config.source.read_mode == "snapshot"
+            and (config.source.version is None or config.source.version < 0)
+        )
+        or (config.source.read_mode == "incremental" and config.source.version is not None)
+    ):
+        issues.append(
+            PreflightIssue(
+                "source_unbounded",
+                "source",
+                "Snapshot reads need a fixed nonnegative version; incremental reads derive it.",
+                "Set a version for snapshot reads or omit it for incremental reads.",
+            )
+        )

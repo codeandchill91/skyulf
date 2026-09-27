@@ -68,17 +68,7 @@ def resolve_candidate_comparison_digest(
         event = _read_event(raw)
     except (TypeError, ValueError) as exc:
         raise AliasConflictError("Saved comparison receipt is malformed.") from exc
-    kinds = {"initial", "promotion"} if replay else {"challenger"}
-    if action == "approve" and isinstance(event, dict) and event.get("k") == "rejection":
-        raise AliasConflictError("Candidate was explicitly rejected.")
-    if action == "reject":
-        kinds.add("rejection")
-    if not isinstance(event, dict) or event.get("s") != "committed" or event.get("k") not in kinds:
-        raise AliasConflictError("Candidate has no committed comparison for this action.")
-    digest = event.get("h")
-    if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
-        raise AliasConflictError("Saved comparison receipt has no valid digest.")
-    return digest
+    return _comparison_receipt_digest(event, action, replay)
 
 
 def _completed_approval(
@@ -206,20 +196,7 @@ def approve_local_candidate(
     report, spec, engine, filter_evidence = _load_evidence(
         client, name, candidate_version, comparison_sha256, registry_uri=registry_uri
     )
-    if report.champion_version != expected_champion_version:
-        raise ValueError("Expected champion differs from the saved comparison.")
-    validate_quality_policy(
-        config.get("metric", ""), config.get("quality_threshold"), config.get("quality_gates")
-    )
-    if (
-        any(
-            config.get(field) != getattr(report, field)
-            for field in ("metric", "min_improvement", "quality_threshold")
-        )
-        or (config.get("quality_gates") or None) != report.quality_gates
-        or report.quality_threshold is None
-    ):
-        raise ValueError("Approval policy must match the saved, absolute-quality-gated comparison.")
+    _validate_approval_policy(config, report, expected_champion_version)
     candidate = resolve_model(
         name, version=candidate_version, tracking_uri=tracking_uri, registry_uri=registry_uri
     )
@@ -261,3 +238,43 @@ def approve_local_candidate(
     return promote_candidate(
         report, native, expected_champion_version=expected_champion_version, **options
     )
+
+
+def _comparison_receipt_digest(event: Any, action: str, replay: bool) -> str:
+    """Validate the committed receipt kind and return its concrete comparison digest."""
+    kinds = {"initial", "promotion"} if replay else {"challenger"}
+    if action == "approve" and isinstance(event, dict) and event.get("k") == "rejection":
+        raise AliasConflictError("Candidate was explicitly rejected.")
+    if action == "reject":
+        kinds.add("rejection")
+    if not isinstance(event, dict) or event.get("s") != "committed" or event.get("k") not in kinds:
+        raise AliasConflictError("Candidate has no committed comparison for this action.")
+    return _receipt_evidence_digest(event)
+
+
+def _receipt_evidence_digest(event: dict[str, Any]) -> str:
+    """Require a concrete comparison digest from a validated committed receipt."""
+    digest = event.get("h")
+    if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+        raise AliasConflictError("Saved comparison receipt has no valid digest.")
+    return digest
+
+
+def _validate_approval_policy(
+    config: dict[str, Any], report: ModelComparisonReport, expected_champion_version: str | None
+) -> None:
+    """Bind current approval settings to the saved champion and absolute quality policy."""
+    if report.champion_version != expected_champion_version:
+        raise ValueError("Expected champion differs from the saved comparison.")
+    validate_quality_policy(
+        config.get("metric", ""), config.get("quality_threshold"), config.get("quality_gates")
+    )
+    if (
+        any(
+            config.get(field) != getattr(report, field)
+            for field in ("metric", "min_improvement", "quality_threshold")
+        )
+        or (config.get("quality_gates") or None) != report.quality_gates
+        or report.quality_threshold is None
+    ):
+        raise ValueError("Approval policy must match the saved, absolute-quality-gated comparison.")

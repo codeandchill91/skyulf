@@ -104,6 +104,8 @@ dev = [
     "hypothesis>=6.100,<7.0.0",
     "syrupy>=4.0.0",
     "pytest-benchmark>=5.0.0,<6.0.0",
+    "jsonschema>=4.0.0,<5.0.0",  # Databricks template prompt visibility tests
+    "mlflow>=3.10,<4.0",  # Tracking integration tests and type checking
 
     # Linters/formatters/typecheckers (>=0.15: PLC0415 rule, audit finding F-11)
     "ruff>=0.15,<1.0",
@@ -342,7 +344,10 @@ members = [
 [tool.bandit]
 # Bandit B101 (assert_used) flags every `assert`. In pytest suites `assert` is the
 # idiomatic, correct construct, so we exclude test trees from Bandit entirely.
-exclude_dirs = ["tests", "skyulf-core/tests", "temp", ".venv", "node_modules", "frontend"]
+exclude_dirs = [
+    "tests", "skyulf-core/tests", "initiatives/spark_and_mlflow/rehearsals",
+    "temp", ".venv", "node_modules", "frontend",
+]
 
 [tool.bandit.assert_used]
 # Belt-and-suspenders: even if a test file is scanned outside the excluded dirs

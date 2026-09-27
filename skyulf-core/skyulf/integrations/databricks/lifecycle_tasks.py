@@ -58,6 +58,74 @@ def _spec(payload: dict[str, Any], source: str | None) -> training.LocalTraining
     return training.LocalTrainingSpec.from_payload(payload)
 
 
+def _prepare_training_request(
+    spark: Any,
+    request: dict[str, Any],
+    config: dict[str, Any],
+    options: dict[str, Any],
+    policy: str,
+    now: datetime | None,
+) -> None:
+    """Pin source, champion and effective recipe before creating a lifecycle run."""
+    if options:
+        raise ValueError("Training cannot accept operator options.")
+    spec, cv, champion = workflow._prepare_training(spark, config, policy=policy, now=now)
+    if config.get("champion_version") is not None and str(config["champion_version"]) != champion:
+        raise ValueError("champion_version does not match the current champion.")
+    effective = training._candidate_config(
+        spec,
+        config["pipeline"],
+        engine=config["engine"],
+        cv=cv,
+        metric=config["metric"],
+        min_improvement=config["min_improvement"],
+        champion_version=champion,
+        quality_threshold=config.get("quality_threshold"),
+        quality_gates=config.get("quality_gates"),
+        risk_category=config.get("risk_category"),
+    )
+    request.update(
+        spec=training._training_spec_payload(spec, config["engine"]),
+        champion_version=champion,
+        effective_config=effective,
+    )
+
+
+def _prepared_output(
+    request: dict[str, Any],
+    config: dict[str, Any],
+    action: str,
+    options: dict[str, Any],
+) -> dict[str, Any]:
+    """Describe the pinned training source or the selected operator request."""
+    output = {
+        "action": action,
+        "training_requested": action == "train",
+        "model_name": config["model_name"],
+    }
+    if action == "train":
+        pinned = request["spec"]
+        output.update(
+            source_table=pinned["table"],
+            source_version=pinned["version"],
+            engine=pinned["engine"],
+            split_strategy=pinned["split_strategy"],
+            expected_champion_version=request["champion_version"],
+        )
+        output |= {
+            field: pinned[field]
+            for field in ("start", "holdout_start", "cutoff", "result_cutoff")
+            if pinned[field] is not None
+        }
+    else:
+        output |= {
+            field: options[field]
+            for field in ("candidate_version", "expected_champion_version")
+            if field in options
+        }
+    return output
+
+
 def _prepare(
     spark: Any,
     store: _PhaseStore,
@@ -83,31 +151,7 @@ def _prepare(
         "operator_options": options,
     }
     if action == "train":
-        if options:
-            raise ValueError("Training cannot accept operator options.")
-        spec, cv, champion = workflow._prepare_training(spark, config, policy=policy, now=now)
-        if (
-            config.get("champion_version") is not None
-            and str(config["champion_version"]) != champion
-        ):
-            raise ValueError("champion_version does not match the current champion.")
-        effective = training._candidate_config(
-            spec,
-            config["pipeline"],
-            engine=config["engine"],
-            cv=cv,
-            metric=config["metric"],
-            min_improvement=config["min_improvement"],
-            champion_version=champion,
-            quality_threshold=config.get("quality_threshold"),
-            quality_gates=config.get("quality_gates"),
-            risk_category=config.get("risk_category"),
-        )
-        request.update(
-            spec=training._training_spec_payload(spec, config["engine"]),
-            champion_version=champion,
-            effective_config=effective,
-        )
+        _prepare_training_request(spark, request, config, options, policy, now)
     # JSON normalization also detaches all caller-owned editable dictionaries.
     request = json.loads(json.dumps(request, allow_nan=False))
     experiment = _get_or_create_experiment(store.client, experiment_name)
@@ -138,31 +182,7 @@ def _prepare(
         store.log("lifecycle/request.json", request)
         store.client.set_tag(store.run_id, "skyulf.lifecycle.request", store.request_digest)
         store.begin("prepare")
-        output = {
-            "action": action,
-            "training_requested": action == "train",
-            "model_name": config["model_name"],
-        }
-        if action == "train":
-            pinned = request["spec"]
-            output.update(
-                source_table=pinned["table"],
-                source_version=pinned["version"],
-                engine=pinned["engine"],
-                split_strategy=pinned["split_strategy"],
-                expected_champion_version=request["champion_version"],
-            )
-            output |= {
-                field: pinned[field]
-                for field in ("start", "holdout_start", "cutoff", "result_cutoff")
-                if pinned[field] is not None
-            }
-        else:
-            output |= {
-                field: options[field]
-                for field in ("candidate_version", "expected_champion_version")
-                if field in options
-            }
+        output = _prepared_output(request, config, action, options)
         return store.complete("prepare", output, None)
     except BaseException:
         with suppress(Exception):
@@ -211,6 +231,20 @@ def _train(spark: Any, store: _PhaseStore) -> dict[str, Any]:
     }
 
 
+def _validate_pinned_spec(fitted_spec: dict[str, Any], pinned_spec: dict[str, Any]) -> None:
+    """Allow only membership evidence to enrich the original source specification."""
+    enriched = {
+        "holdout_key_sha256",
+        "sample_key_sha256",
+        "survivor_key_sha256",
+        "training_evidence_sha256",
+    }
+    if {key: value for key, value in fitted_spec.items() if key not in enriched} != {
+        key: value for key, value in pinned_spec.items() if key not in enriched
+    }:
+        raise ValueError("Saved training source differs from pinned invocation.")
+
+
 def _load_training_evidence(store: _PhaseStore) -> _ReplayEvidence:
     """Verify saved fit, invocation and filter evidence before any source replay."""
     fitted = store.receipt("train")["output"]
@@ -234,16 +268,7 @@ def _load_training_evidence(store: _PhaseStore) -> _ReplayEvidence:
     if store.read("candidate_training_spec.json") != fitted["spec"]:
         raise ValueError("Saved candidate training spec differs from phase receipt.")
     spec = _spec(fitted["spec"], source)
-    enriched = {
-        "holdout_key_sha256",
-        "sample_key_sha256",
-        "survivor_key_sha256",
-        "training_evidence_sha256",
-    }
-    if {key: value for key, value in fitted["spec"].items() if key not in enriched} != {
-        key: value for key, value in store.request["spec"].items() if key not in enriched
-    }:
-        raise ValueError("Saved training source differs from pinned invocation.")
+    _validate_pinned_spec(fitted["spec"], store.request["spec"])
     evidence = store.read("training_filter_evidence.json")
     validate_training_evidence(evidence, spec, project_source_sha256=source_sha)
     return _ReplayEvidence(artifact, spec, fitted, evidence)
@@ -584,6 +609,53 @@ def _execute_phase(
         raise
 
 
+def _validate_phase_inputs(
+    phase: str,
+    task_states: dict[str, str] | None,
+    config: dict[str, Any] | None,
+    action: str | None,
+    experiment_name: str | None,
+    operator_options: dict[str, Any] | None,
+    now: datetime | None,
+) -> None:
+    """Reject inputs that do not belong to the selected fixed phase."""
+    if phase not in {"prepare", "complete", *_PREDECESSORS, *_GROUPED_PHASES}:
+        raise ValueError("Unsupported fixed lifecycle phase.")
+    if phase != "complete" and task_states is not None:
+        raise ValueError("Task states are accepted only by complete.")
+    if phase != "prepare" and any(
+        value is not None for value in (config, action, experiment_name, operator_options, now)
+    ):
+        raise ValueError("Downstream lifecycle phases must use only the pinned invocation.")
+
+
+def _run_prepare_phase(
+    spark: Any,
+    store: _PhaseStore,
+    reference: dict[str, str] | None,
+    config: dict[str, Any] | None,
+    action: str | None,
+    experiment_name: str | None,
+    operator_options: dict[str, Any] | None,
+    now: datetime | None,
+    tracking_uri: str,
+) -> LifecyclePhaseResult:
+    """Validate prepare inputs before persisting the pinned invocation."""
+    if reference is not None or config is None or action is None or not experiment_name:
+        raise ValueError("Prepare requires config, action and experiment with no predecessor.")
+    if config.get("tracking_uri", "databricks") != tracking_uri:
+        raise ValueError("Tracking URI differs from invocation configuration.")
+    return _prepare(
+        spark,
+        store,
+        {**config, "tracking_uri": tracking_uri},
+        action,
+        experiment_name,
+        operator_options or {},
+        now,
+    )
+
+
 def run_lifecycle_phase(
     spark: Any,
     *,
@@ -609,14 +681,9 @@ def run_lifecycle_phase(
     lifecycle job's existing serialization and never runs scoring.
     """
     context.validate()
-    if phase not in {"prepare", "complete", *_PREDECESSORS, *_GROUPED_PHASES}:
-        raise ValueError("Unsupported fixed lifecycle phase.")
-    if phase != "complete" and task_states is not None:
-        raise ValueError("Task states are accepted only by complete.")
-    if phase != "prepare" and any(
-        value is not None for value in (config, action, experiment_name, operator_options, now)
-    ):
-        raise ValueError("Downstream lifecycle phases must use only the pinned invocation.")
+    _validate_phase_inputs(
+        phase, task_states, config, action, experiment_name, operator_options, now
+    )
     if phase in _GROUPED_PHASES:
         for internal_phase in _GROUPED_PHASES[phase]:
             completed = run_lifecycle_phase(
@@ -630,18 +697,16 @@ def run_lifecycle_phase(
         return completed
     store = _PhaseStore(tracking_uri, context)
     if phase == "prepare":
-        if reference is not None or config is None or action is None or not experiment_name:
-            raise ValueError("Prepare requires config, action and experiment with no predecessor.")
-        if config.get("tracking_uri", "databricks") != tracking_uri:
-            raise ValueError("Tracking URI differs from invocation configuration.")
-        return _prepare(
+        return _run_prepare_phase(
             spark,
             store,
-            {**config, "tracking_uri": tracking_uri},
+            reference,
+            config,
             action,
             experiment_name,
-            operator_options or {},
+            operator_options,
             now,
+            tracking_uri,
         )
     if reference is None:
         raise ValueError("Lifecycle phase requires its predecessor reference.")

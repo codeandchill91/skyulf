@@ -37,27 +37,9 @@ def build_halving_searcher(
     max_resources = strategy_params.get("max_resources", "auto")
     if type(resource) is not str or not resource:
         raise ValueError("Halving resource must name n_samples or an estimator parameter.")
-    if isinstance(min_resources, str) and min_resources.isdigit():
-        min_resources = int(min_resources)
-    if isinstance(max_resources, str) and max_resources.isdigit():
-        max_resources = int(max_resources)
-    if resource == "n_samples":
-        if min_resources not in ("exhaust", "smallest") and (
-            type(min_resources) is not int or min_resources <= 0
-        ):
-            raise ValueError("Halving min_resources must be positive or exhaust/smallest.")
-        if max_resources != "auto" and (type(max_resources) is not int or max_resources <= 0):
-            raise ValueError("Halving max_resources must be auto or a positive integer.")
-    else:
-        if type(max_resources) is not int or max_resources <= 0:
-            raise ValueError("Halving estimator resource requires explicit positive max_resources.")
-        if type(min_resources) is not int or min_resources <= 0:
-            raise ValueError("Halving estimator resource requires positive integer min_resources.")
-        params = base_estimator.get_params(deep=True)
-        routed = f"model__estimator__{resource}"
-        resource = routed if routed in params else resource
-        if resource not in params:
-            raise ValueError("Halving resource is not an available estimator parameter.")
+    min_resources = _resource_count(min_resources)
+    max_resources = _resource_count(max_resources)
+    resource = _validate_resource(base_estimator, resource, min_resources, max_resources)
     if type(min_resources) is int and type(max_resources) is int and min_resources > max_resources:
         raise ValueError("Halving min_resources cannot exceed max_resources.")
     space = clean_search_space(config.search_space)
@@ -65,29 +47,7 @@ def build_halving_searcher(
         raise ValueError("Halving resource cannot also appear in search_space.")
     scoring = wrap_fold_scorer(base_estimator, scoring)
 
-    # Halving search uses sklearn's internal scheduler and does NOT
-    # expose per-trial callbacks (no equivalent of Optuna's callbacks=).
-    # Emit a started log here so the Live Logs panel is never empty
-    # while the search is running. Per-iteration progress is not
-    # available without monkey-patching sklearn internals.
-    if log_callback:
-        if config.strategy == "halving_grid":
-            grid_size = int(np.prod([len(v) for v in space.values()] or [0]))
-            log_callback(
-                f"Starting halving_grid search "
-                f"(grid_size={grid_size}, factor={factor}, "
-                f"resource={resource}, min_resources={min_resources}, max_resources={max_resources}). "
-                f"sklearn HalvingGridSearchCV runs without per-trial callbacks; "
-                f"this may take a while."
-            )
-        else:
-            log_callback(
-                f"Starting halving_random search "
-                f"(n_candidates={config.n_trials}, factor={factor}, "
-                f"resource={resource}, min_resources={min_resources}, max_resources={max_resources}). "
-                f"sklearn HalvingRandomSearchCV runs without per-trial callbacks; "
-                f"this may take a while."
-            )
+    _log_search_start(config, space, factor, resource, min_resources, max_resources, log_callback)
 
     if config.strategy == "halving_grid":
         return HalvingGridSearchCV(
@@ -119,3 +79,81 @@ def build_halving_searcher(
         min_resources=min_resources,
         max_resources=max_resources,
     )
+
+
+def _resource_count(value: Any) -> Any:
+    """Accept digit strings as resource counts while retaining sklearn sentinels."""
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return value
+
+
+def _validate_resource(
+    base_estimator: Any, resource: str, min_resources: Any, max_resources: Any
+) -> str:
+    """Validate sample budgets or resolve the declared estimator resource parameter."""
+    if resource == "n_samples":
+        _validate_sample_resources(min_resources, max_resources)
+        return resource
+    return _validate_estimator_resource(base_estimator, resource, min_resources, max_resources)
+
+
+def _validate_sample_resources(min_resources: Any, max_resources: Any) -> None:
+    """Allow sample-budget sentinels or strictly positive integer bounds."""
+    if min_resources not in ("exhaust", "smallest") and (
+        type(min_resources) is not int or min_resources <= 0
+    ):
+        raise ValueError("Halving min_resources must be positive or exhaust/smallest.")
+    if max_resources != "auto" and (type(max_resources) is not int or max_resources <= 0):
+        raise ValueError("Halving max_resources must be auto or a positive integer.")
+
+
+def _validate_estimator_resource(
+    base_estimator: Any, resource: str, min_resources: Any, max_resources: Any
+) -> str:
+    """Require numeric estimator budgets and route fold-wrapped parameter names."""
+    if type(max_resources) is not int or max_resources <= 0:
+        raise ValueError("Halving estimator resource requires explicit positive max_resources.")
+    if type(min_resources) is not int or min_resources <= 0:
+        raise ValueError("Halving estimator resource requires positive integer min_resources.")
+    params = base_estimator.get_params(deep=True)
+    routed = f"model__estimator__{resource}"
+    resource = routed if routed in params else resource
+    if resource not in params:
+        raise ValueError("Halving resource is not an available estimator parameter.")
+    return resource
+
+
+def _log_search_start(
+    config: TuningConfig,
+    space: dict,
+    factor: Any,
+    resource: str,
+    min_resources: Any,
+    max_resources: Any,
+    log_callback: Callable[[str], None] | None,
+) -> None:
+    """Report the scheduled halving search while sklearn owns iteration progress."""
+    # Halving search uses sklearn's internal scheduler and does NOT
+    # expose per-trial callbacks (no equivalent of Optuna's callbacks=).
+    # Emit a started log here so the Live Logs panel is never empty
+    # while the search is running. Per-iteration progress is not
+    # available without monkey-patching sklearn internals.
+    if log_callback:
+        if config.strategy == "halving_grid":
+            grid_size = int(np.prod([len(v) for v in space.values()] or [0]))
+            log_callback(
+                f"Starting halving_grid search "
+                f"(grid_size={grid_size}, factor={factor}, "
+                f"resource={resource}, min_resources={min_resources}, max_resources={max_resources}). "
+                f"sklearn HalvingGridSearchCV runs without per-trial callbacks; "
+                f"this may take a while."
+            )
+        else:
+            log_callback(
+                f"Starting halving_random search "
+                f"(n_candidates={config.n_trials}, factor={factor}, "
+                f"resource={resource}, min_resources={min_resources}, max_resources={max_resources}). "
+                f"sklearn HalvingRandomSearchCV runs without per-trial callbacks; "
+                f"this may take a while."
+            )

@@ -110,14 +110,7 @@ def validate_quality_policy(
         raise ValueError("metric must be a supported heldout metric compatible with the task.")
     if quality_threshold is not None:
         _validate_threshold(metric, quality_threshold, "quality_threshold")
-    if quality_gates is None:
-        return
-    if not isinstance(quality_gates, dict):
-        raise ValueError("quality_gates must map additional heldout metrics to thresholds.")
-    for name, threshold in quality_gates.items():
-        if not isinstance(name, str) or name not in supported or name == metric:
-            raise ValueError("quality_gates needs distinct, task-compatible additional metrics.")
-        _validate_threshold(name, threshold, f"quality_gates[{name}]")
+    _validate_additional_gates(quality_gates, metric, supported)
 
 
 def evaluate_quality_gates(
@@ -131,12 +124,7 @@ def evaluate_quality_gates(
     thresholds.update(sorted((quality_gates or {}).items()))
     results = []
     for name, threshold in thresholds.items():
-        value = metrics.get(name)
-        direction = "minimize" if name in _MINIMIZE else "maximize"
-        available = value is not None and math.isfinite(value)
-        passed = available and (
-            value <= threshold if direction == "minimize" else value >= threshold
-        )
+        value, direction, available, passed = _quality_gate_outcome(metrics, name, threshold)
         results.append(
             {
                 "metric": name,
@@ -193,10 +181,9 @@ def _validate_model_reference(reference: ResolvedModel) -> None:
         or not reference.version.isdigit()
         or int(reference.version) <= 0
         or reference.model_uri != f"models:/{reference.name}/{reference.version}"
-        or not isinstance(reference.digest, str)
-        or not reference.digest
     ):
         raise ValueError("Each model must have a concrete version and artifact digest.")
+    _validate_reference_digest(reference)
 
 
 def _validate_model_pair(candidate: ResolvedModel, champion: ResolvedModel | None) -> None:
@@ -421,3 +408,34 @@ def compare_registered_local_models(
         reason=reason,
         quality_gates=dict(quality_gates) if quality_gates else None,
     )
+
+
+def _validate_additional_gates(
+    quality_gates: dict[str, float] | None, metric: str, supported: set[str]
+) -> None:
+    """Validate additional task-compatible thresholds in their configured order."""
+    if quality_gates is None:
+        return
+    if not isinstance(quality_gates, dict):
+        raise ValueError("quality_gates must map additional heldout metrics to thresholds.")
+    for name, threshold in quality_gates.items():
+        if not isinstance(name, str) or name not in supported or name == metric:
+            raise ValueError("quality_gates needs distinct, task-compatible additional metrics.")
+        _validate_threshold(name, threshold, f"quality_gates[{name}]")
+
+
+def _quality_gate_outcome(
+    metrics: dict[str, float], name: str, threshold: float
+) -> tuple[float | None, str, bool, bool]:
+    """Compute availability and threshold outcome for one quality metric."""
+    value = metrics.get(name)
+    direction = "minimize" if name in _MINIMIZE else "maximize"
+    available = value is not None and math.isfinite(value)
+    passed = available and (value <= threshold if direction == "minimize" else value >= threshold)
+    return value, direction, available, passed
+
+
+def _validate_reference_digest(reference: ResolvedModel) -> None:
+    """Require artifact identity after the concrete registry identity is validated."""
+    if not isinstance(reference.digest, str) or not reference.digest:
+        raise ValueError("Each model must have a concrete version and artifact digest.")

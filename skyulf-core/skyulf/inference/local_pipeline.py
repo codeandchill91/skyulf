@@ -84,10 +84,9 @@ def _manifest(
     classification_probabilities = not classification or callable(
         getattr(model, "predict_proba", None)
     )
-    if use_tuned_thresholds and not classification_probabilities:
-        raise ValueError("Tuned thresholds require classification probabilities.")
-    if use_tuned_thresholds and (not classification or pipeline._tuned_thresholds is None):
-        raise ValueError("Tuned thresholds require fitted classification thresholds.")
+    _validate_tuned_thresholds(
+        pipeline, use_tuned_thresholds, classification, classification_probabilities
+    )
     return LocalPipelineManifest(
         fitted_engine=fitted_engine,
         input_columns=raw.columns,
@@ -107,6 +106,16 @@ def _manifest(
             else None
         ),
     )
+
+
+def _validate_tuned_thresholds(
+    pipeline: SkyulfPipeline, enabled: bool, classification: bool, probabilities: bool
+) -> None:
+    """Require probability support and fitted thresholds before recording their use."""
+    if enabled and not probabilities:
+        raise ValueError("Tuned thresholds require classification probabilities.")
+    if enabled and (not classification or pipeline._tuned_thresholds is None):
+        raise ValueError("Tuned thresholds require fitted classification thresholds.")
 
 
 def _check_runtime(manifest: LocalPipelineManifest) -> None:
@@ -171,15 +180,7 @@ def load_local_pipeline(path: str | Path) -> LocalPipelineArtifact:
     if type(document) is not dict or type(document.get("format_version")) is not int:
         raise ValueError("Invalid local artifact format_version.")
     manifest = LocalPipelineManifest.model_validate_json(metadata)
-    if len(manifest.input_columns) != len(manifest.input_dtypes) or len(
-        manifest.feature_columns
-    ) != len(manifest.feature_dtypes):
-        raise ValueError("Local artifact schema columns and dtypes disagree.")
-    if any(
-        len(set(columns)) != len(columns)
-        for columns in (manifest.input_columns, manifest.feature_columns)
-    ):
-        raise ValueError("Local artifact schema columns must be unique.")
+    _validate_manifest_schema(manifest)
     _check_runtime(manifest)
     payload = _read_bounded(source / "pipeline.pkl", _MAX_PIPELINE_BYTES)
     if checksum(payload) != manifest.pipeline_sha256:
@@ -195,6 +196,19 @@ def load_local_pipeline(path: str | Path) -> LocalPipelineArtifact:
     if _manifest(pipeline, payload, manifest.use_tuned_thresholds) != manifest:
         raise ValueError("Local artifact manifest disagrees with its fitted pipeline.")
     return LocalPipelineArtifact(manifest, pipeline)
+
+
+def _validate_manifest_schema(manifest: LocalPipelineManifest) -> None:
+    """Require matching dtype counts and unique names for input and model schemas."""
+    if len(manifest.input_columns) != len(manifest.input_dtypes) or len(
+        manifest.feature_columns
+    ) != len(manifest.feature_dtypes):
+        raise ValueError("Local artifact schema columns and dtypes disagree.")
+    if any(
+        len(set(columns)) != len(columns)
+        for columns in (manifest.input_columns, manifest.feature_columns)
+    ):
+        raise ValueError("Local artifact schema columns must be unique.")
 
 
 def require_local_pipeline_scope(
@@ -216,10 +230,7 @@ def predict_local_pipeline(
         raise TypeError("Expected a LocalPipelineArtifact.")
     if not isinstance(frame, pd.DataFrame | pl.DataFrame):
         raise TypeError("Local prediction requires a pandas or Polars DataFrame.")
-    if artifact.manifest.fitted_engine == "polars":
-        native = pl.from_pandas(frame) if isinstance(frame, pd.DataFrame) else frame
-    else:
-        native = frame.to_pandas() if isinstance(frame, pl.DataFrame) else frame
+    native = _prediction_frame(frame, artifact.manifest)
     expected = SkyulfSchema(
         artifact.manifest.input_columns,
         dict(zip(artifact.manifest.input_columns, artifact.manifest.input_dtypes, strict=True)),
@@ -250,3 +261,12 @@ def predict_local_pipeline(
         for position in range(len(artifact.manifest.classes)):
             result[f"probability_{position}"] = probabilities[:, position]
     return result
+
+
+def _prediction_frame(
+    frame: pd.DataFrame | pl.DataFrame, manifest: LocalPipelineManifest
+) -> pd.DataFrame | pl.DataFrame:
+    """Convert inputs to the engine recorded during the successful model fit."""
+    if manifest.fitted_engine == "polars":
+        return pl.from_pandas(frame) if isinstance(frame, pd.DataFrame) else frame
+    return frame.to_pandas() if isinstance(frame, pl.DataFrame) else frame

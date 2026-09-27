@@ -108,6 +108,13 @@ class _PhaseStore:
         self.run_id = reference["run_id"]
         self.request_digest = reference["request_sha256"]
         self.request = self.read("lifecycle/request.json")
+        self._validate_bound_request()
+        receipt = self.receipt(reference["phase"])
+        if evidence_digest(receipt) != reference["receipt_sha256"]:
+            raise ValueError("Lifecycle predecessor receipt digest differs from its reference.")
+
+    def _validate_bound_request(self) -> None:
+        """Verify the loaded request identity and saved integrity tag."""
         if (
             self.request.get("version") != 1
             or self.request.get("context") != self.context.identity()
@@ -116,9 +123,6 @@ class _PhaseStore:
             or self.tags().get("skyulf.lifecycle.request") != self.request_digest
         ):
             raise ValueError("Lifecycle invocation or pinned request differs from its reference.")
-        receipt = self.receipt(reference["phase"])
-        if evidence_digest(receipt) != reference["receipt_sha256"]:
-            raise ValueError("Lifecycle predecessor receipt digest differs from its reference.")
 
     def receipt(self, phase: str) -> dict[str, Any]:
         """Verify the saved receipt and its entire predecessor chain before reuse."""
@@ -136,6 +140,11 @@ class _PhaseStore:
             raise ValueError(
                 "Lifecycle predecessor identity or digest differs from saved evidence."
             )
+        self._validate_predecessor_chain(phase, value)
+        return value
+
+    def _validate_predecessor_chain(self, phase: str, value: dict[str, Any]) -> None:
+        """Recursively verify the expected predecessor before reusing a receipt."""
         previous = value.get("predecessor")
         expected = _PREDECESSORS.get(phase)
         if expected is None:
@@ -147,7 +156,6 @@ class _PhaseStore:
             or previous != self.reference(self.receipt(expected))
         ):
             raise ValueError("Lifecycle predecessor identity differs from saved evidence.")
-        return value
 
     def reference(self, receipt: dict[str, Any]) -> dict[str, str]:
         """Expose only durable identity and digest strings to task values."""

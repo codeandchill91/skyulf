@@ -103,6 +103,11 @@ def _columns(config: dict[str, Any]) -> None:
         for key in ("event_column", "result_available_at_column")
         if config.get(key) is not None
     )
+    _validate_column_roles(names, config["record_key_columns"])
+
+
+def _validate_column_roles(names: list[Any], record_key_columns: list[str]) -> None:
+    """Reject ambiguous or reserved source column roles in their declared order."""
     checked: list[str] = []
     for name in names:
         if not isinstance(name, str) or not _IDENTIFIER.fullmatch(name):
@@ -110,7 +115,7 @@ def _columns(config: dict[str, Any]) -> None:
         checked.append(name)
     if len({name.casefold() for name in checked}) != len(checked):
         raise ValueError("Key, input, target, event and label columns must be distinct.")
-    if any(name.lower() in PREDICTION_METADATA_COLUMNS for name in config["record_key_columns"]):
+    if any(name.lower() in PREDICTION_METADATA_COLUMNS for name in record_key_columns):
         raise ValueError("record_key_columns contain reserved prediction metadata names.")
     if any(
         name.lower() in {"_change_type", "_commit_version", "_commit_timestamp"} for name in checked
@@ -178,8 +183,8 @@ def _validate_workflow_sources(config: dict[str, Any]) -> None:
         training_date_spec(config.get(field) if config.get(field) is not None else {})
 
 
-def _validate_workflow_model_selection(config: dict[str, Any], selection: str) -> None:
-    """Require valid pins, risk metadata and registry selection settings."""
+def _validate_champion_metadata(config: dict[str, Any]) -> None:
+    """Validate optional champion pins and risk metadata before scoring selection."""
     champion = config.get("champion_version")
     if champion is not None and (
         not isinstance(champion, str) or not re.fullmatch(r"[1-9][0-9]*", champion)
@@ -188,6 +193,11 @@ def _validate_workflow_model_selection(config: dict[str, Any], selection: str) -
     risk = config.get("risk_category")
     if risk is not None and (not isinstance(risk, str) or len(risk.encode("utf-8")) > 256):
         raise ValueError("risk_category must be text of at most 256 UTF-8 bytes.")
+
+
+def _validate_workflow_model_selection(config: dict[str, Any], selection: str) -> None:
+    """Require valid pins, risk metadata and registry selection settings."""
+    _validate_champion_metadata(config)
     version = config.get("model_version")
     if version is not None and (
         not isinstance(version, str) or not re.fullmatch(r"[1-9][0-9]*", version)
@@ -404,6 +414,17 @@ def _preview_search(checked: dict[str, Any], cv: LocalCVSpec) -> list[str]:
         f"Search random_state={effective.get('random_state', 42)} | "
         f"cv_random_state={cv.random_state} (independent seeds).",
     ]
+    _append_search_cv_preview(lines, cv)
+    if strategy == "optuna" and effective.get("timeout") is not None:
+        lines.append(
+            f"Optuna timeout: {effective['timeout']} seconds is a soft study limit; "
+            "it does not interrupt an in-flight fit."
+        )
+    return lines
+
+
+def _append_search_cv_preview(lines: list[str], cv: LocalCVSpec) -> None:
+    """Explain the effective search fold policy and repeated nested-search budgets."""
     if cv.enabled:
         lines.append(f"Search CV: {cv.method}, {cv.folds} folds, training partition only.")
     else:
@@ -414,12 +435,6 @@ def _preview_search(checked: dict[str, Any], cv: LocalCVSpec) -> list[str]:
             f"Nested CV: independent {inner}-fold inner search inside each of {cv.folds} outer folds, "
             "then a separate final training search. Search budgets apply to each search."
         )
-    if strategy == "optuna" and effective.get("timeout") is not None:
-        lines.append(
-            f"Optuna timeout: {effective['timeout']} seconds is a soft study limit; "
-            "it does not interrupt an in-flight fit."
-        )
-    return lines
 
 
 def _preview_explanations(pipeline: dict[str, Any]) -> list[str]:
@@ -479,15 +494,7 @@ def migrate_workflow_config(
     if "task" in config and config["task"] != task:
         raise ValueError("Migration must not change the existing task.")
     migrated = deepcopy(config)
-    if "model_selection_mode" in migrated:
-        if {"score_model_selection", "promotion_policy"}.intersection(migrated):
-            raise ValueError("Remove mixed legacy/new policies before migration.")
-        legacy = _choice(migrated, "model_selection_mode", {"pinned_version", "auto_champion"})
-        migrated.pop("model_selection_mode")
-        migrated.update(
-            score_model_selection="champion" if legacy == "auto_champion" else "pinned_version",
-            promotion_policy="automatic" if legacy == "auto_champion" else "manual_approval",
-        )
+    _migrate_selection_policy(migrated)
     if "score_handoff" in migrated and migrated["score_handoff"] != score_handoff:
         raise ValueError("Migration must not silently change the existing score_handoff.")
     migrated.update(config_version=1, task=task, score_handoff=score_handoff)
@@ -497,6 +504,19 @@ def migrate_workflow_config(
     _choice(migrated, "score_model_selection", {"champion", "pinned_version"})
     _choice(migrated, "promotion_policy", {"automatic", "manual_approval"})
     return migrated
+
+
+def _migrate_selection_policy(migrated: dict[str, Any]) -> None:
+    """Translate legacy policy fields without merging contradictory generations."""
+    if "model_selection_mode" in migrated:
+        if {"score_model_selection", "promotion_policy"}.intersection(migrated):
+            raise ValueError("Remove mixed legacy/new policies before migration.")
+        legacy = _choice(migrated, "model_selection_mode", {"pinned_version", "auto_champion"})
+        migrated.pop("model_selection_mode")
+        migrated.update(
+            score_model_selection="champion" if legacy == "auto_champion" else "pinned_version",
+            promotion_policy="automatic" if legacy == "auto_champion" else "manual_approval",
+        )
 
 
 def validate_deployed_contract(config: dict[str, Any], parameters: dict[str, str]) -> None:

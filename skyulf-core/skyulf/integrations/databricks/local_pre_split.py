@@ -5,11 +5,21 @@ import math
 from collections.abc import Callable
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, TypeGuard
 
 from ...inference.project_code import is_registered_project_step
 from ...preprocessing.casting import TYPE_ALIASES
 from ._contracts import column_name
+
+
+def _distinct_column_names(columns: Any) -> TypeGuard[list[str]]:
+    """Check an explicit list of case-insensitively distinct string column names."""
+    return (
+        type(columns) is list
+        and bool(columns)
+        and all(type(name) is str for name in columns)
+        and len({name.casefold() for name in columns}) == len(columns)
+    )
 
 
 def deduplicate_columns(step: dict[str, Any]) -> tuple[str, ...]:
@@ -19,10 +29,7 @@ def deduplicate_columns(step: dict[str, Any]) -> tuple[str, ...]:
     keep = params.get("keep", "first")
     if (
         set(params) - {"subset", "keep"}
-        or type(subset) is not list
-        or not subset
-        or any(type(name) is not str for name in subset)
-        or len({name.casefold() for name in subset}) != len(subset)
+        or not _distinct_column_names(subset)
         or (keep is not False and keep not in ("first", "last", "none"))
     ):
         raise ValueError(
@@ -45,10 +52,7 @@ def custom_filter_columns(step: dict[str, Any]) -> tuple[str, ...]:
         or set(declaration) != {"effect", "required_columns", "learns_from_data"}
         or declaration["effect"] != "filter"
         or declaration["learns_from_data"] is not False
-        or type(columns) is not list
-        or not columns
-        or any(type(name) is not str for name in columns)
-        or len({name.casefold() for name in columns}) != len(columns)
+        or not _distinct_column_names(columns)
         or not _json_value(step["params"])
     ):
         raise ValueError(
@@ -102,23 +106,10 @@ def _casting_columns(params: dict[str, Any]) -> tuple[str, ...]:
     type_map = params.get("column_types", {})
     if not isinstance(type_map, dict) or any(not isinstance(k, str) for k in type_map):
         raise ValueError("pre_split_steps Casting requires named column_types.")
-    if columns is None:
-        columns = []
-    if not isinstance(columns, list) or any(not isinstance(c, str) or not c for c in columns):
-        raise ValueError("pre_split_steps Casting requires explicit columns.")
-    if columns and "target_type" not in params:
-        raise ValueError("pre_split_steps Casting columns require target_type.")
-    if "target_type" in params and not columns:
-        raise ValueError("pre_split_steps Casting target_type requires columns.")
+    columns = _casting_selection(params, columns)
     selected = dict(type_map)
     selected.update(dict.fromkeys(columns, params.get("target_type")))
-    if not selected or any(
-        not isinstance(dtype, str)
-        or TYPE_ALIASES.get(dtype.lower(), dtype) not in set(TYPE_ALIASES.values())
-        or TYPE_ALIASES.get(dtype.lower(), dtype) == "category"
-        for dtype in selected.values()
-    ):
-        raise ValueError("pre_split_steps Casting needs fixed noncategorical dtypes.")
+    _validate_cast_dtypes(selected)
     if type(params.get("coerce_on_error", True)) is not bool:
         raise ValueError("pre_split_steps Casting coerce_on_error must be boolean.")
     return tuple(dict.fromkeys(selected))
@@ -128,48 +119,18 @@ def _validate_replacement_mapping(params: dict[str, Any], columns: tuple[str, ..
     """Keep flat or per-column mappings lossless through saved JSON."""
     mapping = params.get("mapping")
     if mapping is not None:
-        maps = mapping.values() if isinstance(mapping, dict) else ()
-        if (
-            not isinstance(mapping, dict)
-            or not mapping
-            or any(not isinstance(key, str) for key in mapping)
-            or any(not isinstance(item, dict) and not _json_value(item) for item in maps)
-        ):
-            raise ValueError(
-                "pre_split_steps mapping needs string keys; use replacements pairs for numeric keys."
-            )
+        maps = _replacement_maps(mapping)
         if "value" in params or "to_replace" in params or "replacements" in params:
             raise ValueError(
                 "pre_split_steps mapping cannot be combined with another replacement mode."
             )
-        nested = [isinstance(item, dict) for item in maps]
-        if any(nested) and (not all(nested) or any(column not in columns for column in mapping)):
-            raise ValueError("pre_split_steps nested mapping must name only selected columns.")
-        for item in maps:
-            if isinstance(item, dict) and (
-                any(not isinstance(key, str) for key in item) or not _json_value(item)
-            ):
-                raise ValueError(
-                    "pre_split_steps mapping needs string keys; use replacements pairs for numeric keys."
-                )
-        for item in [mapping] if not any(nested) else maps:
-            identities = [_pair_key(key) for key in item]
-            if len(set(identities)) != len(identities):
-                raise ValueError("pre_split_steps mapping keys collide after numeric coercion.")
+        _validate_mapping_columns(mapping, maps, columns)
 
 
 def _validate_replacement_pairs(params: dict[str, Any]) -> None:
     """Reject malformed or colliding numeric replacement pairs."""
     pairs = params.get("replacements")
-    if pairs is not None and (
-        not isinstance(pairs, list)
-        or not pairs
-        or any(
-            not isinstance(pair, dict) or set(pair) != {"old", "new"} or not _json_value(pair)
-            for pair in pairs
-        )
-    ):
-        raise ValueError("pre_split_steps replacements requires lossless old/new pairs.")
+    _validate_pair_payload(pairs)
     if pairs is not None and ("value" in params or "to_replace" in params or "mapping" in params):
         raise ValueError("pre_split_steps replacements cannot be combined with another mode.")
     if pairs is not None:
@@ -294,16 +255,7 @@ def _invalid_value_columns(params: dict[str, Any]) -> tuple[str, ...]:
         type(params.get(flag, False)) is not bool for flag in ("replace_inf", "replace_neg_inf")
     ):
         raise ValueError("pre_split_steps InvalidValueReplacement flags must be boolean.")
-    if rule == "custom_range" and all(
-        params.get(bound) is None for bound in ("min_value", "max_value")
-    ):
-        raise ValueError("pre_split_steps custom_range needs a bound.")
-    if rule != "custom_range" and any(
-        params.get(bound) is not None for bound in ("min_value", "max_value")
-    ):
-        raise ValueError("pre_split_steps range bounds require custom_range.")
-    if "replacement" in params and "value" in params:
-        raise ValueError("pre_split_steps choose replacement or value, not both.")
+    _validate_invalid_value_range(params, rule)
     _validate_range_bounds(params)
     return columns
 
@@ -370,29 +322,8 @@ def projected_fixed_steps(
             continue
         clone = deepcopy(step)
         params = clone["params"]
-        if clone["transformer"] == "Casting":
-            params["column_types"] = {
-                column: dtype
-                for column, dtype in params.get("column_types", {}).items()
-                if column in selected
-            }
-            if "columns" in params:
-                params["columns"] = [column for column in params["columns"] if column in selected]
-            if not params.get("columns"):
-                params.pop("columns", None)
-                params.pop("target_type", None)
-        else:
-            params["columns"] = keep
-            if clone["transformer"] == "ValueReplacement" and isinstance(
-                params.get("mapping"), dict
-            ):
-                mapping = params["mapping"]
-                if any(isinstance(value, dict) for value in mapping.values()):
-                    params["mapping"] = {
-                        column: value for column, value in mapping.items() if column in selected
-                    }
-                    if not any(params["mapping"].values()):
-                        continue
+        if not _project_fixed_params(clone, params, keep, selected):
+            continue
         projected.append(clone)
     return projected
 
@@ -401,3 +332,125 @@ def target_contract(steps: tuple[dict[str, Any], ...], target_column: str) -> li
     """Describe ordered target edits without step labels or feature-only parameters."""
     projected = projected_fixed_steps(steps, (target_column,))
     return [{"transformer": step["transformer"], "params": step["params"]} for step in projected]
+
+
+def _casting_selection(params: dict[str, Any], columns: Any) -> list[str]:
+    """Require explicit cast columns paired with their requested target type."""
+    if columns is None:
+        columns = []
+    if not isinstance(columns, list) or any(not isinstance(c, str) or not c for c in columns):
+        raise ValueError("pre_split_steps Casting requires explicit columns.")
+    if columns and "target_type" not in params:
+        raise ValueError("pre_split_steps Casting columns require target_type.")
+    if "target_type" in params and not columns:
+        raise ValueError("pre_split_steps Casting target_type requires columns.")
+    return columns
+
+
+def _validate_cast_dtypes(selected: dict[str, Any]) -> None:
+    """Require supported noncategorical fixed dtypes for every selected cast column."""
+    if not selected or any(
+        not isinstance(dtype, str)
+        or TYPE_ALIASES.get(dtype.lower(), dtype) not in set(TYPE_ALIASES.values())
+        or TYPE_ALIASES.get(dtype.lower(), dtype) == "category"
+        for dtype in selected.values()
+    ):
+        raise ValueError("pre_split_steps Casting needs fixed noncategorical dtypes.")
+
+
+def _replacement_maps(mapping: Any) -> Any:
+    """Validate string mapping keys and JSON-safe scalar values before choosing a mode."""
+    maps = mapping.values() if isinstance(mapping, dict) else ()
+    if (
+        not isinstance(mapping, dict)
+        or not mapping
+        or any(not isinstance(key, str) for key in mapping)
+        or any(not isinstance(item, dict) and not _json_value(item) for item in maps)
+    ):
+        raise ValueError(
+            "pre_split_steps mapping needs string keys; use replacements pairs for numeric keys."
+        )
+    return maps
+
+
+def _validate_mapping_columns(mapping: dict[str, Any], maps: Any, columns: tuple[str, ...]) -> None:
+    """Validate per-column mapping structure before checking numeric key collisions."""
+    nested = [isinstance(item, dict) for item in maps]
+    if any(nested) and (not all(nested) or any(column not in columns for column in mapping)):
+        raise ValueError("pre_split_steps nested mapping must name only selected columns.")
+    _validate_nested_mapping_values(maps)
+    for item in [mapping] if not any(nested) else maps:
+        identities = [_pair_key(key) for key in item]
+        if len(set(identities)) != len(identities):
+            raise ValueError("pre_split_steps mapping keys collide after numeric coercion.")
+
+
+def _validate_nested_mapping_values(maps: Any) -> None:
+    """Require nested mapping keys and values to survive a JSON round trip."""
+    for item in maps:
+        if isinstance(item, dict) and (
+            any(not isinstance(key, str) for key in item) or not _json_value(item)
+        ):
+            raise ValueError(
+                "pre_split_steps mapping needs string keys; use replacements pairs for numeric keys."
+            )
+
+
+def _validate_pair_payload(pairs: Any) -> None:
+    """Check replacement pair structure and lossless JSON values before mode conflicts."""
+    if pairs is not None and (
+        not isinstance(pairs, list)
+        or not pairs
+        or any(
+            not isinstance(pair, dict) or set(pair) != {"old", "new"} or not _json_value(pair)
+            for pair in pairs
+        )
+    ):
+        raise ValueError("pre_split_steps replacements requires lossless old/new pairs.")
+
+
+def _validate_invalid_value_range(params: dict[str, Any], rule: Any) -> None:
+    """Require range bounds only for custom ranges and one replacement value field."""
+    if rule == "custom_range" and all(
+        params.get(bound) is None for bound in ("min_value", "max_value")
+    ):
+        raise ValueError("pre_split_steps custom_range needs a bound.")
+    if rule != "custom_range" and any(
+        params.get(bound) is not None for bound in ("min_value", "max_value")
+    ):
+        raise ValueError("pre_split_steps range bounds require custom_range.")
+    if "replacement" in params and "value" in params:
+        raise ValueError("pre_split_steps choose replacement or value, not both.")
+
+
+def _project_fixed_params(
+    clone: dict[str, Any], params: dict[str, Any], keep: list[str], selected: set[str]
+) -> bool:
+    """Project cast or replacement parameters and report whether a mapping has any edits."""
+    if clone["transformer"] == "Casting":
+        _project_cast_params(params, selected)
+    else:
+        params["columns"] = keep
+        if clone["transformer"] == "ValueReplacement" and isinstance(params.get("mapping"), dict):
+            mapping = params["mapping"]
+            if any(isinstance(value, dict) for value in mapping.values()):
+                params["mapping"] = {
+                    column: value for column, value in mapping.items() if column in selected
+                }
+                if not any(params["mapping"].values()):
+                    return False
+    return True
+
+
+def _project_cast_params(params: dict[str, Any], selected: set[str]) -> None:
+    """Restrict column type maps and shared target casts to selected model columns."""
+    params["column_types"] = {
+        column: dtype
+        for column, dtype in params.get("column_types", {}).items()
+        if column in selected
+    }
+    if "columns" in params:
+        params["columns"] = [column for column in params["columns"] if column in selected]
+    if not params.get("columns"):
+        params.pop("columns", None)
+        params.pop("target_type", None)

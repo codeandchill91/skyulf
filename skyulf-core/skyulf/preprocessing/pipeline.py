@@ -228,22 +228,7 @@ class FeatureEngineer:
         """
         spec = getattr(self, "frame_spec", None)
         if use_spark(data, getattr(self, "execution_options", None), spec):
-            assert spec is not None
-            if target_column is not None and target_column != spec.target:
-                raise ValueError("target_column conflicts with frame_spec.target.")
-            if on_split is not None:
-                raise ValueError("Spark FE uses one frame; on_split is unsupported.")
-            assert self.execution_options is not None
-            result, metrics, records = fit_spark(
-                data,
-                self.steps_config,
-                spec,
-                state_max_bytes=self.execution_options.state_max_bytes,
-            )
-            self.fitted_steps = records
-            self._spark_fitted = True
-            self._portable_fitted = True
-            return result, metrics
+            return self._fit_transform_spark(data, spec, target_column, on_split)
         self._portable_fitted = False
         self.fitted_steps = []  # Reset fitted steps
         current_data = data
@@ -338,6 +323,31 @@ class FeatureEngineer:
 
         self._portable_fitted = True
         return current_data, metrics
+
+    def _fit_transform_spark(
+        self,
+        data: Any,
+        spec: FrameSpec | None,
+        target_column: str | None,
+        on_split: Callable[[SplitDataset], None] | None,
+    ) -> tuple[Any, dict[str, Any]]:
+        """Fit one Spark frame and publish learned records after native execution succeeds."""
+        assert spec is not None
+        if target_column is not None and target_column != spec.target:
+            raise ValueError("target_column conflicts with frame_spec.target.")
+        if on_split is not None:
+            raise ValueError("Spark FE uses one frame; on_split is unsupported.")
+        assert self.execution_options is not None
+        result, metrics, records = fit_spark(
+            data,
+            self.steps_config,
+            spec,
+            state_max_bytes=self.execution_options.state_max_bytes,
+        )
+        self.fitted_steps = records
+        self._spark_fitted = True
+        self._portable_fitted = True
+        return result, metrics
 
     @staticmethod
     def _step_metric_record(

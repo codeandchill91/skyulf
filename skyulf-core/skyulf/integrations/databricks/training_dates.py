@@ -56,22 +56,7 @@ class TrainingDateSpec:
         """Limit parsing to full numeric calendar dates and explicit clock/offset fields."""
         if not isinstance(self.format, str) or not self.format:
             raise ValueError("format must be a nonempty explicit numeric date format.")
-        tokens = re.findall(r"%.", self.format)
-        literals = re.sub(r"%.", "", self.format)
-        if (
-            not {"%Y", "%m", "%d"}.issubset(tokens)
-            or len(tokens) != len(set(tokens))
-            or any(token not in _TOKENS for token in tokens)
-            or re.search(r"[^ /:.,T+\-]", literals)
-        ):
-            raise ValueError("format requires %Y, %m, %d and supported numeric directives.")
-        timed = "%H" in tokens
-        if (
-            ("%M" in tokens) != timed
-            or any(token in tokens and not timed for token in ("%S", "%f", "%z"))
-            or ("%f" in tokens and "%S" not in tokens)
-        ):
-            raise ValueError("format time requires %H and %M; fractions require %S.")
+        tokens, timed = _format_directives(self.format)
         if not timed and self.date_only != "midnight":
             raise ValueError("Date-only format requires date_only=midnight.")
         if "%z" in tokens and self.timezone is not None:
@@ -111,34 +96,11 @@ def parse_training_date(
     value: Any, spec: TrainingDateSpec, *, allow_null: bool = False
 ) -> datetime | None:
     """Normalize one declared source value to UTC without inferring a format or zone."""
-    if (
-        value is None
-        or value is pd.NaT
-        or value is pd.NA
-        or (isinstance(value, float) and pd.isna(value))
-    ):
+    if _null_training_date(value):
         if allow_null:
             return None
         raise ValueError("Training event time must not be null.")
-    if isinstance(value, str):
-        if spec.format is None:
-            raise ValueError("String training dates require an explicit format.")
-        pattern = re.escape(spec.format)
-        for token, expression in _TOKENS.items():
-            pattern = pattern.replace(re.escape(token), expression)
-        if not re.fullmatch(pattern, value):
-            raise ValueError("Training date does not match its declared format.")
-        value = datetime.strptime(value, spec.format)
-    elif isinstance(value, date) and not isinstance(value, datetime):
-        if spec.date_only != "midnight":
-            raise ValueError("Date-only source requires date_only=midnight and timezone.")
-        value = datetime.combine(value, time.min)
-    if not isinstance(value, datetime):
-        raise ValueError("Training dates must be datetime, date or explicitly formatted strings.")
-    if isinstance(value, pd.Timestamp):
-        if value.nanosecond:
-            raise ValueError("Training dates support microsecond precision, not nanoseconds.")
-        value = value.to_pydatetime()
+    value = _source_datetime(value, spec)
     if value.tzinfo is not None and value.utcoffset() is not None:
         normalized = value.astimezone(UTC)
         if normalized.astimezone(value.tzinfo).replace(tzinfo=None) != value.replace(tzinfo=None):
@@ -182,40 +144,9 @@ def normalize_training_dates(
     F = import_module("pyspark.sql.functions")
     types = import_module("pyspark.sql.types")
 
-    expressions = {}
-    for name, spec, nullable in (
-        (event_column, event_spec, False),
-        (result_column, result_spec, True),
-    ):
-        if name is None:
-            continue
-        dtype = source.schema[name].dataType
-        value = F.col(name)
-        if isinstance(dtype, types.TimestampType):
-            if spec != TrainingDateSpec():
-                raise ValueError(f"{name}: native Spark timestamps require default parsing rules.")
-            micros = F.expr(f"unix_micros(`{name}`)")
-            error = F.lit(None).cast("string")
-            if not nullable:
-                error = F.when(value.isNull(), F.lit("Training event time must not be null."))
-            expressions[name] = F.struct(micros.alias("micros"), error.alias("error"))
-            continue
-        if isinstance(dtype, types.StringType):
-            if spec.format is None:
-                raise ValueError(f"{name}: string training dates require an explicit format.")
-        elif isinstance(dtype, types.DateType):
-            if spec.date_only != "midnight" or spec.timezone is None or spec.format is not None:
-                raise ValueError(
-                    f"{name}: native dates require date_only=midnight, timezone and no format."
-                )
-        elif isinstance(dtype, types.TimestampNTZType):
-            if spec.timezone is None or spec.format is not None or spec.date_only != "reject":
-                raise ValueError(f"{name}: native local timestamps require timezone only.")
-        else:
-            raise ValueError(f"{name}: unsupported training date source type.")
-        expressions[name] = F.udf(
-            _date_transport_parser(spec, nullable), "struct<micros:long,error:string>"
-        )(value)
+    expressions = _date_expressions(
+        source, event_column, result_column, event_spec, result_spec, F, types
+    )
     normalized = source.select(
         *(
             expressions[name].alias(name) if name in expressions else F.col(name)
@@ -250,3 +181,131 @@ def _date_transport_parser(spec: TrainingDateSpec, nullable: bool) -> Any:
             return None, str(exc)
 
     return parse
+
+
+def _format_directives(format_string: str) -> tuple[list[str], bool]:
+    """Validate supported calendar and clock directives before timezone policy."""
+    tokens = re.findall(r"%.", format_string)
+    literals = re.sub(r"%.", "", format_string)
+    if (
+        not {"%Y", "%m", "%d"}.issubset(tokens)
+        or len(tokens) != len(set(tokens))
+        or any(token not in _TOKENS for token in tokens)
+        or re.search(r"[^ /:.,T+\-]", literals)
+    ):
+        raise ValueError("format requires %Y, %m, %d and supported numeric directives.")
+    timed = _validate_clock_directives(tokens)
+    return tokens, timed
+
+
+def _source_datetime(value: Any, spec: TrainingDateSpec) -> datetime:
+    """Parse declared calendar values and precision before timezone conversion."""
+    if isinstance(value, str):
+        if spec.format is None:
+            raise ValueError("String training dates require an explicit format.")
+        pattern = re.escape(spec.format)
+        for token, expression in _TOKENS.items():
+            pattern = pattern.replace(re.escape(token), expression)
+        if not re.fullmatch(pattern, value):
+            raise ValueError("Training date does not match its declared format.")
+        value = datetime.strptime(value, spec.format)
+    elif isinstance(value, date) and not isinstance(value, datetime):
+        if spec.date_only != "midnight":
+            raise ValueError("Date-only source requires date_only=midnight and timezone.")
+        value = datetime.combine(value, time.min)
+    if not isinstance(value, datetime):
+        raise ValueError("Training dates must be datetime, date or explicitly formatted strings.")
+    value = _microsecond_datetime(value)
+    return value
+
+
+def _null_training_date(value: Any) -> bool:
+    """Recognize missing dates without applying pandas null checks to arbitrary objects."""
+    return (
+        value is None
+        or value is pd.NaT
+        or value is pd.NA
+        or (isinstance(value, float) and pd.isna(value))
+    )
+
+
+def _date_expression(
+    name: str, dtype: Any, spec: TrainingDateSpec, nullable: bool, F: Any, types: Any
+) -> Any:
+    """Build one validated Spark date transport expression for its native source type."""
+    value = F.col(name)
+    if isinstance(dtype, types.TimestampType):
+        if spec != TrainingDateSpec():
+            raise ValueError(f"{name}: native Spark timestamps require default parsing rules.")
+        micros = F.expr(f"unix_micros(`{name}`)")
+        error = F.lit(None).cast("string")
+        if not nullable:
+            error = F.when(value.isNull(), F.lit("Training event time must not be null."))
+        return F.struct(micros.alias("micros"), error.alias("error"))
+    _validate_native_date_type(name, dtype, spec, types)
+    return F.udf(_date_transport_parser(spec, nullable), "struct<micros:long,error:string>")(value)
+
+
+def _validate_native_date_type(name: str, dtype: Any, spec: TrainingDateSpec, types: Any) -> None:
+    """Require parsing rules appropriate for strings, dates or native local timestamps."""
+    if isinstance(dtype, types.StringType):
+        if spec.format is None:
+            raise ValueError(f"{name}: string training dates require an explicit format.")
+    elif isinstance(dtype, types.DateType):
+        _validate_native_calendar(name, spec)
+    elif isinstance(dtype, types.TimestampNTZType):
+        if spec.timezone is None or spec.format is not None or spec.date_only != "reject":
+            raise ValueError(f"{name}: native local timestamps require timezone only.")
+    else:
+        raise ValueError(f"{name}: unsupported training date source type.")
+
+
+def _validate_clock_directives(tokens: list[str]) -> bool:
+    """Require complete clocks and seconds whenever fractional seconds are declared."""
+    timed = "%H" in tokens
+    if (
+        ("%M" in tokens) != timed
+        or any(token in tokens and not timed for token in ("%S", "%f", "%z"))
+        or ("%f" in tokens and "%S" not in tokens)
+    ):
+        raise ValueError("format time requires %H and %M; fractions require %S.")
+    return timed
+
+
+def _microsecond_datetime(value: datetime) -> datetime:
+    """Reject pandas timestamps whose nanoseconds would be lost in Python transport."""
+    if isinstance(value, pd.Timestamp):
+        if value.nanosecond:
+            raise ValueError("Training dates support microsecond precision, not nanoseconds.")
+        value = value.to_pydatetime()
+    return value
+
+
+def _date_expressions(
+    source: Any,
+    event_column: str | None,
+    result_column: str | None,
+    event_spec: TrainingDateSpec,
+    result_spec: TrainingDateSpec,
+    F: Any,
+    types: Any,
+) -> dict[str, Any]:
+    """Build event and nullable result expressions in their validation order."""
+    expressions = {}
+    for name, spec, nullable in (
+        (event_column, event_spec, False),
+        (result_column, result_spec, True),
+    ):
+        if name is None:
+            continue
+        dtype = source.schema[name].dataType
+        expressions[name] = _date_expression(name, dtype, spec, nullable, F, types)
+    return expressions
+
+
+def _validate_native_calendar(name: str, spec: TrainingDateSpec) -> None:
+    """Require explicit midnight and timezone semantics for native calendar dates."""
+    if spec.date_only != "midnight" or spec.timezone is None or spec.format is not None:
+        raise ValueError(
+            f"{name}: native dates require date_only=midnight, timezone and no format."
+        )

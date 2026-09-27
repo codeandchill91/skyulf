@@ -28,6 +28,22 @@ def fit_spark_standard(frame: Any, target: Any, config: dict) -> dict:
     for name in cols:
         _validate_dtype(schema[name])
     functions = importlib.import_module("pyspark.sql.functions")
+    references = frame.agg(
+        *_reference_expressions(frame, cols, schema, automatic, functions)
+    ).first()
+    selected = [i for i in range(len(cols)) if not automatic or not excluded(references, i)]
+    if not selected:
+        return {}
+    _validate_observations(references, selected)
+    expressions = _shifted_expressions(frame, cols, schema, selected, references, flags, functions)
+    stats = frame.agg(*expressions).first() if expressions else None
+    return _artifact(cols, selected, references, stats, flags)
+
+
+def _reference_expressions(
+    frame: Any, cols: list[str], schema: dict, automatic: bool, functions: Any
+) -> list[Any]:
+    """Collect numeric bounds and optional automatic-selection statistics."""
     expressions = [functions.count(functions.lit(1)).alias("rows")]
     for index, name in enumerate(cols):
         valid = functions.when(~missing(frame, name, schema[name], functions), _column(frame, name))
@@ -43,14 +59,27 @@ def fit_spark_standard(frame: Any, target: Any, config: dict) -> dict:
         )
         if automatic:
             expressions.extend(selection_statistics(valid, index, functions))
-    references = frame.agg(*expressions).first()
-    selected = [i for i in range(len(cols)) if not automatic or not excluded(references, i)]
-    if not selected:
-        return {}
+    return expressions
+
+
+def _validate_observations(references: Any, selected: list[int]) -> None:
+    """Reject empty training data and infinite selected observations."""
     if not references["rows"]:
         raise ValueError("Cannot fit StandardScaler on empty training data.")
     if any(references[f"inf{index}"] for index in selected):
         raise ValueError("Spark StandardScaler requires finite training values; infinity found.")
+
+
+def _shifted_expressions(
+    frame: Any,
+    cols: list[str],
+    schema: dict,
+    selected: list[int],
+    references: Any,
+    flags: dict,
+    functions: Any,
+) -> list[Any]:
+    """Build mean and variance expressions around the learned numeric references."""
     expressions = []
     if flags["with_mean"] or flags["with_std"]:
         for index in selected:
@@ -60,8 +89,7 @@ def fit_spark_standard(frame: Any, target: Any, config: dict) -> dict:
             )
             shifted = valid.cast("double") - _reference(references, index)
             expressions.extend(_statistics(shifted, index, flags, functions))
-    stats = frame.agg(*expressions).first() if expressions else None
-    return _artifact(cols, selected, references, stats, flags)
+    return expressions
 
 
 def _validate_dtype(dtype: str) -> None:
@@ -99,11 +127,7 @@ def _artifact(
     variances = [] if flags["with_std"] else None
     scales = [] if flags["with_std"] else None
     for index in selected:
-        mean = (
-            _statistic(stats[f"mean{index}"]) + _reference(references, index)
-            if means is not None
-            else None
-        )
+        mean = _mean(stats, references, index, means is not None)
         if means is not None:
             means.append(mean)
         if variances is not None and scales is not None:
@@ -119,6 +143,24 @@ def _artifact(
         "scale": scales,
         **flags,
     }
+
+
+def _mean(stats: Any, references: Any, index: int, enabled: bool) -> float | None:
+    """Recover the unshifted mean only when the scaler records means."""
+    if enabled:
+        return _statistic(stats[f"mean{index}"]) + _reference(references, index)
+    return None
+
+
+def _scaled_expression(frame: Any, name: str, index: int, state: dict) -> Any:
+    """Apply enabled centering and scaling to one numeric Spark column."""
+    expr = _column(frame, name).cast("double")
+    if state["with_mean"]:
+        expr = expr - state["mean"][index]
+    if state["with_std"]:
+        scale = state["scale"][index]
+        expr = expr / (scale if scale != 0 else 1.0)
+    return expr.alias(name)
 
 
 def _statistic(value: Any) -> float:
@@ -153,11 +195,5 @@ def apply_spark_standard(frame: Any, target: Any, params: dict) -> tuple[Any, An
         if name not in schema:
             continue
         _validate_dtype(schema[name])
-        expr = _column(frame, name).cast("double")
-        if state["with_mean"]:
-            expr = expr - state["mean"][index]
-        if state["with_std"]:
-            scale = state["scale"][index]
-            expr = expr / (scale if scale != 0 else 1.0)
-        expressions[name] = expr.alias(name)
+        expressions[name] = _scaled_expression(frame, name, index, state)
     return frame.select(*expressions.values()), target

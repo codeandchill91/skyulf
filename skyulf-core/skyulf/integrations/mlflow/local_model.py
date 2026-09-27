@@ -58,14 +58,7 @@ def log_local_model(
     tracking_uri: str | None = None,
 ) -> str:
     """Log a fitted local pipeline under one explicit MLflow run and artifact path."""
-    if type(run_id) is not str or not run_id.strip():
-        raise ValueError("run_id must be a non-empty string.")
-    if type(artifact_path) is not str or not artifact_path.strip():
-        raise ValueError("artifact_path must be a non-empty string.")
-    if any(marker in artifact_path for marker in ("#", "?")):
-        raise ValueError("artifact_path cannot contain URI delimiters.")
-    if tracking_uri is not None and (type(tracking_uri) is not str or not tracking_uri.strip()):
-        raise ValueError("tracking_uri must be a non-empty string or None.")
+    _validate_local_destination(run_id, artifact_path, tracking_uri)
     local_path = Path(local_artifact_path).resolve()
     artifact = load_local_pipeline(local_path)
     client = _make_client(tracking_uri)
@@ -157,3 +150,15 @@ def _pip_requirements(artifact: LocalPipelineArtifact) -> list[str]:
         *(f"{name}=={value}" for name, value in artifact.manifest.requirements if name != "python"),
         f"mlflow=={mlflow.__version__}",
     ]
+
+
+def _validate_local_destination(run_id: str, artifact_path: str, tracking_uri: str | None) -> None:
+    """Validate the explicit run and upload destination before reading the artifact."""
+    if type(run_id) is not str or not run_id.strip():
+        raise ValueError("run_id must be a non-empty string.")
+    if type(artifact_path) is not str or not artifact_path.strip():
+        raise ValueError("artifact_path must be a non-empty string.")
+    if any(marker in artifact_path for marker in ("#", "?")):
+        raise ValueError("artifact_path cannot contain URI delimiters.")
+    if tracking_uri is not None and (type(tracking_uri) is not str or not tracking_uri.strip()):
+        raise ValueError("tracking_uri must be a non-empty string or None.")

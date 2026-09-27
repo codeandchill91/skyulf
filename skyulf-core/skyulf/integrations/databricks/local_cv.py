@@ -51,20 +51,7 @@ class LocalCVSpec:
             raise ValueError("cv_inner_folds must be an integer from 2 to 20, or null.")
         if type(self.random_state) is not int or not 0 <= self.random_state < 2**32:
             raise ValueError("cv_random_state must be an integer from 0 to 2**32 - 1.")
-        if self.method not in (
-            "k_fold",
-            "stratified_k_fold",
-            "time_series_split",
-            "shuffle_split",
-            "nested_cv",
-        ):
-            raise ValueError(
-                "cv_type must be k_fold, stratified_k_fold, time_series_split, shuffle_split or nested_cv."
-            )
-        if self.method == "time_series_split" and self.shuffle:
-            raise ValueError("Time-series CV requires cv_shuffle=false.")
-        if self.method == "shuffle_split" and not self.shuffle:
-            raise ValueError("Shuffle-split CV requires cv_shuffle=true.")
+        _validate_cv_method(self)
 
     @classmethod
     def from_workflow(cls, config: dict[str, Any]) -> "LocalCVSpec":
@@ -80,24 +67,7 @@ class LocalCVSpec:
         )
         if not self.enabled:
             return
-        if (
-            self.method == "nested_cv"
-            and self.inner_folds is not None
-            and config.get("modeling", {}).get("type") != "hyperparameter_tuner"
-        ):
-            raise ValueError("Explicit cv_inner_folds requires a nested tuning pipeline.")
-        calculator = NodeRegistry.get_calculator(base_model_config(config)["type"])()
-        if not isinstance(calculator, BaseModelCalculator) or calculator.problem_type not in (
-            "classification",
-            "regression",
-        ):
-            raise ValueError("Bundle CV requires a registered classification or regression model.")
-        if self.method == "stratified_k_fold" and calculator.problem_type != "classification":
-            raise ValueError("Stratified CV requires a classification model.")
-        if self.method == "time_series_split" and not event_column:
-            raise ValueError(
-                "Time-series CV requires window selection with an explicit event_column."
-            )
+        _validate_cv_model(self, config, event_column)
         steps = config.get("preprocessing", [])
         if any(step.get("transformer") in SPLITTER_STEP_TYPES for step in steps):
             raise ValueError("Bundle CV owns the split; remove preprocessing splitter nodes.")
@@ -122,17 +92,7 @@ def _validate_fold_membership(
             raise ValueError(
                 "Stratified CV requires at least cv_folds rows per class and two classes."
             )
-    times = None
-    if spec.method == "time_series_split":
-        if event_column is None or event_column not in frame.columns:
-            raise ValueError("Time-series CV requires its event_column in the training payload.")
-        values = frame[event_column]
-        times = values.to_pandas() if isinstance(values, pl.Series) else values
-        if not isinstance(times.dtype, pd.DatetimeTZDtype) or times.isna().any():
-            raise ValueError(
-                "CV event_column must contain normalized nonnull timezone-aware timestamps."
-            )
-        times = times.sort_values(kind="stable").reset_index(drop=True)
+    times = _cv_event_times(frame, spec, event_column)
     splitter = _build_splitter(
         cv_type=spec.method,
         n_folds=spec.folds,
@@ -210,3 +170,59 @@ def evaluate_training_cv(
     result["cv_config"]["time_column"] = event_column
     result["fold_refit"] = adapter.summary(train_rows=len(frame))
     return result
+
+
+def _validate_cv_method(spec: LocalCVSpec) -> None:
+    """Validate supported split methods and their shuffle requirements."""
+    if spec.method not in (
+        "k_fold",
+        "stratified_k_fold",
+        "time_series_split",
+        "shuffle_split",
+        "nested_cv",
+    ):
+        raise ValueError(
+            "cv_type must be k_fold, stratified_k_fold, time_series_split, shuffle_split or nested_cv."
+        )
+    if spec.method == "time_series_split" and spec.shuffle:
+        raise ValueError("Time-series CV requires cv_shuffle=false.")
+    if spec.method == "shuffle_split" and not spec.shuffle:
+        raise ValueError("Shuffle-split CV requires cv_shuffle=true.")
+
+
+def _validate_cv_model(spec: LocalCVSpec, config: dict[str, Any], event_column: str | None) -> None:
+    """Require a compatible supervised model and temporal metadata for the selected CV."""
+    if (
+        spec.method == "nested_cv"
+        and spec.inner_folds is not None
+        and config.get("modeling", {}).get("type") != "hyperparameter_tuner"
+    ):
+        raise ValueError("Explicit cv_inner_folds requires a nested tuning pipeline.")
+    calculator = NodeRegistry.get_calculator(base_model_config(config)["type"])()
+    if not isinstance(calculator, BaseModelCalculator) or calculator.problem_type not in (
+        "classification",
+        "regression",
+    ):
+        raise ValueError("Bundle CV requires a registered classification or regression model.")
+    if spec.method == "stratified_k_fold" and calculator.problem_type != "classification":
+        raise ValueError("Stratified CV requires a classification model.")
+    if spec.method == "time_series_split" and not event_column:
+        raise ValueError("Time-series CV requires window selection with an explicit event_column.")
+
+
+def _cv_event_times(
+    frame: pd.DataFrame | pl.DataFrame, spec: LocalCVSpec, event_column: str | None
+) -> pd.Series | None:
+    """Normalize event ordering for fold boundary checks without altering the frame."""
+    times = None
+    if spec.method == "time_series_split":
+        if event_column is None or event_column not in frame.columns:
+            raise ValueError("Time-series CV requires its event_column in the training payload.")
+        values = frame[event_column]
+        times = values.to_pandas() if isinstance(values, pl.Series) else values
+        if not isinstance(times.dtype, pd.DatetimeTZDtype) or times.isna().any():
+            raise ValueError(
+                "CV event_column must contain normalized nonnull timezone-aware timestamps."
+            )
+        times = times.sort_values(kind="stable").reset_index(drop=True)
+    return times

@@ -106,12 +106,7 @@ def _validate_arguments(
         raise TypeError("bundle must be an InferenceBundle.")
     if type(run_id) is not str or not run_id.strip():
         raise ValueError("run_id must be a non-empty string.")
-    if type(artifact_path) is not str or not artifact_path.strip():
-        raise ValueError("artifact_path must be a non-empty string.")
-    if any(reserved in artifact_path for reserved in ("#", "?")):
-        raise ValueError("artifact_path cannot contain '#' or '?' because they are URI delimiters.")
-    if tracking_uri is not None and (type(tracking_uri) is not str or not tracking_uri.strip()):
-        raise ValueError("tracking_uri must be a non-empty string or None.")
+    _validate_artifact_destination(artifact_path, tracking_uri)
     return run_id
 
 
@@ -221,3 +216,13 @@ def _mlflow_dtype(dtype: str) -> Any:
             "MLflow column signatures cannot preserve this bundle dtype exactly: "
             f"{dtype}. Use int32/int64, float32/float64, bool or string."
         ) from exc
+
+
+def _validate_artifact_destination(artifact_path: str, tracking_uri: str | None) -> None:
+    """Validate the upload path and optional tracking store before packaging."""
+    if type(artifact_path) is not str or not artifact_path.strip():
+        raise ValueError("artifact_path must be a non-empty string.")
+    if any(reserved in artifact_path for reserved in ("#", "?")):
+        raise ValueError("artifact_path cannot contain '#' or '?' because they are URI delimiters.")
+    if tracking_uri is not None and (type(tracking_uri) is not str or not tracking_uri.strip()):
+        raise ValueError("tracking_uri must be a non-empty string or None.")

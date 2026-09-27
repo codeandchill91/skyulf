@@ -84,17 +84,7 @@ def _validate_population_counts(evidence: dict[str, Any], spec: Any) -> None:
     counts = evidence["filter_counts"]
     if not isinstance(counts, list) or len(counts) != len(spec.pre_split_steps):
         raise ValueError("Saved training filter evidence has invalid step counts.")
-    remaining = evidence["pre_filter_rows"]
-    for step, count in zip(spec.pre_split_steps, counts, strict=True):
-        if (
-            count["name"] != step["name"]
-            or count["transformer"] != step["transformer"]
-            or count["input_rows"] != remaining
-            or count["excluded_rows"] < 0
-            or count["output_rows"] != remaining - count["excluded_rows"]
-        ):
-            raise ValueError("Saved training filter evidence has inconsistent step counts.")
-        remaining = count["output_rows"]
+    remaining = _remaining_filter_population(evidence, spec, counts)
     if (
         remaining != evidence["survivor_rows"]
         or remaining != evidence["training_rows"] + evidence["holdout_rows"]
@@ -219,3 +209,19 @@ def load_candidate_evidence(
         if source_sha is not None and recipe != list(spec.pre_split_steps):
             raise ValueError("Saved project source recipe differs from training evidence.")
     return report, spec, engine, saved_filter_evidence
+
+
+def _remaining_filter_population(evidence: dict[str, Any], spec: Any, counts: list[Any]) -> int:
+    """Verify ordered filter transitions and return their surviving population."""
+    remaining = evidence["pre_filter_rows"]
+    for step, count in zip(spec.pre_split_steps, counts, strict=True):
+        if (
+            count["name"] != step["name"]
+            or count["transformer"] != step["transformer"]
+            or count["input_rows"] != remaining
+            or count["excluded_rows"] < 0
+            or count["output_rows"] != remaining - count["excluded_rows"]
+        ):
+            raise ValueError("Saved training filter evidence has inconsistent step counts.")
+        remaining = count["output_rows"]
+    return remaining

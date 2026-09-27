@@ -200,9 +200,7 @@ def pack_pipeline_output(
     through the engine dispatch below.
     """
     if contains_spark_input(X) or contains_spark_input(y):
-        if was_tuple or y is not None:
-            raise TypeError("Use a single Spark dataframe containing row keys and target.")
-        return X
+        return _pack_spark_output(X, y, was_tuple)
     if was_tuple and y is None:
         # Caller said the input was a tuple but lost y along the way.
         # Surface this so wiring/upstream bugs don't silently degrade the
@@ -223,6 +221,13 @@ def pack_pipeline_output(
         # Default to Pandas behavior (convert if needed or assume Pandas)
         return _pack_pandas_output(X, y)
 
+    return X
+
+
+def _pack_spark_output(X: Any, y: Any | None, was_tuple: bool) -> Any:
+    """Keep distributed features and targets in one Spark frame with record keys."""
+    if was_tuple or y is not None:
+        raise TypeError("Use a single Spark dataframe containing row keys and target.")
     return X
 
 

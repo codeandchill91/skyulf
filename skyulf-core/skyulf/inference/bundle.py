@@ -7,7 +7,7 @@ detect corruption; they do not authenticate a producer or make pickle safe.
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -100,6 +100,32 @@ def build_bundle(
         raise ValueError("Invalid input_stage or use_tuned_thresholds.")
     budget = _options(options)
     model = pipeline_model(pipeline)
+    raw_schema, feature_schema = _fitted_schemas(pipeline, model, feature_order)
+    feature_state = export_feature_state(pipeline.feature_engineer, options=budget)
+    if len(feature_state) > budget.state_max_bytes:
+        raise ValueError("Feature state exceeds state_max_bytes.")
+    payload = serialize_model(model, budget.model_max_bytes)
+    manifest = _build_manifest(
+        pipeline,
+        model,
+        input_stage,
+        feature_order,
+        raw_schema,
+        feature_schema,
+        feature_state,
+        payload,
+        use_tuned_thresholds,
+    )
+    manifest = manifest.model_copy(update={"semantic_digest": semantic_digest(manifest)})
+    bundle = InferenceBundle(manifest, feature_state, payload)
+    _validate_bundle(bundle, budget)
+    return bundle
+
+
+def _fitted_schemas(
+    pipeline: SkyulfPipeline, model: Any, feature_order: tuple[str, ...]
+) -> tuple[tuple[ColumnSpec, ...], tuple[ColumnSpec, ...]]:
+    """Recover recorded schemas and verify the requested feature order and model width."""
     schemas = getattr(pipeline, "_inference_schemas", None)
     if schemas is None:
         raise ValueError("Missing fitted input schemas; refit this legacy standalone pipeline.")
@@ -110,10 +136,21 @@ def build_bundle(
         raise ValueError("feature_order must match the actual model training order.")
     if len(feature_order) != int(model.n_features_in_):
         raise ValueError("Recorded model feature width is inconsistent.")
-    feature_state = export_feature_state(pipeline.feature_engineer, options=budget)
-    if len(feature_state) > budget.state_max_bytes:
-        raise ValueError("Feature state exceeds state_max_bytes.")
-    payload = serialize_model(model, budget.model_max_bytes)
+    return raw_schema, feature_schema
+
+
+def _build_manifest(
+    pipeline: SkyulfPipeline,
+    model: Any,
+    input_stage: Literal["raw", "features"],
+    feature_order: tuple[str, ...],
+    raw_schema: tuple[ColumnSpec, ...],
+    feature_schema: tuple[ColumnSpec, ...],
+    feature_state: bytes,
+    payload: bytes,
+    use_tuned_thresholds: bool,
+) -> BundleManifest:
+    """Describe frozen payload identities and the model's task-specific output columns."""
     classification = is_classifier(model)
     classes = tuple(np.asarray(model.classes_).tolist()) if classification else ()
     probabilities = tuple(f"probability_{i}" for i in range(len(classes)))
@@ -121,7 +158,7 @@ def build_bundle(
         ColumnSpec(name="prediction", dtype=label_dtype(classes) if classification else "float64"),
         *(ColumnSpec(name=name, dtype="float64") for name in probabilities),
     )
-    manifest = BundleManifest(
+    return BundleManifest(
         input_stage=input_stage,
         feature_order=feature_order,
         input_schema=raw_schema if input_stage == "raw" else feature_schema,
@@ -139,10 +176,6 @@ def build_bundle(
         fe_sha256=checksum(feature_state),
         fe_semantic_digest=json.loads(feature_state)["semantic_digest"],
     )
-    manifest = manifest.model_copy(update={"semantic_digest": semantic_digest(manifest)})
-    bundle = InferenceBundle(manifest, feature_state, payload)
-    _validate_bundle(bundle, budget)
-    return bundle
 
 
 def _options(options: ExecutionOptions | None) -> ExecutionOptions:

@@ -137,19 +137,7 @@ class LocalTrainingSpec:
 
     def _validate_random_split(self) -> None:
         """Check the random split and its optional event-selection window."""
-        if self.holdout_start is not None:
-            raise ValueError("Random split requires inactive holdout_start to be null.")
-        if self.event_column is None and (
-            self.start is not None
-            or self.cutoff is not None
-            or self.event_time_parsing != TrainingDateSpec()
-        ):
-            raise ValueError("Random split requires inactive event/date fields to be null.")
-        if self.event_column is not None:
-            start = _validate_instant(self.start, "start")
-            cutoff = _validate_instant(self.cutoff, "cutoff")
-            if start >= cutoff:
-                raise ValueError("Require start < cutoff for event selection.")
+        _validate_random_window(self)
         if (
             self.test_size is None
             or type(self.test_size) not in (int, float)
@@ -171,14 +159,7 @@ class LocalTrainingSpec:
         ]
         if not boundaries[0] < boundaries[1] < boundaries[2]:
             raise ValueError("Require start < holdout_start < cutoff.")
-        if (
-            self.test_size not in (None, 0.2)
-            or self.random_state not in (None, 42)
-            or self.stratify not in (None, False)
-            or (self.random_state is not None and type(self.random_state) is not int)
-            or (self.stratify is not None and type(self.stratify) is not bool)
-        ):
-            raise ValueError("Temporal split cannot use active random split settings.")
+        _validate_inactive_random_settings(self)
 
     def _validate_result_filter(self) -> None:
         """Require a cutoff only when result-availability filtering is enabled."""
@@ -299,16 +280,7 @@ def _missing_row_filter_columns(params: dict[str, Any]) -> list[str]:
         "missing_threshold",
     }:
         raise ValueError("pre_split_steps DropMissingRows has invalid row-filter params.")
-    threshold = params.get("threshold")
-    if threshold is not None and (type(threshold) is not int or not 0 <= threshold <= len(subset)):
-        raise ValueError("pre_split_steps threshold must be an integer from 0 to subset size.")
-    missing_threshold = params.get("missing_threshold")
-    if missing_threshold is not None and (
-        type(missing_threshold) not in (int, float)
-        or not math.isfinite(missing_threshold)
-        or not 0 <= missing_threshold <= 100
-    ):
-        raise ValueError("pre_split_steps missing_threshold must be between 0 and 100.")
+    _validate_missing_thresholds(params, len(subset))
     return subset
 
 
@@ -318,15 +290,7 @@ def _validate_manual_limits(limit: dict[str, Any]) -> None:
         key in limit and limit[key] is not None for key in ("lower", "upper")
     ):
         raise ValueError("pre_split_steps ManualBounds requires lower or upper.")
-    for value in limit.values():
-        if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
-            raise ValueError("pre_split_steps ManualBounds requires finite numeric bounds.")
-    if (
-        limit.get("lower") is not None
-        and limit.get("upper") is not None
-        and limit["lower"] > limit["upper"]
-    ):
-        raise ValueError("pre_split_steps ManualBounds lower must not exceed upper.")
+    _validate_manual_bound_values(limit)
 
 
 def _manual_bounds_columns(params: dict[str, Any]) -> list[str]:
@@ -381,12 +345,7 @@ def _validate_pre_split_step(
     step: Any, index: int, target_column: str, protected: tuple[str | None, ...]
 ) -> tuple[str, ...] | list[str]:
     """Reject learned or malformed steps before accepting their source dependencies."""
-    if not isinstance(step, dict) or not isinstance(step.get("name"), str) or not step["name"]:
-        raise ValueError(f"pre_split_steps[{index}] requires a name.")
-    step_type = step.get("transformer")
-    params = step.get("params", {})
-    if not isinstance(params, dict) or not isinstance(step_type, str):
-        raise ValueError(f"pre_split_steps[{index}] requires a Core transformer and params.")
+    step_type, params = _pre_split_step_identity(step, index)
     custom_filter = is_registered_project_step(step_type)
     if (
         step_type != "Deduplicate"
@@ -476,22 +435,7 @@ def read_training_snapshot(spark: Any, spec: LocalTrainingSpec) -> pd.DataFrame:
         source, selection = _sample_training_source(source, spec)
     ordering = ([spec.event_column] if spec.event_column else []) + list(spec.record_key_columns)
     selected = source.orderBy(*ordering).limit(spec.max_rows + 1)
-    records: list[dict[str, Any]] = []
-    serialized_bytes = 0
-    for row in selected.toLocalIterator():
-        if len(records) >= spec.max_rows:
-            raise ValueError("Training source exceeds max_rows.")
-        record = row.asDict(recursive=True) if hasattr(row, "asDict") else dict(row)
-        for name in (spec.event_column, spec.result_available_at_column):
-            if name is not None:
-                record[name] = instant_from_microseconds(record[name])
-        serialized_bytes += len(pickle.dumps(record, protocol=pickle.HIGHEST_PROTOCOL))
-        if serialized_bytes > spec.max_bytes:
-            raise ValueError("Training source exceeds max_bytes.")
-        records.append(record)
-    frame = pd.DataFrame.from_records(records, columns=names)
-    if _frame_bytes(frame) > spec.max_bytes:
-        raise ValueError("Training frame exceeds max_bytes.")
+    frame = _materialize_training_rows(selected, spec, names)
     if selection is not None:
         frame.attrs["training_selection"] = {**selection, "selected_rows": len(frame)}
     return frame
@@ -507,20 +451,7 @@ def _sample_training_source(source: Any, spec: LocalTrainingSpec) -> tuple[Any, 
         for field in source.schema.fields
         if field.dataType.typeName() in {"double", "float"}
     }
-    null_keys = " OR ".join(
-        f"({column_name(key)} IS NULL OR isnan({column_name(key)}))"
-        if key in floating
-        else f"{column_name(key)} IS NULL"
-        for key in keys
-    )
-    if source.where(null_keys).limit(1).count():
-        raise ValueError("Training row keys must not be null.")
-    count_name = "_sample_count"
-    while count_name.casefold() in {key.casefold() for key in keys}:
-        count_name += "_"
-    counts = source.groupBy(*keys).agg(F.count(F.lit(1)).alias(count_name))
-    if counts.where(F.col(count_name) > 1).limit(1).count():
-        raise ValueError("Training row keys must be unique before sampling.")
+    _validate_sample_keys(source, keys, floating, F)
     source_rows = source.count()
     if spec.filter_unavailable_results:
         result = column_name(cast(str, spec.result_available_at_column))
@@ -532,15 +463,7 @@ def _sample_training_source(source: Any, spec: LocalTrainingSpec) -> tuple[Any, 
         cutoff = instant_microseconds(cast(datetime, spec.result_cutoff))
         source = source.where(f"{result} IS NOT NULL AND {result} <= {cutoff}")
     eligible_rows = source.count() if spec.filter_unavailable_results else source_rows
-    invalid_target = F.col(spec.target_column).isNull()
-    if spec.target_column in floating:
-        invalid_target = invalid_target | F.isnan(F.col(spec.target_column))
-    target_filter = any(
-        step["transformer"] == "DropMissingRows" and spec.target_column in step["params"]["subset"]
-        for step in spec.pre_split_steps
-    )
-    if not target_filter and source.where(invalid_target).limit(1).count():
-        raise ValueError("Available labels must have nonnull targets before sampling.")
+    _validate_sample_targets(source, spec, floating, F)
     # Struct field order, UTC timestamp rendering and the tie-break keys are
     # explicit so partition layout and Spark session timezone cannot change membership.
     key_json = F.to_json(
@@ -592,26 +515,7 @@ def _validate_pre_split_inputs(
     if any(column not in native.columns for column in columns):
         missing = sorted(set(columns) - set(native.columns))
         raise ValueError(f"pre_split_steps {step['name']} missing source columns: {missing}.")
-    if step["transformer"] == "ManualBounds":
-        for column in columns:
-            if isinstance(native, pl.DataFrame):
-                numeric = native.schema[column].is_numeric()
-            else:
-                dtype = native[column].dtype
-                numeric = pd.api.types.is_numeric_dtype(dtype) and not pd.api.types.is_bool_dtype(
-                    dtype
-                )
-            if not numeric:
-                raise ValueError(f"pre_split_steps ManualBounds requires numeric column {column}.")
-    if step_type == "Deduplicate":
-        working = native.to_pandas() if isinstance(native, pl.DataFrame) else native
-        for _, group in working.groupby(list(columns), dropna=False, sort=False):
-            labels = group[target_column]
-            if labels.nunique(dropna=True) > 1 or (labels.isna().any() and labels.notna().any()):
-                raise ValueError(
-                    "pre_split_steps Deduplicate found conflicting target values "
-                    "within one subset group."
-                )
+    _validate_filter_values(native, step, columns, target_column)
     return list(columns)
 
 
@@ -635,18 +539,9 @@ def _validate_pre_split_survivors(
         positions[key] for key in after_keys
     ] != sorted({positions[key] for key in after_keys}):
         raise ValueError("pre_split_steps must preserve row identities and order.")
-    for column in filtered.columns:
-        if column in allowed_edits:
-            continue
-        after_values = filtered[column].to_list()
-        for key, value in zip(after_keys, after_values, strict=True):
-            expected = before_columns[column][positions[key]]
-            expected_missing = bool(pd.isna(expected))
-            value_missing = bool(pd.isna(value))
-            if expected_missing != value_missing or (not expected_missing and expected != value):
-                if column == target_column:
-                    raise ValueError("pre_split_steps must preserve target pairing.")
-                raise ValueError(f"pre_split_steps changed undeclared column {column}.")
+    _validate_survivor_values(
+        filtered, after_keys, positions, before_columns, target_column, allowed_edits
+    )
 
 
 def _apply_pre_split_steps(
@@ -669,12 +564,7 @@ def _apply_pre_split_steps(
         before_columns = {column: native[column].to_list() for column in native.columns}
         artifact = NodeRegistry.get_calculator(step["transformer"])().fit(native, step["params"])
         filtered = NodeRegistry.get_applier(step["transformer"])().apply(native, artifact)
-        if not isinstance(filtered, type(native)):
-            raise ValueError("pre_split_steps filter did not return a frame.")
-        if list(filtered.columns) != original_columns:
-            raise ValueError("pre_split_steps must preserve all source columns.")
-        if is_registered_project_step(step_type) and list(filtered.dtypes) != original_dtypes:
-            raise ValueError("pre_split_steps custom filter must preserve source dtypes.")
+        _validate_filter_frame(filtered, native, step_type, original_columns, original_dtypes)
         _validate_pre_split_survivors(
             filtered,
             keys,
@@ -711,131 +601,25 @@ def split_labeled_snapshot(
     Candidate training installs the saved fixed feature prefix before model fit;
     callers of this function receive untransformed model features.
     """
-    if not isinstance(frame, pd.DataFrame) or not isinstance(spec, LocalTrainingSpec):
-        raise TypeError("Expected a pandas frame and LocalTrainingSpec.")
-    _pre_split_columns(
-        spec.pre_split_steps,
-        spec.target_column,
-        (*spec.record_key_columns, spec.event_column, spec.result_available_at_column),
-    )
-    if engine not in ("pandas", "polars"):
-        raise ValueError("engine must be pandas or polars.")
-    missing_columns = sorted(set(spec.source_columns) - set(frame.columns))
-    if missing_columns:
-        raise ValueError(
-            f"Training snapshot is missing required source columns: {missing_columns}."
-        )
-    if len(frame) > spec.max_rows or _frame_bytes(frame) > spec.max_bytes:
-        raise ValueError("Training snapshot exceeds max_rows or max_bytes.")
-    if frame.loc[:, list(spec.record_key_columns)].isna().any().any():
-        raise ValueError("Training row keys must not be null.")
-    if frame.duplicated(subset=list(spec.record_key_columns)).any():
-        raise ValueError("Training row keys must be unique.")
+    _validate_labeled_snapshot(frame, spec, engine)
     selected = frame.copy()
-    events = None
-    if spec.event_column is not None:
-        events = pd.Series(
-            [
-                parse_training_date(value, spec.event_time_parsing)
-                for value in frame[spec.event_column]
-            ],
-            index=frame.index,
-            dtype="datetime64[ns, UTC]",
-        )
-        if events.isna().any() or (events < spec.start).any() or (events >= spec.cutoff).any():
-            raise ValueError("Training event time falls outside the pinned window.")
-        selected[spec.event_column] = events
-    available = pd.Series(True, index=frame.index)
-    if spec.filter_unavailable_results:
-        labels = pd.Series(
-            [
-                parse_training_date(value, spec.result_time_parsing, allow_null=True)
-                for value in frame[spec.result_available_at_column]
-            ],
-            index=frame.index,
-            dtype="datetime64[ns, UTC]",
-        )
-        if events is not None and ((labels < events) & labels.notna()).any():
-            raise ValueError("Label availability precedes event time.")
-        available = labels.notna() & (labels <= spec.result_cutoff)
+    available = _label_availability(frame, selected, spec)
     ordering = ([spec.event_column] if spec.event_column else []) + list(spec.record_key_columns)
     selected = selected.loc[available].sort_values(ordering, kind="stable").reset_index(drop=True)
     raw_selected = selected.copy()
-    sample_digest = None
-    if spec.training_sample_rows is not None:
-        if len(selected) > spec.training_sample_rows:
-            raise ValueError("Training snapshot was not bounded by training_sample_rows.")
-        sample_digest = _key_digest(selected, spec.record_key_columns)
-        if spec.sample_key_sha256 is not None and sample_digest != spec.sample_key_sha256:
-            raise ValueError("Training sample membership differs from saved evidence.")
+    sample_digest = _training_sample_digest(selected, spec)
     pre_filter_digest = _key_digest(selected, spec.record_key_columns)
     selected, filter_counts = _apply_pre_split_steps(selected, spec, engine)
     survivor_digest = _key_digest(selected, spec.record_key_columns)
-    if spec.survivor_key_sha256 is not None and survivor_digest != spec.survivor_key_sha256:
-        raise ValueError("Survivor membership differs from saved training evidence.")
-    if selected[spec.target_column].isna().any():
-        raise ValueError(
-            "Available labels must have nonnull targets; add explicit DropMissingRows for the target."
-        )
-    if spec.pre_split_steps and len(selected) < 4:
-        raise ValueError(
-            "Training filters leave fewer than four eligible rows for train and holdout."
-        )
-    if spec.split_strategy == "random":
-        if spec.stratify:
-            counts = selected[spec.target_column].value_counts()
-            if counts.empty or counts.min() < 2:
-                raise ValueError("Requested stratification requires at least two rows per class.")
-            test_rows = math.ceil(len(selected) * cast(float, spec.test_size))
-            if min(test_rows, len(selected) - test_rows) < len(counts):
-                raise ValueError("Requested stratification needs each class in both partitions.")
-        split = DataSplitter(
-            test_size=cast(float, spec.test_size),
-            random_state=cast(int, spec.random_state),
-            stratify_col=spec.target_column if spec.stratify else None,
-        ).split(selected)
-        train, heldout = cast(pd.DataFrame, split.train), cast(pd.DataFrame, split.test)
-    else:
-        holdout_mask = selected[spec.event_column] >= spec.holdout_start
-        train, heldout = selected.loc[~holdout_mask], selected.loc[holdout_mask]
-    if len(train) < 2 or len(heldout) < 2:
-        raise ValueError("Training and holdout each need at least two labeled rows.")
+    _validate_training_survivors(selected, spec, survivor_digest)
+    train, heldout = _partition_training_rows(selected, spec)
     # Hash the ordered identity tuples only; never include keys in model features.
     digest = _key_digest(heldout, spec.record_key_columns)
     if spec.holdout_key_sha256 is not None and digest != spec.holdout_key_sha256:
         raise ValueError("Holdout membership differs from saved training evidence.")
-    columns = [*spec.input_columns, spec.target_column]
-    train_columns = (
-        [*columns, spec.event_column] if keep_training_event and spec.event_column else columns
+    train_frame, holdout_frame = _raw_model_partitions(
+        train, heldout, raw_selected, spec, keep_training_event
     )
-    if spec.pre_split_steps:
-        raw_positions = {
-            key: index
-            for index, key in enumerate(
-                raw_selected.loc[:, list(spec.record_key_columns)].itertuples(
-                    index=False, name=None
-                )
-            )
-        }
-
-        def raw_partition(partition: pd.DataFrame, output_columns: list[str]) -> pd.DataFrame:
-            """Recover untouched model inputs by immutable keys after normalized splitting."""
-            keys = partition.loc[:, list(spec.record_key_columns)].itertuples(
-                index=False, name=None
-            )
-            raw = (
-                raw_selected.iloc[[raw_positions[key] for key in keys]]
-                .loc[:, output_columns]
-                .copy()
-            )
-            raw[spec.target_column] = partition[spec.target_column].to_numpy()
-            return raw.reset_index(drop=True)
-
-        train_frame = raw_partition(train, train_columns)
-        holdout_frame = raw_partition(heldout, columns)
-    else:
-        train_frame = train.loc[:, train_columns].reset_index(drop=True)
-        holdout_frame = heldout.loc[:, columns].reset_index(drop=True)
     holdout_frame.attrs["holdout_key_sha256"] = digest
     holdout_frame.attrs["sample_key_sha256"] = sample_digest
     holdout_frame.attrs["pre_split_filter_counts"] = filter_counts
@@ -930,28 +714,14 @@ def _candidate_config(
         != "classification"
     ):
         raise ValueError("stratify requires a classification model.")
-    if risk_category is not None and (
-        not isinstance(risk_category, str) or len(risk_category.encode("utf-8")) > 256
-    ):
-        raise ValueError("risk_category must be text of at most 256 UTF-8 bytes.")
-    if (
-        type(min_improvement) not in (int, float)
-        or not math.isfinite(min_improvement)
-        or min_improvement < 0
-    ):
-        raise ValueError("min_improvement must be a finite nonnegative number.")
+    _validate_candidate_metadata(risk_category, min_improvement)
     validate_quality_policy(
         metric,
         quality_threshold,
         quality_gates,
         task=NodeRegistry.get_calculator(base_model_config(config)["type"])().problem_type,
     )
-    if champion_version is not None and (
-        type(champion_version) is not str
-        or not champion_version.isdecimal()
-        or int(champion_version) <= 0
-    ):
-        raise ValueError("champion_version must be a concrete positive version.")
+    _validate_champion_version(champion_version)
     return pipeline_config
 
 
@@ -1002,13 +772,7 @@ def _fit_candidate(
             target_column=spec.target_column,
             event_column=spec.event_column if temporal_cv else None,
         )
-    if temporal_cv and not search:
-        model_columns = [*spec.input_columns, spec.target_column]
-        native_train = (
-            native_train.select(model_columns)
-            if isinstance(native_train, pl.DataFrame)
-            else native_train.loc[:, model_columns]
-        )
+    native_train = _final_fit_frame(native_train, spec, temporal_cv, search)
     artifact = fit_local_workflow(
         pipeline_config,
         SplitDataset(train=native_train, test=native_train.head(0)),
@@ -1064,19 +828,7 @@ def _log_fitted_candidate(
     frame, holdout = fitted.source_frame, fitted.evidence_holdout
     cv_results, evidence = fitted.cv_results, fitted.evidence
     unavailable = fitted.unavailable_labels
-    if config["modeling"]["type"] == "hyperparameter_tuner":
-        search_result = tuning_evidence(artifact)
-        if search_result is None:
-            raise ValueError("Fitted search artifact lacks tuning evidence.")
-        run.client.log_dict(run.run_id, search_result, "tuning.json")
-        run.log_params(
-            {
-                "tuning_strategy": search_result["modeling"]["strategy"],
-                "tuning_metric": search_result["scoring_metric"],
-                "tuning_trials": search_result["n_trials"],
-            }
-        )
-        run.log_metrics({"tuning_best_score": search_result["best_score"]})
+    _log_tuning_evidence(run, artifact, config)
     if cv_results is not None:
         cv_results.update(
             dataset_id=spec.dataset_id, training_rows=fitted.training_rows, engine=engine
@@ -1363,3 +1115,411 @@ def train_local_candidate(
         holdout_rows=fitted.holdout_rows,
         unavailable=fitted.unavailable_labels,
     )
+
+
+def _validate_random_window(spec: LocalTrainingSpec) -> None:
+    """Validate optional event selection independently of random partition settings."""
+    if spec.holdout_start is not None:
+        raise ValueError("Random split requires inactive holdout_start to be null.")
+    if spec.event_column is None and (
+        spec.start is not None
+        or spec.cutoff is not None
+        or spec.event_time_parsing != TrainingDateSpec()
+    ):
+        raise ValueError("Random split requires inactive event/date fields to be null.")
+    if spec.event_column is not None:
+        start = _validate_instant(spec.start, "start")
+        cutoff = _validate_instant(spec.cutoff, "cutoff")
+        if start >= cutoff:
+            raise ValueError("Require start < cutoff for event selection.")
+
+
+def _validate_inactive_random_settings(spec: LocalTrainingSpec) -> None:
+    """Reject active or mistyped random settings for a temporal split."""
+    if (
+        spec.test_size not in (None, 0.2)
+        or spec.random_state not in (None, 42)
+        or spec.stratify not in (None, False)
+        or (spec.random_state is not None and type(spec.random_state) is not int)
+        or (spec.stratify is not None and type(spec.stratify) is not bool)
+    ):
+        raise ValueError("Temporal split cannot use active random split settings.")
+
+
+def _validate_missing_thresholds(params: dict[str, Any], subset_size: int) -> None:
+    """Require count and percentage thresholds within the explicitly selected subset."""
+    threshold = params.get("threshold")
+    if threshold is not None and (type(threshold) is not int or not 0 <= threshold <= subset_size):
+        raise ValueError("pre_split_steps threshold must be an integer from 0 to subset size.")
+    missing_threshold = params.get("missing_threshold")
+    if missing_threshold is not None and (
+        type(missing_threshold) not in (int, float)
+        or not math.isfinite(missing_threshold)
+        or not 0 <= missing_threshold <= 100
+    ):
+        raise ValueError("pre_split_steps missing_threshold must be between 0 and 100.")
+
+
+def _validate_manual_bound_values(limit: dict[str, Any]) -> None:
+    """Check finite numeric values before comparing lower and upper manual limits."""
+    for value in limit.values():
+        if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
+            raise ValueError("pre_split_steps ManualBounds requires finite numeric bounds.")
+    if (
+        limit.get("lower") is not None
+        and limit.get("upper") is not None
+        and limit["lower"] > limit["upper"]
+    ):
+        raise ValueError("pre_split_steps ManualBounds lower must not exceed upper.")
+
+
+def _pre_split_step_identity(step: Any, index: int) -> tuple[str, dict[str, Any]]:
+    """Validate a named Core transformer and its parameter object before policy checks."""
+    if not isinstance(step, dict) or not isinstance(step.get("name"), str) or not step["name"]:
+        raise ValueError(f"pre_split_steps[{index}] requires a name.")
+    step_type = step.get("transformer")
+    params = step.get("params", {})
+    if not isinstance(params, dict) or not isinstance(step_type, str):
+        raise ValueError(f"pre_split_steps[{index}] requires a Core transformer and params.")
+    return step_type, params
+
+
+def _materialize_training_rows(
+    selected: Any, spec: LocalTrainingSpec, names: tuple[str, ...]
+) -> pd.DataFrame:
+    """Decode bounded rows and dates while enforcing serialized and local frame budgets."""
+    records: list[dict[str, Any]] = []
+    serialized_bytes = 0
+    for row in selected.toLocalIterator():
+        if len(records) >= spec.max_rows:
+            raise ValueError("Training source exceeds max_rows.")
+        record = row.asDict(recursive=True) if hasattr(row, "asDict") else dict(row)
+        for name in (spec.event_column, spec.result_available_at_column):
+            if name is not None:
+                record[name] = instant_from_microseconds(record[name])
+        serialized_bytes += len(pickle.dumps(record, protocol=pickle.HIGHEST_PROTOCOL))
+        if serialized_bytes > spec.max_bytes:
+            raise ValueError("Training source exceeds max_bytes.")
+        records.append(record)
+    frame = pd.DataFrame.from_records(records, columns=names)
+    if _frame_bytes(frame) > spec.max_bytes:
+        raise ValueError("Training frame exceeds max_bytes.")
+    return frame
+
+
+def _validate_sample_keys(source: Any, keys: list[str], floating: set[str], F: Any) -> None:
+    """Reject missing and duplicated sampling keys before counting the source population."""
+    null_keys = " OR ".join(
+        f"({column_name(key)} IS NULL OR isnan({column_name(key)}))"
+        if key in floating
+        else f"{column_name(key)} IS NULL"
+        for key in keys
+    )
+    if source.where(null_keys).limit(1).count():
+        raise ValueError("Training row keys must not be null.")
+    count_name = "_sample_count"
+    while count_name.casefold() in {key.casefold() for key in keys}:
+        count_name += "_"
+    counts = source.groupBy(*keys).agg(F.count(F.lit(1)).alias(count_name))
+    if counts.where(F.col(count_name) > 1).limit(1).count():
+        raise ValueError("Training row keys must be unique before sampling.")
+
+
+def _validate_sample_targets(
+    source: Any, spec: LocalTrainingSpec, floating: set[str], F: Any
+) -> None:
+    """Require available targets unless an explicit missing-target filter owns exclusion."""
+    invalid_target = F.col(spec.target_column).isNull()
+    if spec.target_column in floating:
+        invalid_target = invalid_target | F.isnan(F.col(spec.target_column))
+    target_filter = any(
+        step["transformer"] == "DropMissingRows" and spec.target_column in step["params"]["subset"]
+        for step in spec.pre_split_steps
+    )
+    if not target_filter and source.where(invalid_target).limit(1).count():
+        raise ValueError("Available labels must have nonnull targets before sampling.")
+
+
+def _validate_filter_values(
+    native: pd.DataFrame | pl.DataFrame, step: dict[str, Any], columns: Any, target_column: str
+) -> None:
+    """Check numeric bounds and label consistency after required columns exist."""
+    step_type = step["transformer"]
+    if step["transformer"] == "ManualBounds":
+        for column in columns:
+            if isinstance(native, pl.DataFrame):
+                numeric = native.schema[column].is_numeric()
+            else:
+                dtype = native[column].dtype
+                numeric = pd.api.types.is_numeric_dtype(dtype) and not pd.api.types.is_bool_dtype(
+                    dtype
+                )
+            if not numeric:
+                raise ValueError(f"pre_split_steps ManualBounds requires numeric column {column}.")
+    if step_type == "Deduplicate":
+        _validate_deduplicate_labels(native, columns, target_column)
+
+
+def _validate_deduplicate_labels(
+    native: pd.DataFrame | pl.DataFrame, columns: Any, target_column: str
+) -> None:
+    """Reject groups whose deduplication would choose among conflicting labels."""
+    working = native.to_pandas() if isinstance(native, pl.DataFrame) else native
+    for _, group in working.groupby(list(columns), dropna=False, sort=False):
+        labels = group[target_column]
+        if labels.nunique(dropna=True) > 1 or (labels.isna().any() and labels.notna().any()):
+            raise ValueError(
+                "pre_split_steps Deduplicate found conflicting target values "
+                "within one subset group."
+            )
+
+
+def _validate_survivor_values(
+    filtered: pd.DataFrame | pl.DataFrame,
+    after_keys: list[tuple[Any, ...]],
+    positions: dict[tuple[Any, ...], int],
+    before_columns: dict[str, list[Any]],
+    target_column: str,
+    allowed_edits: set[str],
+) -> None:
+    """Preserve target pairing and every source value outside declared fixed edits."""
+    for column in filtered.columns:
+        if column in allowed_edits:
+            continue
+        after_values = filtered[column].to_list()
+        for key, value in zip(after_keys, after_values, strict=True):
+            expected = before_columns[column][positions[key]]
+            expected_missing = bool(pd.isna(expected))
+            value_missing = bool(pd.isna(value))
+            if expected_missing != value_missing or (not expected_missing and expected != value):
+                if column == target_column:
+                    raise ValueError("pre_split_steps must preserve target pairing.")
+                raise ValueError(f"pre_split_steps changed undeclared column {column}.")
+
+
+def _validate_filter_frame(
+    filtered: Any,
+    native: pd.DataFrame | pl.DataFrame,
+    step_type: str,
+    original_columns: list[str],
+    original_dtypes: list[Any],
+) -> None:
+    """Require the same frame type and columns, plus stable custom-filter dtypes."""
+    if not isinstance(filtered, type(native)):
+        raise ValueError("pre_split_steps filter did not return a frame.")
+    if list(filtered.columns) != original_columns:
+        raise ValueError("pre_split_steps must preserve all source columns.")
+    if is_registered_project_step(step_type) and list(filtered.dtypes) != original_dtypes:
+        raise ValueError("pre_split_steps custom filter must preserve source dtypes.")
+
+
+def _validate_labeled_snapshot(frame: pd.DataFrame, spec: LocalTrainingSpec, engine: str) -> None:
+    """Validate the split request, source schema, budgets and unique identities."""
+    if not isinstance(frame, pd.DataFrame) or not isinstance(spec, LocalTrainingSpec):
+        raise TypeError("Expected a pandas frame and LocalTrainingSpec.")
+    _pre_split_columns(
+        spec.pre_split_steps,
+        spec.target_column,
+        (*spec.record_key_columns, spec.event_column, spec.result_available_at_column),
+    )
+    if engine not in ("pandas", "polars"):
+        raise ValueError("engine must be pandas or polars.")
+    missing_columns = sorted(set(spec.source_columns) - set(frame.columns))
+    if missing_columns:
+        raise ValueError(
+            f"Training snapshot is missing required source columns: {missing_columns}."
+        )
+    if len(frame) > spec.max_rows or _frame_bytes(frame) > spec.max_bytes:
+        raise ValueError("Training snapshot exceeds max_rows or max_bytes.")
+    if frame.loc[:, list(spec.record_key_columns)].isna().any().any():
+        raise ValueError("Training row keys must not be null.")
+    if frame.duplicated(subset=list(spec.record_key_columns)).any():
+        raise ValueError("Training row keys must be unique.")
+
+
+def _label_availability(
+    frame: pd.DataFrame, selected: pd.DataFrame, spec: LocalTrainingSpec
+) -> pd.Series:
+    """Normalize source event times before checking result availability and cutoff."""
+    events = None
+    if spec.event_column is not None:
+        events = pd.Series(
+            [
+                parse_training_date(value, spec.event_time_parsing)
+                for value in frame[spec.event_column]
+            ],
+            index=frame.index,
+            dtype="datetime64[ns, UTC]",
+        )
+        if events.isna().any() or (events < spec.start).any() or (events >= spec.cutoff).any():
+            raise ValueError("Training event time falls outside the pinned window.")
+        selected[spec.event_column] = events
+    available = pd.Series(True, index=frame.index)
+    if spec.filter_unavailable_results:
+        labels = pd.Series(
+            [
+                parse_training_date(value, spec.result_time_parsing, allow_null=True)
+                for value in frame[spec.result_available_at_column]
+            ],
+            index=frame.index,
+            dtype="datetime64[ns, UTC]",
+        )
+        if events is not None and ((labels < events) & labels.notna()).any():
+            raise ValueError("Label availability precedes event time.")
+        available = labels.notna() & (labels <= spec.result_cutoff)
+    return available
+
+
+def _training_sample_digest(selected: pd.DataFrame, spec: LocalTrainingSpec) -> str | None:
+    """Verify bounded sample size and the saved ordered sample membership."""
+    sample_digest = None
+    if spec.training_sample_rows is not None:
+        if len(selected) > spec.training_sample_rows:
+            raise ValueError("Training snapshot was not bounded by training_sample_rows.")
+        sample_digest = _key_digest(selected, spec.record_key_columns)
+        if spec.sample_key_sha256 is not None and sample_digest != spec.sample_key_sha256:
+            raise ValueError("Training sample membership differs from saved evidence.")
+    return sample_digest
+
+
+def _validate_training_survivors(
+    selected: pd.DataFrame, spec: LocalTrainingSpec, survivor_digest: str
+) -> None:
+    """Require pinned survivor membership, available targets and enough eligible rows."""
+    if spec.survivor_key_sha256 is not None and survivor_digest != spec.survivor_key_sha256:
+        raise ValueError("Survivor membership differs from saved training evidence.")
+    if selected[spec.target_column].isna().any():
+        raise ValueError(
+            "Available labels must have nonnull targets; add explicit DropMissingRows for the target."
+        )
+    if spec.pre_split_steps and len(selected) < 4:
+        raise ValueError(
+            "Training filters leave fewer than four eligible rows for train and holdout."
+        )
+
+
+def _partition_training_rows(
+    selected: pd.DataFrame, spec: LocalTrainingSpec
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build reproducible random or temporal partitions with viable labeled row counts."""
+    if spec.split_strategy == "random":
+        if spec.stratify:
+            counts = selected[spec.target_column].value_counts()
+            if counts.empty or counts.min() < 2:
+                raise ValueError("Requested stratification requires at least two rows per class.")
+            test_rows = math.ceil(len(selected) * cast(float, spec.test_size))
+            if min(test_rows, len(selected) - test_rows) < len(counts):
+                raise ValueError("Requested stratification needs each class in both partitions.")
+        split = DataSplitter(
+            test_size=cast(float, spec.test_size),
+            random_state=cast(int, spec.random_state),
+            stratify_col=spec.target_column if spec.stratify else None,
+        ).split(selected)
+        train, heldout = cast(pd.DataFrame, split.train), cast(pd.DataFrame, split.test)
+    else:
+        holdout_mask = selected[spec.event_column] >= spec.holdout_start
+        train, heldout = selected.loc[~holdout_mask], selected.loc[holdout_mask]
+    if len(train) < 2 or len(heldout) < 2:
+        raise ValueError("Training and holdout each need at least two labeled rows.")
+    return train, heldout
+
+
+def _raw_model_partitions(
+    train: pd.DataFrame,
+    heldout: pd.DataFrame,
+    raw_selected: pd.DataFrame,
+    spec: LocalTrainingSpec,
+    keep_training_event: bool,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Recover untouched features by immutable keys while retaining normalized target values."""
+    columns = [*spec.input_columns, spec.target_column]
+    train_columns = (
+        [*columns, spec.event_column] if keep_training_event and spec.event_column else columns
+    )
+    if spec.pre_split_steps:
+        raw_positions = {
+            key: index
+            for index, key in enumerate(
+                raw_selected.loc[:, list(spec.record_key_columns)].itertuples(
+                    index=False, name=None
+                )
+            )
+        }
+
+        def raw_partition(partition: pd.DataFrame, output_columns: list[str]) -> pd.DataFrame:
+            """Recover untouched model inputs by immutable keys after normalized splitting."""
+            keys = partition.loc[:, list(spec.record_key_columns)].itertuples(
+                index=False, name=None
+            )
+            raw = (
+                raw_selected.iloc[[raw_positions[key] for key in keys]]
+                .loc[:, output_columns]
+                .copy()
+            )
+            raw[spec.target_column] = partition[spec.target_column].to_numpy()
+            return raw.reset_index(drop=True)
+
+        train_frame = raw_partition(train, train_columns)
+        holdout_frame = raw_partition(heldout, columns)
+    else:
+        train_frame = train.loc[:, train_columns].reset_index(drop=True)
+        holdout_frame = heldout.loc[:, columns].reset_index(drop=True)
+    return train_frame, holdout_frame
+
+
+def _validate_candidate_metadata(risk_category: str | None, min_improvement: float) -> None:
+    """Validate risk label size and a finite nonnegative improvement requirement."""
+    if risk_category is not None and (
+        not isinstance(risk_category, str) or len(risk_category.encode("utf-8")) > 256
+    ):
+        raise ValueError("risk_category must be text of at most 256 UTF-8 bytes.")
+    if (
+        type(min_improvement) not in (int, float)
+        or not math.isfinite(min_improvement)
+        or min_improvement < 0
+    ):
+        raise ValueError("min_improvement must be a finite nonnegative number.")
+
+
+def _validate_champion_version(champion_version: str | None) -> None:
+    """Require an explicitly supplied champion version to be a positive decimal string."""
+    if champion_version is not None and (
+        type(champion_version) is not str
+        or not champion_version.isdecimal()
+        or int(champion_version) <= 0
+    ):
+        raise ValueError("champion_version must be a concrete positive version.")
+
+
+def _final_fit_frame(
+    native_train: pd.DataFrame | pl.DataFrame,
+    spec: LocalTrainingSpec,
+    temporal_cv: bool,
+    search: bool,
+) -> pd.DataFrame | pl.DataFrame:
+    """Remove CV-only event metadata before fitting a fixed final model."""
+    if temporal_cv and not search:
+        model_columns = [*spec.input_columns, spec.target_column]
+        native_train = (
+            native_train.select(model_columns)
+            if isinstance(native_train, pl.DataFrame)
+            else native_train.loc[:, model_columns]
+        )
+    return native_train
+
+
+def _log_tuning_evidence(run: Any, artifact: Any, config: dict[str, Any]) -> None:
+    """Persist fitted search evidence and metrics before logging CV results."""
+    if config["modeling"]["type"] == "hyperparameter_tuner":
+        search_result = tuning_evidence(artifact)
+        if search_result is None:
+            raise ValueError("Fitted search artifact lacks tuning evidence.")
+        run.client.log_dict(run.run_id, search_result, "tuning.json")
+        run.log_params(
+            {
+                "tuning_strategy": search_result["modeling"]["strategy"],
+                "tuning_metric": search_result["scoring_metric"],
+                "tuning_trials": search_result["n_trials"],
+            }
+        )
+        run.log_metrics({"tuning_best_score": search_result["best_score"]})

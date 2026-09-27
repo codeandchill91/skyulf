@@ -65,14 +65,7 @@ def _activate_prediction_view(spark: Any, logical: str, generation: str) -> None
             f"AS SELECT * FROM {generation}"
         ).collect()
         return
-    active_columns = tuple(
-        (field.name, field.dataType.typeName()) for field in spark.table(logical).schema.fields
-    )
-    candidate_columns = tuple(
-        (field.name, field.dataType.typeName()) for field in physical.schema.fields
-    )
-    if active_columns != candidate_columns:
-        raise ValueError("New prediction generation differs from the active view schema.")
+    _validate_generation_schema(spark, logical, physical)
     definition = spark.sql(f"SHOW CREATE TABLE {logical}").first()
     if definition is not None:
         sql = definition["createtab_stmt"].casefold().replace("`", "")
@@ -85,17 +78,7 @@ def _prediction_columns(
     config: dict[str, Any], prepared: Any, source: Any
 ) -> tuple[tuple[str, str, str], ...]:
     """Derive an exact Delta target schema from source keys and saved model outputs."""
-    keys = tuple(config["record_key_columns"])
-    inputs = tuple(prepared.artifact.manifest.input_columns)
-    if not keys or tuple(config["input_columns"]) != inputs:
-        raise ValueError("Configured keys or model inputs differ from the fitted model.")
-    names = (*keys, *inputs)
-    if any(not _IDENTIFIER.fullmatch(name) for name in names):
-        raise ValueError("Source keys and model inputs need simple column identifiers.")
-    if len({name.lower() for name in names}) != len(names):
-        raise ValueError("Source keys and model inputs must be distinct.")
-    if not set(names).issubset(source.columns):
-        raise ValueError("Scoring source lacks a row key or fitted model input column.")
+    keys = _prediction_source_keys(config, prepared, source)
     columns = []
     for key in keys:
         kind = source.schema[key].dataType.typeName()
@@ -136,26 +119,10 @@ def _generation_properties(config: dict[str, Any], prepared: Any) -> dict[str, s
 
 def provision_prediction_table(spark: Any, config: dict[str, Any], prepared: Any) -> bool:
     """Preflight an existing source/model and create only a missing output table."""
-    source_name = config["score_source_table"]
-    target_name = config["prediction_table"]
-    for name in (source_name, target_name, config["model_name"]):
-        if not _TABLE_NAME.fullmatch(name):
-            raise ValueError("Scoring needs valid three-part Unity Catalog names.")
-    if source_name == target_name:
-        raise ValueError("Prediction output must differ from the source table.")
-    if not spark.catalog.tableExists(source_name):
-        raise ValueError(f"Existing input source table is missing: {source_name}.")
-    if not prepared.preflight.ready:
-        raise ValueError("The pinned registered model failed Skyulf preflight.")
+    source_name, target_name = _validate_prediction_request(spark, config, prepared)
     source = spark.table(source_name)
     columns = _prediction_columns(config, prepared, source)
-    detail = spark.sql(f"DESCRIBE DETAIL {source_name}").first()
-    properties = detail["properties"] or {}
-    if not any(
-        key.lower() == "delta.enablechangedatafeed" and str(value).lower() == "true"
-        for key, value in properties.items()
-    ):
-        raise ValueError("Scoring source must have Delta Change Data Feed enabled.")
+    _require_change_feed(spark, source_name)
     target_exists = spark.catalog.tableExists(target_name)
     generation = config.get("model_change_mode") == "full_rebuild"
     generation_properties = _generation_properties(config, prepared) if generation else {}
@@ -172,21 +139,91 @@ def provision_prediction_table(spark: Any, config: dict[str, Any], prepared: Any
                 )
         _check_existing_table(spark, target_name, columns)
     if not target_exists:
-        if (
-            source.select(*config["record_key_columns"], *config["input_columns"])
-            .limit(config["max_rows"] + 1)
-            .count()
-            > config["max_rows"]
-        ):
-            raise ValueError("Initial scoring source exceeds the configured max_rows budget.")
-        definition = ", ".join(f"{name} {sql_type}" for name, _, sql_type in columns)
-        table_properties = ""
-        if generation:
-            properties = ", ".join(
-                f"'{key}' = '{value}'" for key, value in generation_properties.items()
-            )
-            table_properties = f" TBLPROPERTIES ({properties})"
-        spark.sql(
-            f"CREATE TABLE {target_name} ({definition}) USING DELTA{table_properties}"
-        ).collect()
+        _create_prediction_table(
+            spark, config, source, target_name, columns, generation, generation_properties
+        )
     return not target_exists
+
+
+def _validate_generation_schema(spark: Any, logical: str, physical: Any) -> None:
+    """Require a new generation to preserve the active prediction view schema."""
+    active_columns = tuple(
+        (field.name, field.dataType.typeName()) for field in spark.table(logical).schema.fields
+    )
+    candidate_columns = tuple(
+        (field.name, field.dataType.typeName()) for field in physical.schema.fields
+    )
+    if active_columns != candidate_columns:
+        raise ValueError("New prediction generation differs from the active view schema.")
+
+
+def _prediction_source_keys(config: dict[str, Any], prepared: Any, source: Any) -> tuple[str, ...]:
+    """Validate source key identifiers and saved input column membership."""
+    keys = tuple(config["record_key_columns"])
+    inputs = tuple(prepared.artifact.manifest.input_columns)
+    if not keys or tuple(config["input_columns"]) != inputs:
+        raise ValueError("Configured keys or model inputs differ from the fitted model.")
+    names = (*keys, *inputs)
+    if any(not _IDENTIFIER.fullmatch(name) for name in names):
+        raise ValueError("Source keys and model inputs need simple column identifiers.")
+    if len({name.lower() for name in names}) != len(names):
+        raise ValueError("Source keys and model inputs must be distinct.")
+    if not set(names).issubset(source.columns):
+        raise ValueError("Scoring source lacks a row key or fitted model input column.")
+    return keys
+
+
+def _validate_prediction_request(
+    spark: Any, config: dict[str, Any], prepared: Any
+) -> tuple[str, str]:
+    """Check existing source, target identity and model readiness before provisioning."""
+    source_name = config["score_source_table"]
+    target_name = config["prediction_table"]
+    for name in (source_name, target_name, config["model_name"]):
+        if not _TABLE_NAME.fullmatch(name):
+            raise ValueError("Scoring needs valid three-part Unity Catalog names.")
+    if source_name == target_name:
+        raise ValueError("Prediction output must differ from the source table.")
+    if not spark.catalog.tableExists(source_name):
+        raise ValueError(f"Existing input source table is missing: {source_name}.")
+    if not prepared.preflight.ready:
+        raise ValueError("The pinned registered model failed Skyulf preflight.")
+    return source_name, target_name
+
+
+def _require_change_feed(spark: Any, source_name: str) -> None:
+    """Require enabled Delta change data feed before provisioning prediction output."""
+    detail = spark.sql(f"DESCRIBE DETAIL {source_name}").first()
+    properties = detail["properties"] or {}
+    if not any(
+        key.lower() == "delta.enablechangedatafeed" and str(value).lower() == "true"
+        for key, value in properties.items()
+    ):
+        raise ValueError("Scoring source must have Delta Change Data Feed enabled.")
+
+
+def _create_prediction_table(
+    spark: Any,
+    config: dict[str, Any],
+    source: Any,
+    target_name: str,
+    columns: tuple[tuple[str, str, str], ...],
+    generation: bool,
+    generation_properties: dict[str, str],
+) -> None:
+    """Check bootstrap size and create a target with the pinned generation properties."""
+    if (
+        source.select(*config["record_key_columns"], *config["input_columns"])
+        .limit(config["max_rows"] + 1)
+        .count()
+        > config["max_rows"]
+    ):
+        raise ValueError("Initial scoring source exceeds the configured max_rows budget.")
+    definition = ", ".join(f"{name} {sql_type}" for name, _, sql_type in columns)
+    table_properties = ""
+    if generation:
+        properties = ", ".join(
+            f"'{key}' = '{value}'" for key, value in generation_properties.items()
+        )
+        table_properties = f" TBLPROPERTIES ({properties})"
+    spark.sql(f"CREATE TABLE {target_name} ({definition}) USING DELTA{table_properties}").collect()

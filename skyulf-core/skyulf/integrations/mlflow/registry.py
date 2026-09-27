@@ -84,14 +84,7 @@ def load_registered_bundle(
     if not isinstance(resolved, ResolvedModel):
         raise TypeError("resolved must be a ResolvedModel.")
     _validate_registry_options(resolved.name, tracking_uri, registry_uri)
-    if (
-        not isinstance(resolved.version, str)
-        or not resolved.version.isascii()
-        or not resolved.version.isdigit()
-        or int(resolved.version) <= 0
-        or resolved.model_uri != f"models:/{resolved.name}/{resolved.version}"
-    ):
-        raise ValueError("resolved must identify a concrete positive model version.")
+    _validate_concrete_version(resolved)
     if not isinstance(resolved.digest, str) or not resolved.digest.strip():
         raise ValueError("resolved must include the Skyulf bundle digest.")
     mlflow = _require_mlflow()
@@ -138,14 +131,7 @@ def load_registered_local_pipeline(
     if not isinstance(resolved, ResolvedModel):
         raise TypeError("resolved must be a ResolvedModel.")
     _validate_registry_options(resolved.name, tracking_uri, registry_uri)
-    if (
-        not isinstance(resolved.version, str)
-        or not resolved.version.isascii()
-        or not resolved.version.isdigit()
-        or int(resolved.version) <= 0
-        or resolved.model_uri != f"models:/{resolved.name}/{resolved.version}"
-    ):
-        raise ValueError("resolved must identify a concrete positive model version.")
+    _validate_concrete_version(resolved)
     if not isinstance(resolved.digest, str) or not resolved.digest.strip():
         raise ValueError("resolved must include the Skyulf local pipeline digest.")
     mlflow = _require_mlflow()
@@ -257,23 +243,7 @@ def resolve_model(
     _validate_reference(name, alias, version, tracking_uri, registry_uri)
     mlflow = _require_mlflow()
     client = _make_client(mlflow, tracking_uri, registry_uri)
-    try:
-        model_version = (
-            client.get_model_version_by_alias(name, alias)
-            if alias is not None
-            else client.get_model_version(name, str(version))
-        )
-    except Exception as exc:  # noqa: BLE001 - translate MLflow's backend errors at the boundary
-        if (
-            alias is not None
-            and _error_code(exc) == "INVALID_PARAMETER_VALUE"
-            and "alias" in str(exc).lower()
-            and "not found" in str(exc).lower()
-        ):
-            raise RegistryModelNotFoundError(
-                f"Model '{name}' alias '{alias}' was not found."
-            ) from exc
-        raise _translate_error(exc, name=name, version=str(version or alias)) from exc
+    model_version = _resolve_version(client, name, alias, version)
 
     concrete_version = str(model_version.version)
     model_uri = f"models:/{name}/{concrete_version}"
@@ -380,9 +350,7 @@ def _validate_registry_options(
     parts = name.split(".")
     if any(not part for part in parts) or len(parts) not in (1, 3):
         raise ValueError("name must be model or catalog.schema.model.")
-    for value, label in ((tracking_uri, "tracking_uri"), (registry_uri, "registry_uri")):
-        if value is not None and (type(value) is not str or not value.strip()):
-            raise ValueError(f"{label} must be a non-empty string or None.")
+    _validate_store_uris(tracking_uri, registry_uri)
     if _is_unity_catalog(registry_uri) and len(parts) != 3:
         raise ValueError("Unity Catalog names must use catalog.schema.model.")
 
@@ -417,3 +385,44 @@ def _translate_error(exc: Exception, *, name: str, version: str) -> RegistryErro
     if code in {"PERMISSION_DENIED", "UNAUTHENTICATED", "UNAUTHORIZED"}:
         return RegistryAccessError(f"Access denied for model '{name}' version '{version}'.")
     return RegistryOperationError(f"MLflow registry operation failed for model '{name}'.")
+
+
+def _validate_concrete_version(resolved: ResolvedModel) -> None:
+    """Require a positive pinned version whose URI agrees with its identity."""
+    if (
+        not isinstance(resolved.version, str)
+        or not resolved.version.isascii()
+        or not resolved.version.isdigit()
+        or int(resolved.version) <= 0
+        or resolved.model_uri != f"models:/{resolved.name}/{resolved.version}"
+    ):
+        raise ValueError("resolved must identify a concrete positive model version.")
+
+
+def _validate_store_uris(tracking_uri: str | None, registry_uri: str | None) -> None:
+    """Reject malformed explicit store URIs before constructing a client."""
+    for value, label in ((tracking_uri, "tracking_uri"), (registry_uri, "registry_uri")):
+        if value is not None and (type(value) is not str or not value.strip()):
+            raise ValueError(f"{label} must be a non-empty string or None.")
+
+
+def _resolve_version(client: Any, name: str, alias: str | None, version: str | int | None) -> Any:
+    """Resolve one registry selector and translate missing alias errors."""
+    try:
+        model_version = (
+            client.get_model_version_by_alias(name, alias)
+            if alias is not None
+            else client.get_model_version(name, str(version))
+        )
+    except Exception as exc:  # noqa: BLE001 - translate MLflow's backend errors at the boundary
+        if (
+            alias is not None
+            and _error_code(exc) == "INVALID_PARAMETER_VALUE"
+            and "alias" in str(exc).lower()
+            and "not found" in str(exc).lower()
+        ):
+            raise RegistryModelNotFoundError(
+                f"Model '{name}' alias '{alias}' was not found."
+            ) from exc
+        raise _translate_error(exc, name=name, version=str(version or alias)) from exc
+    return model_version

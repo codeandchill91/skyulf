@@ -921,12 +921,9 @@ class TuningCalculator(BaseModelCalculator):
             # FeatureEngineer), not the numpy arrays used by the searchers.
             # Holdout mode is excluded: the splitter stage already produced
             # the concatenated train+validation frames the mask is aligned to.
-            if (
-                preprocessing is not None
-                and preprocessing_frames is not None
-                and validation_data is None
-            ):
-                X_for_search, y_for_search = preprocessing_frames
+            X_for_search, y_for_search = self._grid_search_frames(
+                (X_for_search, y_for_search), preprocessing, preprocessing_frames, validation_data
+            )
             # Use custom loop to support progress and log callbacks
             return run_grid_or_random_search(
                 X_for_search,
@@ -980,6 +977,22 @@ class TuningCalculator(BaseModelCalculator):
             preprocessing_frames,
             log_callback,
         )
+
+    @staticmethod
+    def _grid_search_frames(
+        search_frames: tuple[Any, Any],
+        preprocessing: "FoldPreprocessor | None",
+        preprocessing_frames: tuple[Any, Any] | None,
+        validation_data: tuple[Any, Any] | None,
+    ) -> tuple[Any, Any]:
+        """Retain named raw frames for per-fold refits outside explicit holdout mode."""
+        if (
+            preprocessing is not None
+            and preprocessing_frames is not None
+            and validation_data is None
+        ):
+            return preprocessing_frames
+        return search_frames
 
 
 class TuningApplier(BaseModelApplier):

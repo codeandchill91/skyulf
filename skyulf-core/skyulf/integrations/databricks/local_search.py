@@ -57,21 +57,31 @@ def base_model_config(pipeline: dict[str, Any]) -> dict[str, Any]:
     return selected
 
 
+def _validate_axis_values(values: list[Any]) -> None:
+    """Reject non-scalar or nonfinite candidates before JSON encoding."""
+    for value in values:
+        if value is not None and type(value) not in {bool, str, int, float}:
+            raise ValueError("search_space candidates must be finite JSON scalars.")
+        if type(value) in {int, float} and not math.isfinite(value):
+            raise ValueError("search_space candidates must be finite JSON scalars.")
+
+
+def _validate_axis(key: Any, values: Any) -> None:
+    """Check an axis name and candidate bounds without implicit coercion."""
+    if not isinstance(key, str) or not key or not isinstance(values, list) or not values:
+        raise ValueError("Each search_space axis needs a name and nonempty candidate list.")
+    if len(values) > _MAX_CANDIDATES_PER_AXIS:
+        raise ValueError("search_space has too many candidates in one axis.")
+    _validate_axis_values(values)
+
+
 def _bounded_space(space: Any) -> dict[str, list[Any]]:
     """Accept small finite JSON scalar candidate lists without implicit coercion."""
     if not isinstance(space, dict) or len(space) > _MAX_AXES:
         raise ValueError(f"search_space must be an object with at most {_MAX_AXES} axes.")
     checked: dict[str, list[Any]] = {}
     for key, values in space.items():
-        if not isinstance(key, str) or not key or not isinstance(values, list) or not values:
-            raise ValueError("Each search_space axis needs a name and nonempty candidate list.")
-        if len(values) > _MAX_CANDIDATES_PER_AXIS:
-            raise ValueError("search_space has too many candidates in one axis.")
-        for value in values:
-            if value is not None and type(value) not in {bool, str, int, float}:
-                raise ValueError("search_space candidates must be finite JSON scalars.")
-            if type(value) in {int, float} and not math.isfinite(value):
-                raise ValueError("search_space candidates must be finite JSON scalars.")
+        _validate_axis(key, values)
         checked[key] = values
     if len(json.dumps(checked, allow_nan=False).encode("utf-8")) > _MAX_SEARCH_BYTES:
         raise ValueError("search_space exceeds the JSON size limit.")
@@ -167,7 +177,20 @@ def _prepare_selected_model(
         selected.setdefault("params", {}).setdefault("tune_base_models", True)
     prepare_ensemble_model(selected, calculator)
     calculator.prepare_tuning_params(selected)
-    if cv.method == "stratified_k_fold" and calculator.problem_type != "classification":
+    _bind_search_time(modeling, cv, calculator.problem_type, event_column)
+    steps = pipeline.get("preprocessing", [])
+    if any(step.get("transformer") in SPLITTER_STEP_TYPES for step in steps):
+        raise ValueError("Search owns the split; remove preprocessing splitter nodes.")
+    FeatureEngineerFoldAdapter(steps, target_column)
+    _bind_shared_cv(modeling, cv)
+    return selected, calculator
+
+
+def _bind_search_time(
+    modeling: dict[str, Any], cv: "LocalCVSpec", problem_type: str, event_column: str | None
+) -> None:
+    """Validate splitter compatibility and bind authoritative temporal metadata."""
+    if cv.method == "stratified_k_fold" and problem_type != "classification":
         raise ValueError("Stratified CV requires a classification model.")
     if cv.method == "time_series_split" and (not cv.enabled or not event_column):
         raise ValueError("Time-series search requires enabled CV and an event_column.")
@@ -178,10 +201,10 @@ def _prepare_selected_model(
         modeling["cv_time_column"] = event_column
     elif requested_time is not None:
         raise ValueError("cv_time_column is only used by time_series_split.")
-    steps = pipeline.get("preprocessing", [])
-    if any(step.get("transformer") in SPLITTER_STEP_TYPES for step in steps):
-        raise ValueError("Search owns the split; remove preprocessing splitter nodes.")
-    FeatureEngineerFoldAdapter(steps, target_column)
+
+
+def _bind_shared_cv(modeling: dict[str, Any], cv: "LocalCVSpec") -> None:
+    """Reject wrapper overrides before copying the workflow's shared fold settings."""
     shared = {
         "cv_enabled": cv.enabled,
         "cv_folds": cv.folds,
@@ -197,7 +220,6 @@ def _prepare_selected_model(
         ):
             raise ValueError(f"Conflicting wrapper {name}; use the shared workflow CV setting.")
     modeling.update(shared)
-    return selected, calculator
 
 
 def _validate_strategy(
@@ -213,6 +235,31 @@ def _validate_strategy(
     max_candidates = modeling.get("max_candidates", 1000)
     if type(max_candidates) is not int or not 1 <= max_candidates <= 10_000:
         raise ValueError("max_candidates must be an integer from 1 to 10000.")
+    _validate_strategy_options(modeling, strategy, calculator)
+    seed = _validate_search_execution(modeling)
+    _validate_metric(modeling.get("metric"), calculator.problem_type)
+    modeling.update(
+        strategy=strategy, n_trials=n_trials, max_candidates=max_candidates, random_state=seed
+    )
+    return strategy, max_candidates
+
+
+def _validate_search_execution(modeling: dict[str, Any]) -> int:
+    """Validate threshold, worker and seed controls before metric validation."""
+    if modeling.get("tune_threshold", False) is not False:
+        raise ValueError("tune_threshold is not supported by this search.")
+    if modeling.get("n_jobs", 1) != 1 or type(modeling.get("n_jobs", 1)) is not int:
+        raise ValueError("n_jobs must be 1 to avoid nested parallel fits.")
+    seed = modeling.get("random_state", 42)
+    if type(seed) is not int or not 0 <= seed < 2**32:
+        raise ValueError("random_state must be an integer from 0 to 2**32 - 1.")
+    return seed
+
+
+def _validate_strategy_options(
+    modeling: dict[str, Any], strategy: str, calculator: BaseModelCalculator
+) -> None:
+    """Check strategy-specific time and scheduler options in request order."""
     timeout = modeling.get("timeout")
     if timeout is not None and (
         strategy != "optuna"
@@ -227,30 +274,23 @@ def _validate_strategy(
     if strategy in {"halving_grid", "halving_random"}:
         _validate_halving_params(strategy_params, calculator)
     elif strategy == "optuna":
-        if set(strategy_params) - {"sampler", "pruner", "pruning"}:
-            raise ValueError("Unsupported optuna strategy_params.")
-        if strategy_params.get("sampler", "tpe") not in {"tpe", "random", "cmaes"}:
-            raise ValueError("optuna sampler must be tpe, random or cmaes.")
-        if strategy_params.get("pruner", "median") not in {"median", "hyperband", "none"}:
-            raise ValueError("optuna pruner must be median, hyperband or none.")
-        if "pruning" in strategy_params and type(strategy_params["pruning"]) is not bool:
-            raise ValueError("optuna pruning must be boolean.")
-        if not _optuna_available():
-            raise ValueError("optuna strategy requires Optuna and its sklearn integration.")
+        _validate_optuna_params(strategy_params)
     elif strategy_params:
         raise ValueError("strategy_params are unsupported for grid and random search.")
-    if modeling.get("tune_threshold", False) is not False:
-        raise ValueError("tune_threshold is not supported by this search.")
-    if modeling.get("n_jobs", 1) != 1 or type(modeling.get("n_jobs", 1)) is not int:
-        raise ValueError("n_jobs must be 1 to avoid nested parallel fits.")
-    seed = modeling.get("random_state", 42)
-    if type(seed) is not int or not 0 <= seed < 2**32:
-        raise ValueError("random_state must be an integer from 0 to 2**32 - 1.")
-    _validate_metric(modeling.get("metric"), calculator.problem_type)
-    modeling.update(
-        strategy=strategy, n_trials=n_trials, max_candidates=max_candidates, random_state=seed
-    )
-    return strategy, max_candidates
+
+
+def _validate_optuna_params(strategy_params: dict[str, Any]) -> None:
+    """Validate Optuna choices and require the optional integration."""
+    if set(strategy_params) - {"sampler", "pruner", "pruning"}:
+        raise ValueError("Unsupported optuna strategy_params.")
+    if strategy_params.get("sampler", "tpe") not in {"tpe", "random", "cmaes"}:
+        raise ValueError("optuna sampler must be tpe, random or cmaes.")
+    if strategy_params.get("pruner", "median") not in {"median", "hyperband", "none"}:
+        raise ValueError("optuna pruner must be median, hyperband or none.")
+    if "pruning" in strategy_params and type(strategy_params["pruning"]) is not bool:
+        raise ValueError("optuna pruning must be boolean.")
+    if not _optuna_available():
+        raise ValueError("optuna strategy requires Optuna and its sklearn integration.")
 
 
 def _validate_halving_params(params: dict[str, Any], calculator: BaseModelCalculator) -> None:
@@ -261,19 +301,36 @@ def _validate_halving_params(params: dict[str, Any], calculator: BaseModelCalcul
     if type(factor) is not int or not 2 <= factor <= 10:
         raise ValueError("halving factor must be an integer from 2 to 10.")
     resource = params.get("resource", "n_samples")
+    _normalize_halving_counts(params)
+    maximum = params.get("max_resources", "auto")
+    if maximum != "auto" and (type(maximum) is not int or maximum < 2 or maximum > 1_000_000):
+        raise ValueError("halving max_resources must be auto or a bounded positive integer.")
+    _validate_estimator_resource(resource, maximum, calculator)
+    _validate_minimum_resources(params, resource, maximum)
+
+
+def _normalize_halving_counts(params: dict[str, Any]) -> None:
+    """Normalize the accepted decimal-string resource counts in place."""
     for field in ("min_resources", "max_resources"):
         value = params.get(field)
         if isinstance(value, str) and value.isascii() and value.isdecimal():
             params[field] = int(value)
-    maximum = params.get("max_resources", "auto")
-    if maximum != "auto" and (type(maximum) is not int or maximum < 2 or maximum > 1_000_000):
-        raise ValueError("halving max_resources must be auto or a bounded positive integer.")
+
+
+def _validate_estimator_resource(
+    resource: Any, maximum: Any, calculator: BaseModelCalculator
+) -> None:
+    """Require an explicit bound and a real estimator parameter for custom resources."""
     if resource != "n_samples":
         if not isinstance(resource, str) or not resource or maximum == "auto":
             raise ValueError("Estimator resource requires an explicit max_resources integer.")
         estimator = instantiate_model(cast(Any, calculator).model_class, calculator.default_params)
         if resource not in estimator.get_params(deep=True):
             raise ValueError(f"Unknown halving estimator resource: {resource}.")
+
+
+def _validate_minimum_resources(params: dict[str, Any], resource: Any, maximum: Any) -> None:
+    """Check the minimum resource policy against the previously validated maximum."""
     minimum = params.get("min_resources", "exhaust")
     if minimum not in {"exhaust", "smallest"} and (
         type(minimum) is not int or not 2 <= minimum <= 1_000_000
@@ -304,6 +361,22 @@ def _prepare_space(
     space = _bounded_space(raw_space)
     if automatic_space and strategy in {"halving_grid", "halving_random"}:
         space.pop(modeling.get("strategy_params", {}).get("resource", "n_samples"), None)
+    _merge_fixed_axes(space, selected, calculator, automatic_space)
+    merge_ensemble_fixed_space(space, selected, automatic=automatic_space)
+    space = _bounded_space(space)
+    _validate_grid_size(space, strategy, max_candidates)
+    _bind_estimator_workers(space, modeling, calculator, strategy)
+    _validate_parameter_names(calculator, space)
+    return space
+
+
+def _merge_fixed_axes(
+    space: dict[str, list[Any]],
+    selected: dict[str, Any],
+    calculator: BaseModelCalculator,
+    automatic_space: bool,
+) -> None:
+    """Preserve explicit fixed parameters and reject contradictory manual axes."""
     fixed = selected.get("params", {})
     _validate_single_worker(fixed)
     structural = ensemble_structural_keys(calculator)
@@ -318,14 +391,25 @@ def _prepare_space(
             raise ValueError(f"Fixed base parameter conflicts with search_space: {name}.")
         if name not in structural:
             space[name] = [value]
-    merge_ensemble_fixed_space(space, selected, automatic=automatic_space)
-    space = _bounded_space(space)
+
+
+def _validate_grid_size(space: dict[str, list[Any]], strategy: str, max_candidates: int) -> None:
+    """Bound exhaustive candidate combinations before estimator construction."""
     if strategy in {"grid", "halving_grid"}:
         count = math.prod(len(values) for values in space.values())
         if count > max_candidates:
             raise ValueError(
                 f"Grid search_space has {count} candidates, above max_candidates={max_candidates}."
             )
+
+
+def _bind_estimator_workers(
+    space: dict[str, list[Any]],
+    modeling: dict[str, Any],
+    calculator: BaseModelCalculator,
+    strategy: str,
+) -> None:
+    """Constrain estimator workers and keep halving resources out of search axes."""
     estimator = instantiate_model(cast(Any, calculator).model_class, calculator.default_params)
     for name in estimator.get_params(deep=True):
         if name == "n_jobs" or name.endswith("__n_jobs"):
@@ -336,13 +420,16 @@ def _prepare_space(
             raise ValueError(
                 f"Halving resource {resource} cannot also be a fixed or searched parameter."
             )
+    _validate_worker_axes(space)
+
+
+def _validate_worker_axes(space: dict[str, list[Any]]) -> None:
+    """Reject non-single-worker values on every nested parallelism axis."""
     for name, values in space.items():
         if (name == "n_jobs" or name.endswith("__n_jobs")) and any(
             type(value) is not int or value != 1 for value in values
         ):
             raise ValueError("Estimator n_jobs search candidates must all be 1.")
-    _validate_parameter_names(calculator, space)
-    return space
 
 
 def prepare_search_pipeline(

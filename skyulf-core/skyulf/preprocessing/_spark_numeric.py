@@ -29,13 +29,18 @@ def select_columns(
     cols = config.get("columns")
     if cols is None:
         cols = [name for name in frame.columns if name != config.get("target_column")]
+    _validate_columns(cols, schema)
+    if automatic and numeric_only:
+        cols = [name for name in cols if schema[name] in NUMERIC_DTYPES]
+    return cols, schema, automatic
+
+
+def _validate_columns(cols: Any, schema: dict[str, str]) -> None:
+    """Require a list of unique names present in the Spark schema."""
     if not isinstance(cols, list) or any(not isinstance(name, str) for name in cols):
         raise ValueError("columns must be a list of names.")
     if len(set(cols)) != len(cols) or set(cols).difference(schema):
         raise ValueError("Spark feature columns are missing or duplicated.")
-    if automatic and numeric_only:
-        cols = [name for name in cols if schema[name] in NUMERIC_DTYPES]
-    return cols, schema, automatic
 
 
 def missing(frame: Any, name: str, dtype: str, functions: Any) -> Any:

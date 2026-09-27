@@ -74,16 +74,27 @@ class BundleManifest(BaseModel):
     @model_validator(mode="after")
     def validate_contract(self) -> "BundleManifest":
         """Reject internally inconsistent schemas and decision metadata before model loading."""
+        self._validate_schemas()
+        self._validate_outputs()
+        self._validate_thresholds()
+        names = [name for name, _ in self.requirements]
+        if sorted(names) != sorted(("python", *_PACKAGES)):
+            raise ValueError("Requirements must contain exactly the supported runtime packages.")
+        return self
+
+    def _validate_schemas(self) -> None:
+        """Require distinct ordered feature names and supported input dtypes."""
         for schema in (self.input_schema, self.feature_schema, self.output_schema):
-            names = tuple(col.name for col in schema)
-            if not names or len(names) != len(set(names)):
-                raise ValueError("Bundle schemas require distinct nonempty column names.")
+            _validate_schema_names(schema)
         if self.feature_order != tuple(col.name for col in self.feature_schema):
             raise ValueError("feature_order must match feature_schema.")
         if self.input_stage == "features" and self.input_schema != self.feature_schema:
             raise ValueError("features input_schema must match feature_schema.")
         if any(col.dtype not in _DTYPES for col in (*self.input_schema, *self.feature_schema)):
             raise ValueError("Initial bundle inputs require primitive numeric or boolean dtypes.")
+
+    def _validate_outputs(self) -> None:
+        """Match the prediction schema to task and class metadata."""
         expected = ("prediction", *self.probability_columns)
         if tuple(col.name for col in self.output_schema) != expected:
             raise ValueError("Prediction schema and probability columns disagree.")
@@ -93,39 +104,26 @@ class BundleManifest(BaseModel):
             if self.output_schema[0].dtype != "float64":
                 raise ValueError("Regression prediction dtype must be float64.")
         else:
-            if len(self.classes) < 2 or len(set(self.classes)) != len(self.classes):
-                raise ValueError("Classification requires distinct scalar classes.")
-            if self.probability_columns != tuple(
-                f"probability_{i}" for i in range(len(self.classes))
-            ):
-                raise ValueError("Probability columns must follow class positions.")
-            if self.positive_label != (self.classes[1] if len(self.classes) == 2 else None):
-                raise ValueError("positive_label must follow the binary class convention.")
-            if self.output_schema[0].dtype != label_dtype(self.classes):
-                raise ValueError("Prediction dtype must match classes.")
-            if any(col.dtype != "float64" for col in self.output_schema[1:]):
-                raise ValueError("Probability columns require float64.")
-        self._validate_thresholds()
-        names = [name for name, _ in self.requirements]
-        if sorted(names) != sorted(("python", *_PACKAGES)):
-            raise ValueError("Requirements must contain exactly the supported runtime packages.")
-        return self
+            self._validate_classification()
+
+    def _validate_classification(self) -> None:
+        """Keep scalar labels and probability positions consistent with model classes."""
+        if len(self.classes) < 2 or len(set(self.classes)) != len(self.classes):
+            raise ValueError("Classification requires distinct scalar classes.")
+        if self.probability_columns != tuple(f"probability_{i}" for i in range(len(self.classes))):
+            raise ValueError("Probability columns must follow class positions.")
+        if self.positive_label != (self.classes[1] if len(self.classes) == 2 else None):
+            raise ValueError("positive_label must follow the binary class convention.")
+        if self.output_schema[0].dtype != label_dtype(self.classes):
+            raise ValueError("Prediction dtype must match classes.")
+        if any(col.dtype != "float64" for col in self.output_schema[1:]):
+            raise ValueError("Probability columns require float64.")
 
     def _validate_thresholds(self) -> None:
         """Threshold arrays are class-ordered and must agree with their active source."""
         state = self.thresholds
         for values in (state.values, state.tuning_values, state.pipeline_values):
-            if values and (len(values) != len(self.classes) or not self.classes):
-                raise ValueError("Threshold values must cover every class.")
-            minimum_ok = all(
-                value >= 0 if len(self.classes) == 2 else value > 0 for value in values
-            )
-            if values and (
-                not all(math.isfinite(value) for value in values)
-                or not minimum_ok
-                or not any(values)
-            ):
-                raise ValueError("Invalid decision thresholds.")
+            self._validate_threshold_values(values)
         selected = {
             "estimator": (),
             "tuning": state.tuning_values,
@@ -133,6 +131,28 @@ class BundleManifest(BaseModel):
         }[state.source]
         if state.values != selected or (state.source != "estimator" and not selected):
             raise ValueError("Threshold provenance disagrees with the active decision rule.")
+
+    def _validate_threshold_values(self, values: tuple[float, ...]) -> None:
+        """Require complete class coverage before checking numeric threshold bounds."""
+        if values and (len(values) != len(self.classes) or not self.classes):
+            raise ValueError("Threshold values must cover every class.")
+        _validate_threshold_bounds(values, len(self.classes) == 2)
+
+
+def _validate_schema_names(schema: tuple[ColumnSpec, ...]) -> None:
+    """Require a nonempty schema with distinct column names."""
+    names = tuple(col.name for col in schema)
+    if not names or len(names) != len(set(names)):
+        raise ValueError("Bundle schemas require distinct nonempty column names.")
+
+
+def _validate_threshold_bounds(values: tuple[float, ...], binary: bool) -> None:
+    """Allow zero binary thresholds while rejecting non-finite or all-zero arrays."""
+    minimum_ok = all(value >= 0 if binary else value > 0 for value in values)
+    if values and (
+        not all(math.isfinite(value) for value in values) or not minimum_ok or not any(values)
+    ):
+        raise ValueError("Invalid decision thresholds.")
 
 
 def schema_columns(schema: SkyulfSchema) -> tuple[ColumnSpec, ...]:

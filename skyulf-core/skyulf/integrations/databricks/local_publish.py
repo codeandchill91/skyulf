@@ -16,7 +16,7 @@ from .admission import PublishAdmission, validate_admission
 from .batch import _manifest
 from .delta import history, publish_replace_period, table_identity
 from .local_batch import LocalSourceSpec, score_local_source
-from .local_sdk import PreparedLocalWorkflow
+from .local_sdk import LocalWorkflowConfig, PreparedLocalWorkflow
 
 _OUTPUT_TYPES = {"float64": "double", "int64": "long", "string": "string", "bool": "boolean"}
 _METADATA = PREDICTION_METADATA_COLUMNS
@@ -37,34 +37,9 @@ def _validate_request(
     admission = validate_admission(spark, admission)
     if not prepared.preflight.ready or not isinstance(prepared.artifact, LocalPipelineArtifact):
         raise ValueError("Local publication requires a ready fitted local pipeline.")
-    config = prepared.config
-    if config.runtime != "databricks" or config.sink.kind != "uc_delta":
-        raise ValueError("Local publication requires a Databricks UC Delta sink.")
-    if config.sink.table != spec.output_table or config.source.kind != "uc_table":
-        raise ValueError("Configured UC source or target differs from the publication request.")
-    if config.source.table != source.table or config.source.version != source.version:
-        raise ValueError("Prepared source differs from the pinned Delta snapshot.")
-    if source.max_rows > config.source.max_rows or source.max_bytes > config.source.max_bytes:
-        raise ValueError("Source budget exceeds the prepared workflow budget.")
-    if config.model.kind != "local_pipeline" or config.model.name != spec.model_name:
-        raise ValueError("Publication model name differs from the prepared registry model.")
-    if prepared.preflight.model_version != spec.model_version:
-        raise ValueError("Publication model version differs from the pinned model.")
-    if prepared.preflight.model_digest != spec.model_digest:
-        raise ValueError("Publication model digest differs from the fitted artifact.")
-    if spec.code_version != version("skyulf-core"):
-        raise ValueError("Publication code version differs from the installed runtime.")
-    if (
-        spec.source_version != source.version
-        or spec.record_key_columns != source.record_key_columns
-        or spec.period_column != source.period_column
-        or spec.period_start_utc != source.period_start.astimezone(spec.period_start_utc.tzinfo)
-        or spec.period_end_utc != source.period_end.astimezone(spec.period_end_utc.tzinfo)
-        or spec.business_timezone != source.business_timezone
-    ):
-        raise ValueError("Publication period and source contract must match exactly.")
-    if source.table == spec.output_table:
-        raise ValueError("Source and prediction target must be different tables.")
+    config = _validate_publication_source(source, prepared, spec)
+    _validate_publication_model(prepared, spec, config)
+    _validate_publication_period(source, spec)
     return admission
 
 
@@ -88,18 +63,7 @@ def _check_target(
         or set(target.columns) != expected
     ):
         raise ValueError("Prediction target columns differ from the explicit local output schema.")
-    if period_column is not None:
-        if target.schema[period_column].dataType.typeName() != "timestamp":
-            raise ValueError("Prediction target period must be a Spark timestamp.")
-        if source_frame.schema[period_column].dataType.typeName() != "timestamp":
-            raise ValueError("Source period must be a Spark timestamp.")
-    for name in record_key_columns:
-        target_type = target.schema[name].dataType
-        if target_type != source_frame.schema[name].dataType or target_type.typeName() not in (
-            "long",
-            "string",
-        ):
-            raise ValueError("Source and target row-key types must match and be long or string.")
+    _check_target_controls(source_frame, target, record_key_columns, period_column)
     for column in outputs:
         expected_type = _OUTPUT_TYPES.get(column.dtype)
         if expected_type is None or target.schema[column.name].dataType.typeName() != expected_type:
@@ -157,6 +121,95 @@ def run_local_batch(
     output_names = _check_target(
         spark, source_frame, target, source.record_key_columns, source.period_column, prepared
     )
+    bridge = _local_prediction_bridge(spark, source, scored, output_names, target)
+    period = source_frame[source.period_column]
+    source_period = source_frame.where(
+        (period >= functions.lit(spec.period_start_utc))
+        & (period < functions.lit(spec.period_end_utc))
+    ).select(*source.record_key_columns, source.period_column)
+    output = bridge.join(source_period, on=list(source.record_key_columns), how="inner")
+    output = _complete_local_output(output, target, spec, functions, count)
+    manifest = _manifest(spec, source_id, source.table, snapshot.committed_us, count, count)
+    committed_version, recorded, replayed = publish_replace_period(
+        spark, output, spec, manifest=manifest, admission=admission
+    )
+    return BatchResult(
+        spec,
+        recorded["input_count"],
+        recorded["output_count"],
+        committed_version,
+        recorded,
+        replayed,
+    )
+
+
+def _validate_publication_source(
+    source: LocalSourceSpec, prepared: PreparedLocalWorkflow, spec: BatchSpec
+) -> LocalWorkflowConfig:
+    """Validate configured target, pinned source and local input budgets."""
+    config = prepared.config
+    if config.runtime != "databricks" or config.sink.kind != "uc_delta":
+        raise ValueError("Local publication requires a Databricks UC Delta sink.")
+    if config.sink.table != spec.output_table or config.source.kind != "uc_table":
+        raise ValueError("Configured UC source or target differs from the publication request.")
+    if config.source.table != source.table or config.source.version != source.version:
+        raise ValueError("Prepared source differs from the pinned Delta snapshot.")
+    if source.max_rows > config.source.max_rows or source.max_bytes > config.source.max_bytes:
+        raise ValueError("Source budget exceeds the prepared workflow budget.")
+    return config
+
+
+def _validate_publication_model(
+    prepared: PreparedLocalWorkflow, spec: BatchSpec, config: LocalWorkflowConfig
+) -> None:
+    """Validate pinned registry identity and installed scoring code."""
+    if config.model.kind != "local_pipeline" or config.model.name != spec.model_name:
+        raise ValueError("Publication model name differs from the prepared registry model.")
+    if prepared.preflight.model_version != spec.model_version:
+        raise ValueError("Publication model version differs from the pinned model.")
+    if prepared.preflight.model_digest != spec.model_digest:
+        raise ValueError("Publication model digest differs from the fitted artifact.")
+    if spec.code_version != version("skyulf-core"):
+        raise ValueError("Publication code version differs from the installed runtime.")
+
+
+def _validate_publication_period(source: LocalSourceSpec, spec: BatchSpec) -> None:
+    """Require publication boundaries to match the source contract exactly."""
+    if (
+        spec.source_version != source.version
+        or spec.record_key_columns != source.record_key_columns
+        or spec.period_column != source.period_column
+        or spec.period_start_utc != source.period_start.astimezone(spec.period_start_utc.tzinfo)
+        or spec.period_end_utc != source.period_end.astimezone(spec.period_end_utc.tzinfo)
+        or spec.business_timezone != source.business_timezone
+    ):
+        raise ValueError("Publication period and source contract must match exactly.")
+    if source.table == spec.output_table:
+        raise ValueError("Source and prediction target must be different tables.")
+
+
+def _check_target_controls(
+    source_frame: Any, target: Any, record_key_columns: tuple[str, ...], period_column: str | None
+) -> None:
+    """Validate target timestamp and row-key types against the source."""
+    if period_column is not None:
+        if target.schema[period_column].dataType.typeName() != "timestamp":
+            raise ValueError("Prediction target period must be a Spark timestamp.")
+        if source_frame.schema[period_column].dataType.typeName() != "timestamp":
+            raise ValueError("Source period must be a Spark timestamp.")
+    for name in record_key_columns:
+        target_type = target.schema[name].dataType
+        if target_type != source_frame.schema[name].dataType or target_type.typeName() not in (
+            "long",
+            "string",
+        ):
+            raise ValueError("Source and target row-key types must match and be long or string.")
+
+
+def _local_prediction_bridge(
+    spark: Any, source: LocalSourceSpec, scored: Any, output_names: tuple[str, ...], target: Any
+) -> Any:
+    """Check local prediction keys and construct a Spark frame with target types."""
     bridge_names = (*source.record_key_columns, *output_names)
     if list(scored.predictions.columns) != list(bridge_names):
         raise ValueError("Local prediction columns differ from the saved model output.")
@@ -170,12 +223,13 @@ def run_local_batch(
         for row in scored.predictions.itertuples(index=False, name=None)
     ]
     bridge = spark.createDataFrame(records, schema=bridge_schema)
-    period = source_frame[source.period_column]
-    source_period = source_frame.where(
-        (period >= functions.lit(spec.period_start_utc))
-        & (period < functions.lit(spec.period_end_utc))
-    ).select(*source.record_key_columns, source.period_column)
-    output = bridge.join(source_period, on=list(source.record_key_columns), how="inner")
+    return bridge
+
+
+def _complete_local_output(
+    output: Any, target: Any, spec: BatchSpec, functions: Any, count: int
+) -> Any:
+    """Attach prediction identity and verify final output schema and membership."""
     for name, value in (
         ("run_id", spec.run_id),
         ("model_name", spec.model_name),
@@ -189,15 +243,4 @@ def run_local_batch(
     output = output.select(*target.columns)
     if output.count() != count:
         raise ValueError("Prediction keys do not match the pinned source rows.")
-    manifest = _manifest(spec, source_id, source.table, snapshot.committed_us, count, count)
-    committed_version, recorded, replayed = publish_replace_period(
-        spark, output, spec, manifest=manifest, admission=admission
-    )
-    return BatchResult(
-        spec,
-        recorded["input_count"],
-        recorded["output_count"],
-        committed_version,
-        recorded,
-        replayed,
-    )
+    return output

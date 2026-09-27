@@ -20,12 +20,7 @@ from .._spark_numeric import (
 def _constant(value: Any, dtype: str) -> Any:
     """Require unambiguous scalar constants, preserving integer precision."""
     if dtype in NUMERIC_DTYPES:
-        value = 0 if value is None else value
-        if type(value) not in (int, float):
-            raise TypeError("Numeric Spark columns require a numeric fill_value.")
-        if type(value) is int and not -(2**63) <= value < 2**63:
-            raise ValueError("Spark integer fill_value must fit a signed 64-bit integer.")
-        return value
+        return _numeric_constant(value)
     if dtype == "string":
         if value is None:
             raise ValueError("String constant imputation requires an explicit fill_value.")
@@ -34,6 +29,16 @@ def _constant(value: Any, dtype: str) -> Any:
     if dtype == "boolean" and type(value) is bool:
         return value
     raise TypeError("Unsupported Spark imputer dtype or incompatible fill_value.")
+
+
+def _numeric_constant(value: Any) -> int | float:
+    """Validate numeric constants without losing signed integer precision."""
+    value = 0 if value is None else value
+    if type(value) not in (int, float):
+        raise TypeError("Numeric Spark columns require a numeric fill_value.")
+    if type(value) is int and not -(2**63) <= value < 2**63:
+        raise ValueError("Spark integer fill_value must fit a signed 64-bit integer.")
+    return value
 
 
 def _aggregate_expressions(
@@ -78,8 +83,7 @@ def _artifact(cols: list[str], strategy: str, automatic: bool, stats: Any, const
     counts = {}
     for index, name in enumerate(cols):
         value = constants[name] if strategy == "constant" else stats[f"v{index}"]
-        if strategy == "mean" and value is not None and not math.isfinite(value):
-            raise ValueError("Spark mean imputation requires finite observed values.")
+        _validate_mean(value, strategy)
         if strategy == "mean" and automatic and excluded(stats, index):
             continue
         fills[name] = value
@@ -96,6 +100,19 @@ def _artifact(cols: list[str], strategy: str, automatic: bool, stats: Any, const
     }
 
 
+def _validate_mean(value: Any, strategy: str) -> None:
+    """Reject non-finite observed means while allowing all-null columns."""
+    if strategy == "mean" and value is not None and not math.isfinite(value):
+        raise ValueError("Spark mean imputation requires finite observed values.")
+
+
+def _has_fill(value: Any, strategy: str) -> bool:
+    """Identify learned values that can replace missing observations."""
+    return value is not None and not (
+        strategy == "mean" and isinstance(value, float) and math.isnan(value)
+    )
+
+
 def apply_spark_imputer(frame: Any, target: Any, params: dict) -> tuple[Any, Any]:
     """Fill with native Spark expressions; do not refit or execute a data action."""
     if not params:
@@ -108,9 +125,7 @@ def apply_spark_imputer(frame: Any, target: Any, params: dict) -> tuple[Any, Any
     expressions = {name: _column(frame, name) for name in frame.columns}
     for name in state["columns"]:
         value = state["fill_values"][name]
-        if value is None or (
-            state["strategy"] == "mean" and isinstance(value, float) and math.isnan(value)
-        ):
+        if not _has_fill(value, state["strategy"]):
             continue
         replacement = functions.lit(value)
         if name in schema:
