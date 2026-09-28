@@ -12,6 +12,9 @@ from ..mlflow.tracking import TrackingRun
 from .local_training_evidence import evidence_digest
 
 _PREDECESSORS = {
+    "load_data": "prepare",
+    "prepare_dataset": "load_data",
+    "select_best_model": "train",
     "train": "prepare",
     "evaluate_register": "train",
     "compare": "evaluate_register",
@@ -146,7 +149,7 @@ class _PhaseStore:
     def _validate_predecessor_chain(self, phase: str, value: dict[str, Any]) -> None:
         """Recursively verify the expected predecessor before reusing a receipt."""
         previous = value.get("predecessor")
-        expected = _PREDECESSORS.get(phase)
+        expected = self.predecessor(phase)
         if expected is None:
             if phase != "prepare" or previous is not None:
                 raise ValueError("Invalid lifecycle predecessor chain.")
@@ -156,6 +159,14 @@ class _PhaseStore:
             or previous != self.reference(self.receipt(expected))
         ):
             raise ValueError("Lifecycle predecessor identity differs from saved evidence.")
+
+    def predecessor(self, phase: str) -> str | None:
+        """Use the graph pinned at initialization when validating the receipt chain."""
+        if self.request.get("graph_version", 2) == 3:
+            overrides = {"train": "prepare_dataset", "evaluate_register": "select_best_model"}
+            if phase in overrides:
+                return overrides[phase]
+        return _PREDECESSORS.get(phase)
 
     def reference(self, receipt: dict[str, Any]) -> dict[str, str]:
         """Expose only durable identity and digest strings to task values."""

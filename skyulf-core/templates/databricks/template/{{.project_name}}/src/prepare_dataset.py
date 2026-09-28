@@ -1,5 +1,5 @@
 # Databricks notebook source
-"""Approve, reject or roll back existing saved model evidence."""
+"""Apply fixed cleanup and save the train/holdout partitions."""
 
 from skyulf.integrations.databricks.job_runtime import run_lifecycle_notebook
 
@@ -7,7 +7,7 @@ if __name__ == "__main__":
     output = run_lifecycle_notebook(
         globals()["spark"],
         globals()["dbutils"],
-        phase="operator",
+        phase="prepare_dataset",
         display_html=globals().get("displayHTML"),
         exit_notebook=False,
     )

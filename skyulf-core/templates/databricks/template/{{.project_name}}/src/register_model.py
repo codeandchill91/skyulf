@@ -1,5 +1,5 @@
 # Databricks notebook source
-"""Finalize lifecycle status and publish only a verified successful result."""
+"""Validate the fitted artifact and register its model version."""
 
 from skyulf.integrations.databricks.job_runtime import run_lifecycle_notebook
 
@@ -7,7 +7,7 @@ if __name__ == "__main__":
     output = run_lifecycle_notebook(
         globals()["spark"],
         globals()["dbutils"],
-        phase="complete",
+        phase="evaluate_register",
         display_html=globals().get("displayHTML"),
         exit_notebook=False,
     )

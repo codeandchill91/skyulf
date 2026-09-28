@@ -11,7 +11,7 @@ import pytest
 
 WORKFLOW = (
     Path(__file__).resolve().parents[2]
-    / "templates/databricks/template/{{.project_name}}/src/workflow.py"
+    / "templates/databricks/template/{{.project_name}}/src/initialize_run.py"
 )
 
 
@@ -429,8 +429,11 @@ def test_init_record_key_becomes_prediction_table_key():
 
 def test_generated_bundle_has_only_train_and_serialized_score_jobs():
     """A new project must not silently bring back setup or control jobs."""
-    resource = WORKFLOW.parents[1] / "resources/workflow.jobs.yml.tmpl"
-    template = resource.read_text(encoding="utf-8")
+    resources = WORKFLOW.parents[1] / "resources"
+    template = "\n".join(
+        (resources / f"{name}.job.yml.tmpl").read_text(encoding="utf-8")
+        for name in ("train", "score")
+    )
     assert re.findall(r"^    ([a-z_]+):$", template, flags=re.MULTILINE) == ["train", "score"]
     assert re.search(
         r"^    score:\n      name:.*\n      max_concurrent_runs: 1$", template, re.MULTILINE
@@ -487,7 +490,10 @@ def test_auto_champion_init_exposes_metric_gates_and_reuses_score_job():
     config = (WORKFLOW.parents[1] / "config/workflow.json.tmpl").read_text(encoding="utf-8")
     assert '"score_model_selection": "{{.score_model_selection}}"' in config
     assert _render_default_config()["metric"] == "heldout_rmse"
-    jobs = (WORKFLOW.parents[1] / "resources/workflow.jobs.yml.tmpl").read_text(encoding="utf-8")
+    jobs = "\n".join(
+        (WORKFLOW.parents[1] / f"resources/{name}.job.yml.tmpl").read_text(encoding="utf-8")
+        for name in ("train", "score")
+    )
     assert "job_id: ${resources.jobs.score.id}" in jobs
     assert "task_key: run_batch_scoring" in jobs
     assert jobs.count("queue:\n        enabled: true") == 2

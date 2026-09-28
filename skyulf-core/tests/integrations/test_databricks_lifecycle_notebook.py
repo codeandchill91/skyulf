@@ -201,11 +201,15 @@ def test_completion_publishes_score_request_only_after_verified_result(monkeypat
 @pytest.mark.parametrize(
     "filename,phase",
     [
-        ("workflow", "prepare"),
-        ("train_and_register", "train_register"),
-        ("compare_and_decide", "compare_decide"),
-        ("apply_operator_action", "operator"),
-        ("finalize_and_report", "complete"),
+        ("initialize_run", "initialize"),
+        ("load_data", "load_data"),
+        ("prepare_dataset", "prepare_dataset"),
+        ("train_and_tune", "train"),
+        ("select_best_model", "select_best_model"),
+        ("register_model", "evaluate_register"),
+        ("evaluate_model", "compare"),
+        ("model_decision", "model_decision"),
+        ("training_report", "complete"),
     ],
 )
 def test_generated_notebooks_bind_their_own_phase_and_defer_exit(monkeypatch, filename, phase):
@@ -224,7 +228,7 @@ def test_generated_notebooks_bind_their_own_phase_and_defer_exit(monkeypatch, fi
     runpy.run_path(str(path), run_name="__main__", init_globals={"spark": None, "dbutils": dbutils})
     assert execute.call_args.kwargs["phase"] == phase
     assert execute.call_args.kwargs["exit_notebook"] is False
-    assert ("preprocessing_path" in execute.call_args.kwargs) == (phase == "prepare")
+    assert ("preprocessing_path" in execute.call_args.kwargs) == (phase == "initialize")
     assert "# COMMAND ----------" in path.read_text()
     notebook.exit.assert_called_once_with('{"ok": true}')
 
@@ -368,3 +372,26 @@ def test_prepare_freezes_project_code_only_for_training(
         call.kwargs == {"key": "training_requested", "value": action == "train"}
         for call in task_values.set.call_args_list
     )
+
+
+@pytest.mark.parametrize(
+    "phase,contract",
+    [("initialize", "2"), ("model_decision", "2"), ("prepare", "3"), ("train_register", "3")],
+)
+def test_notebook_rejects_mixed_graph_contract_before_execution(monkeypatch, phase, contract):
+    """Partially regenerated notebooks must not execute with another graph's contract."""
+    from skyulf.integrations.databricks import job_runtime, lifecycle_tasks
+
+    execute = Mock()
+    monkeypatch.setattr(lifecycle_tasks, "run_lifecycle_phase", execute)
+    values = {
+        "job_id": "10",
+        "job_run_id": "20",
+        "repair_count": "0",
+        "execution_count": "1",
+        "workflow_contract": contract,
+    }
+    dbutils = SimpleNamespace(widgets=SimpleNamespace(getAll=lambda: values))
+    with pytest.raises(ValueError, match="contract"):
+        job_runtime.run_lifecycle_notebook(None, dbutils, phase=phase)
+    execute.assert_not_called()

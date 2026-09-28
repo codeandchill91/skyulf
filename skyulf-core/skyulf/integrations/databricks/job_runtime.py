@@ -233,8 +233,10 @@ def _notebook_output(
 
 def _lifecycle_widget_context(values: dict[str, str]) -> dict[str, Any]:
     """Reject unresolved invocation values and unsupported repairs before loading files."""
-    if values.get("workflow_contract") != "2":
-        raise ValueError("Lifecycle tasks require graph contract 2; regenerate/redeploy together.")
+    if values.get("workflow_contract") not in {"2", "3"}:
+        raise ValueError(
+            "Lifecycle tasks require graph contract 2 or 3; regenerate/redeploy together."
+        )
     if any(values.get(key) for key in ("phase", "task_role", "action", "score_model_version")):
         raise ValueError("Notebook phase and lifecycle role cannot be overridden by parameters.")
     for key in ("job_id", "job_run_id"):
@@ -295,6 +297,33 @@ def _saved_notebook_request(values: dict[str, str]) -> dict[str, Any]:
     return {"reference": reference, "tracking_uri": tracking_uri}
 
 
+def _validate_notebook_phase_contract(phase: str, values: dict[str, str]) -> None:
+    """Reject mismatched old/new notebooks before preparing or reading saved state."""
+    new_phases = {
+        "initialize",
+        "load_data",
+        "prepare_dataset",
+        "select_best_model",
+        "model_decision",
+    }
+    old_phases = {"prepare", "train_register", "compare_decide", "operator"}
+    contract = values["workflow_contract"]
+    if (phase in new_phases and contract != "3") or (phase in old_phases and contract != "2"):
+        raise ValueError("Notebook and job graph contract differ; regenerate/redeploy together.")
+
+
+def _notebook_task_states(phase: str, values: dict[str, str]) -> dict[str, str] | None:
+    """Keep graph-specific completion states separate from the pinned action."""
+    if phase != "complete":
+        return None
+    if values["workflow_contract"] == "3":
+        return {"decision": values.get("decision_result_state", "")}
+    return {
+        "training": values.get("training_result_state", ""),
+        "operator": values.get("operator_result_state", ""),
+    }
+
+
 def run_lifecycle_notebook(
     spark: Any,
     dbutils: Any,
@@ -306,12 +335,13 @@ def run_lifecycle_notebook(
 ) -> str:
     """Execute a fixed lifecycle phase using durable evidence from its predecessor.
 
-    Only prepare reads editable configuration and project Python. Later tasks
+    Only prepare/initialize read editable configuration and project Python. Later tasks
     receive references from this job invocation and load the frozen MLflow
     evidence. Notebook metadata is a misuse guard, not workspace authorization.
     """
     values = dbutils.widgets.getAll()
     context_values = _lifecycle_widget_context(values)
+    _validate_notebook_phase_contract(phase, values)
     from .lifecycle_tasks import (  # noqa: PLC0415 - shared runtime helpers avoid a module cycle
         LifecycleContext,
         run_lifecycle_phase,
@@ -319,17 +349,10 @@ def run_lifecycle_notebook(
 
     options = (
         _prepared_notebook_request(values, preprocessing_path)
-        if phase == "prepare"
+        if phase in {"prepare", "initialize"}
         else _saved_notebook_request(values)
     )
-    task_states = (
-        {
-            "training": values.get("training_result_state"),
-            "operator": values.get("operator_result_state"),
-        }
-        if phase == "complete"
-        else None
-    )
+    task_states = _notebook_task_states(phase, values)
     outcome = run_lifecycle_phase(
         spark,
         phase=phase,
@@ -340,7 +363,7 @@ def run_lifecycle_notebook(
     dbutils.jobs.taskValues.set(
         key="reference_json", value=json.dumps(outcome.reference, sort_keys=True)
     )
-    if phase == "prepare":
+    if phase in {"prepare", "initialize"}:
         dbutils.jobs.taskValues.set(key="tracking_uri", value=options["tracking_uri"])
         dbutils.jobs.taskValues.set(
             key="training_requested", value=outcome.output["training_requested"]

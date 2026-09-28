@@ -215,7 +215,8 @@ def _call(staged, phase, reference=None, **kwargs):
 
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
-def test_search_result_survives_durable_registration_and_comparison(staged, engine):
+@pytest.mark.parametrize("readable", [False, True])
+def test_search_result_survives_durable_registration_and_comparison(staged, engine, readable):
     """The registered artifact and notebook report must retain the actual selected search."""
     from skyulf.integrations.databricks.job_output import render_lifecycle_output
 
@@ -234,9 +235,26 @@ def test_search_result_survives_durable_registration_and_comparison(staged, engi
         "max_features": 2,
         "max_display_samples": 2,
     }
-    prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
-    trained = _call(staged, "train_register", prepared.reference)
-    result = _call(staged, "compare_decide", trained.reference)
+    prepared = _call(
+        staged,
+        "initialize" if readable else "prepare",
+        config=config,
+        action="train",
+        experiment_name="staged",
+    )
+    if readable:
+        loaded = _call(staged, "load_data", prepared.reference)
+        split = _call(staged, "prepare_dataset", loaded.reference)
+        fitted = _call(staged, "train", split.reference)
+        assert fitted.output["tuning"]["n_trials"] == 2
+        assert "Selected parameters" in render_lifecycle_output("train", fitted.output)
+        selected = _call(staged, "select_best_model", fitted.reference)
+        trained = _call(staged, "evaluate_register", selected.reference)
+        _call(staged, "compare", trained.reference)
+        result = _call(staged, "model_decision", prepared.reference)
+    else:
+        trained = _call(staged, "train_register", prepared.reference)
+        result = _call(staged, "compare_decide", trained.reference)
     run_id = prepared.reference["run_id"]
     evidence = json.loads(Path(client.download_artifacts(run_id, "tuning.json")).read_text())
     assert evidence["n_trials"] == 2
@@ -360,8 +378,9 @@ def test_secondary_gate_prevents_automatic_first_champion(staged):
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
 @pytest.mark.parametrize("custom_filter", [False, True])
+@pytest.mark.parametrize("readable", [False, True])
 def test_custom_recipes_restore_before_cv_in_separate_task(
-    staged, tmp_path, monkeypatch, engine, custom_filter
+    staged, tmp_path, monkeypatch, engine, custom_filter, readable
 ):
     """Saved builders must register custom nodes after the preparation process ends."""
     from skyulf.integrations.databricks.project import load_project_workflow
@@ -388,7 +407,13 @@ def build_pre_split_steps():
     frame["is_test"] = False
     config.update(engine=engine, cv_enabled=True, cv_folds=2)
     config.update(load_project_workflow(config, path))
-    prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
+    prepared = _call(
+        staged,
+        "initialize" if readable else "prepare",
+        config=config,
+        action="train",
+        experiment_name="staged",
+    )
     path.unlink()
 
     def clear_project_state():
@@ -402,9 +427,23 @@ def build_pre_split_steps():
                 monkeypatch.delitem(sys.modules, name)
 
     clear_project_state()
-    registered = _call(staged, "train_register", prepared.reference)
-    clear_project_state()
-    decision = _call(staged, "compare_decide", registered.reference)
+    if readable:
+        current = prepared
+        for phase in (
+            "load_data",
+            "prepare_dataset",
+            "train",
+            "select_best_model",
+            "evaluate_register",
+        ):
+            current = _call(staged, phase, current.reference)
+            clear_project_state()
+        _call(staged, "compare", current.reference)
+        decision = _call(staged, "model_decision", prepared.reference)
+    else:
+        registered = _call(staged, "train_register", prepared.reference)
+        clear_project_state()
+        decision = _call(staged, "compare_decide", registered.reference)
     assert decision.output["alias_change"]["new_version"] == "1"
     metrics = client.get_run(prepared.reference["run_id"]).data.metrics
     assert metrics["heldout_rmse"] < 1e-8
@@ -1117,7 +1156,8 @@ def test_complete_never_publishes_missing_or_failed_operator_result(staged, atte
     assert "skyulf.lifecycle.result.receipt" not in run.data.tags
 
 
-def test_complete_publishes_real_rollback_without_training(staged, monkeypatch):
+@pytest.mark.parametrize("readable", [False, True])
+def test_complete_publishes_real_rollback_without_training(staged, monkeypatch, readable):
     """Operator completion returns the restored champion and never reruns training phases."""
     from skyulf.integrations.databricks import local_retraining
     from skyulf.integrations.mlflow.promotion import AliasChangeReceipt
@@ -1146,14 +1186,19 @@ def test_complete_publishes_real_rollback_without_training(staged, monkeypatch):
     current = (adapter, client, config, adapter.LifecycleContext("10", "22"), frame)
     pending = _call(
         current,
-        "prepare",
+        "initialize" if readable else "prepare",
         config=config,
         action="rollback",
         experiment_name="staged",
         operator_options={"promotion_receipt": receipt, "expected_champion_version": "2"},
     )
-    _call(current, "operator", pending.reference)
-    result = _call(current, "complete", pending.reference, task_states=_OPERATOR_TASK_STATES)
+    _call(current, "model_decision" if readable else "operator", pending.reference)
+    result = _call(
+        current,
+        "complete",
+        pending.reference,
+        task_states={"decision": "success"} if readable else _OPERATOR_TASK_STATES,
+    )
     assert result.output["score_requested"] is True
     assert str(client.get_model_version_by_alias(config["model_name"], "champion").version) == "1"
     assert client.get_run(pending.reference["run_id"]).info.status == "FINISHED"
@@ -1256,3 +1301,130 @@ def test_task_states_only_accepted_by_complete_before_external_work(monkeypatch,
             tracking_uri="unused",
             task_states={"training": "success", "operator": "excluded"},
         )
+
+
+@pytest.mark.parametrize("engine", ["pandas", "polars"])
+@pytest.mark.parametrize("policy", ["automatic", "manual_approval"])
+def test_readable_graph_executes_data_stages_before_fitting(staged, monkeypatch, engine, policy):
+    """Named data stages do real work and training consumes their checked saved partitions."""
+    from skyulf.integrations.databricks import local_retraining
+
+    _, client, config, _, frame = staged
+    config.update(engine=engine, promotion_policy=policy)
+    reads = Mock(side_effect=lambda spark, spec: frame.copy())
+    monkeypatch.setattr(local_retraining, "read_training_snapshot", reads)
+    prepared = _call(staged, "initialize", config=config, action="train", experiment_name="staged")
+    reads.assert_not_called()
+    loaded = _call(staged, "load_data", prepared.reference)
+    assert loaded.output["source_rows"] == len(frame)
+    reads.assert_called_once()
+    split = _call(staged, "prepare_dataset", loaded.reference)
+    assert split.output["training_rows"] + split.output["holdout_rows"] == len(frame)
+    with pytest.raises(ValueError, match="predecessor"):
+        _call(staged, "train", prepared.reference)
+    trained = _call(staged, "train", split.reference)
+    reads.assert_called_once()
+    assert not client.search_registered_models()
+    selected = _call(staged, "select_best_model", trained.reference)
+    assert selected.output["candidate_count"] == 1
+    assert selected.output["selection_mode"] == "single_candidate"
+    registered = _call(staged, "evaluate_register", selected.reference)
+    _call(staged, "compare", registered.reference)
+    decision = _call(staged, "model_decision", prepared.reference)
+    assert decision.output["promotion_policy"] == policy
+    result = _call(staged, "complete", prepared.reference, task_states={"decision": "success"})
+    assert result.output["action"] == "train"
+    assert ("champion" in client.get_registered_model(config["model_name"]).aliases) == (
+        policy == "automatic"
+    )
+
+
+def test_readable_graph_rejects_modified_partition_before_fit(staged, monkeypatch):
+    """A changed saved dataset cannot enter training even when its receipt is intact."""
+    from skyulf.integrations.databricks import local_retraining
+
+    _, client, config, _, _ = staged
+    prepared = _call(staged, "initialize", config=config, action="train", experiment_name="staged")
+    loaded = _call(staged, "load_data", prepared.reference)
+    split = _call(staged, "prepare_dataset", loaded.reference)
+    saved = Path(
+        client.download_artifacts(prepared.reference["run_id"], "lifecycle/data/train.parquet")
+    )
+    saved.write_bytes(b"changed")
+    client.log_artifact(prepared.reference["run_id"], str(saved), "lifecycle/data")
+    fit = Mock(side_effect=AssertionError("must reject before fitting"))
+    monkeypatch.setattr(local_retraining, "fit_local_workflow", fit)
+    with pytest.raises(ValueError, match="digest"):
+        _call(staged, "train", split.reference)
+    fit.assert_not_called()
+    assert not client.search_registered_models()
+
+
+@pytest.mark.parametrize("action", ["approve", "reject"])
+@pytest.mark.parametrize("decision_state", ["success", "failed"])
+def test_readable_decision_routes_manual_actions_without_fitting(
+    staged, monkeypatch, action, decision_state
+):
+    """Manual actions share the decision node and only successful task output permits scoring."""
+    from skyulf.integrations.databricks import local_retraining
+
+    adapter, client, config, _, frame = staged
+    config["promotion_policy"] = "manual_approval"
+    prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
+    registered = _call(staged, "train_register", prepared.reference)
+    compared = _call(staged, "compare_decide", registered.reference)
+    _call(staged, "complete", prepared.reference, task_states=_TRAIN_TASK_STATES)
+    candidate = compared.output["candidate"]
+    forbidden = Mock(side_effect=AssertionError("manual action must not fit or register"))
+    monkeypatch.setattr(local_retraining, "fit_local_workflow", forbidden)
+    monkeypatch.setattr(local_retraining, "register_model", forbidden)
+    operator = (adapter, client, config, adapter.LifecycleContext("10", "21"), frame)
+    options = {
+        "candidate_version": candidate["model_version"],
+        "comparison_sha256": candidate["comparison_sha256"],
+        "rejection_reason": "Needs review" if action == "reject" else "",
+    }
+    pending = _call(
+        operator,
+        "initialize",
+        config=config,
+        action=action,
+        experiment_name="staged",
+        operator_options=options,
+    )
+    _call(operator, "model_decision", pending.reference)
+    if decision_state == "failed":
+        with pytest.raises(ValueError, match="task outcomes"):
+            _call(operator, "complete", pending.reference, task_states={"decision": decision_state})
+        assert (
+            "skyulf.lifecycle.result.attempt"
+            not in client.get_run(pending.reference["run_id"]).data.tags
+        )
+    else:
+        result = _call(
+            operator, "complete", pending.reference, task_states={"decision": decision_state}
+        )
+        assert result.output["score_requested"] is (action == "approve")
+    forbidden.assert_not_called()
+    assert len(client.search_model_versions(f"name='{config['model_name']}'")) == 1
+
+
+def test_readable_failed_data_stage_cannot_publish_success(staged, monkeypatch):
+    """An ALL_DONE report must close failed data work without a scoring handoff."""
+    from skyulf.integrations.databricks import local_retraining
+
+    _, client, config, _, _ = staged
+    prepared = _call(staged, "initialize", config=config, action="train", experiment_name="staged")
+    monkeypatch.setattr(
+        local_retraining,
+        "read_training_snapshot",
+        Mock(side_effect=ValueError("source unavailable")),
+    )
+    with pytest.raises(ValueError, match="source unavailable"):
+        _call(staged, "load_data", prepared.reference)
+    with pytest.raises(ValueError):
+        _call(staged, "complete", prepared.reference, task_states={"decision": "upstream_failed"})
+    run = client.get_run(prepared.reference["run_id"])
+    assert run.info.status == "FAILED"
+    assert "skyulf.lifecycle.result.attempt" not in run.data.tags
+    assert not client.search_registered_models()

@@ -8,11 +8,15 @@ sync:
   include:
     - dist/*.whl
     - config/workflow.json
-    - src/workflow.py
-    - src/train_and_register.py
-    - src/compare_and_decide.py
-    - src/apply_operator_action.py
-    - src/finalize_and_report.py
+    - src/initialize_run.py
+    - src/load_data.py
+    - src/prepare_dataset.py
+    - src/train_and_tune.py
+    - src/select_best_model.py
+    - src/register_model.py
+    - src/evaluate_model.py
+    - src/model_decision.py
+    - src/training_report.py
     - src/score.py
     - src/preprocessing.py
     - src/tuning.py

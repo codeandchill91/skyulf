@@ -21,6 +21,7 @@ from ..mlflow.promotion import AliasChangeReceipt, ExclusiveAliasWriterAdmission
 from ..mlflow.registry import load_run_local_pipeline
 from ..mlflow.tracking import _get_or_create_experiment
 from ..mlflow.validation import ModelComparisonReport
+from . import _lifecycle_data as data_stages
 from . import local_retraining as training
 from . import local_workflow as workflow
 from ._lifecycle_state import _PREDECESSORS, LifecycleContext, LifecyclePhaseResult, _PhaseStore
@@ -134,6 +135,8 @@ def _prepare(
     experiment_name: str,
     operator_options: dict[str, Any],
     now: datetime | None,
+    *,
+    graph_version: int = 2,
 ) -> LifecyclePhaseResult:
     """Resolve source and champion once, then persist the complete immutable invocation."""
     if action not in {"train", "approve", "reject", "rollback"}:
@@ -150,6 +153,8 @@ def _prepare(
         "action": action,
         "operator_options": options,
     }
+    if graph_version == 3:
+        request["graph_version"] = 3
     if action == "train":
         _prepare_training_request(spark, request, config, options, policy, now)
     # JSON normalization also detaches all caller-owned editable dictionaries.
@@ -208,6 +213,7 @@ def _train(spark: Any, store: _PhaseStore) -> dict[str, Any]:
             engine=config["engine"],
             cv=LocalCVSpec.from_workflow(config),
             risk_category=config.get("risk_category"),
+            **_prepared_fit_options(store),
         )
         training._log_fitted_candidate(
             store.run,
@@ -228,6 +234,38 @@ def _train(spark: Any, store: _PhaseStore) -> dict[str, Any]:
         "holdout_rows": fitted.holdout_rows,
         "unavailable_labels": fitted.unavailable_labels,
         "tags": fitted.tags,
+        **_training_summary(store, fitted.artifact),
+    }
+
+
+def _prepared_fit_options(store: _PhaseStore) -> dict[str, Any]:
+    """Use staged partitions only for invocations pinned to the readable graph."""
+    if store.request.get("graph_version", 2) == 3:
+        return {"prepared_data": data_stages.training_partitions(store)}
+    return {}
+
+
+def _load_data(spark: Any, store: _PhaseStore) -> dict[str, Any]:
+    """Read the pinned source in its own visible data-loading stage."""
+    source = store.request["config"]["pipeline"].get("project_python_source")
+    return data_stages.load_source(spark, store, _spec(store.request["spec"], source))
+
+
+def _prepare_dataset(spark: Any, store: _PhaseStore) -> dict[str, Any]:
+    """Persist fixed-cleanup results and split membership before learned transforms."""
+    source = store.request["config"]["pipeline"].get("project_python_source")
+    return data_stages.prepare_dataset(store, _spec(store.request["spec"], source))
+
+
+def _select_best_model(spark: Any, store: _PhaseStore) -> dict[str, Any]:
+    """Describe the sole verified candidate without implying multi-model competition."""
+    verified = _load_training_evidence(store)
+    return {
+        "candidate_count": 1,
+        "selection_mode": "single_candidate",
+        "selection_reason": "Only one model was requested; multi-model competition is not enabled.",
+        "model_uri": verified.fitted["model_uri"],
+        "model_digest": verified.fitted["model_digest"],
     }
 
 
@@ -377,14 +415,21 @@ def _evaluate_register(spark: Any, store: _PhaseStore) -> dict[str, Any]:
         "metrics": metrics,
         "dataset_id": spec.dataset_id,
     }
+    return output | _training_summary(store, verified.artifact)
+
+
+def _training_summary(store: _PhaseStore, artifact: Any) -> dict[str, Any]:
+    """Expose the same fitted search and explanation evidence in training and registry reports."""
+    config = store.request["config"]
+    output: dict[str, Any] = {}
     if config["pipeline"]["modeling"]["type"] == "hyperparameter_tuner":
-        evidence = training.tuning_evidence(verified.artifact)
+        evidence = training.tuning_evidence(artifact)
         if evidence is None:
-            raise ValueError("Registered search artifact lacks tuning evidence.")
+            raise ValueError("Search artifact lacks tuning evidence.")
         output["tuning"] = {
             key: value for key, value in evidence.items() if key not in {"trials", "modeling"}
         }
-        output["tuning"]["strategy"] = verified.artifact.pipeline.config["modeling"]["strategy"]
+        output["tuning"]["strategy"] = artifact.pipeline.config["modeling"]["strategy"]
         output["tuning"]["artifact"] = "tuning.json"
     if config["pipeline"].get("explainability"):
         explanation = store.read("explanations.json")
@@ -536,6 +581,8 @@ def _complete_invocation(
         if training_action
         else {"training": "excluded", "operator": "success"}
     )
+    if store.request.get("graph_version", 2) == 3:
+        expected_states = {"decision": "success"}
     if task_states != expected_states:
         raise ValueError("Lifecycle task outcomes do not allow publishing a result.")
     return run_lifecycle_phase(
@@ -551,7 +598,17 @@ def _validate_active_phase(store: _PhaseStore, phase: str) -> None:
     """Reject the wrong branch or inactive attempts before starting durable work."""
     training_action = store.request["action"] == "train"
     if (
-        phase in {"train", "evaluate_register", "compare", "decide", "finalize"}
+        phase
+        in {
+            "load_data",
+            "prepare_dataset",
+            "train",
+            "select_best_model",
+            "evaluate_register",
+            "compare",
+            "decide",
+            "finalize",
+        }
         and not training_action
         or phase == "operator"
         and training_action
@@ -592,6 +649,9 @@ def _execute_phase(
             output = _result(store)
         else:
             output = {
+                "load_data": _load_data,
+                "prepare_dataset": _prepare_dataset,
+                "select_best_model": _select_best_model,
                 "train": _train,
                 "evaluate_register": _evaluate_register,
                 "compare": _compare,
@@ -619,11 +679,18 @@ def _validate_phase_inputs(
     now: datetime | None,
 ) -> None:
     """Reject inputs that do not belong to the selected fixed phase."""
-    if phase not in {"prepare", "complete", *_PREDECESSORS, *_GROUPED_PHASES}:
+    if phase not in {
+        "prepare",
+        "initialize",
+        "model_decision",
+        "complete",
+        *_PREDECESSORS,
+        *_GROUPED_PHASES,
+    }:
         raise ValueError("Unsupported fixed lifecycle phase.")
     if phase != "complete" and task_states is not None:
         raise ValueError("Task states are accepted only by complete.")
-    if phase != "prepare" and any(
+    if phase not in {"prepare", "initialize"} and any(
         value is not None for value in (config, action, experiment_name, operator_options, now)
     ):
         raise ValueError("Downstream lifecycle phases must use only the pinned invocation.")
@@ -639,6 +706,7 @@ def _run_prepare_phase(
     operator_options: dict[str, Any] | None,
     now: datetime | None,
     tracking_uri: str,
+    graph_version: int = 2,
 ) -> LifecyclePhaseResult:
     """Validate prepare inputs before persisting the pinned invocation."""
     if reference is not None or config is None or action is None or not experiment_name:
@@ -653,6 +721,7 @@ def _run_prepare_phase(
         experiment_name,
         operator_options or {},
         now,
+        graph_version=graph_version,
     )
 
 
@@ -672,10 +741,12 @@ def run_lifecycle_phase(
 ) -> LifecyclePhaseResult:
     """Run fixed notebook phases with durable references and no cross-task local state.
 
-    Only prepare accepts configuration, action and operator inputs. Groups retain
+    Prepare (legacy) and initialize accept configuration and operator inputs.
+    Initialize pins graph 3 with saved data preparation stages. Groups retain
     each internal phase's receipts and return the last phase's reference. Complete
     takes the prepare reference, finalizes training when requested, then requires
     successful selected-branch task outcomes before publishing the result.
+    Model_decision routes the prepared action to policy or operator handling.
     Finalize and result also take the prepare reference; other phases
     take their immediate predecessor's reference. This adapter requires the
     lifecycle job's existing serialization and never runs scoring.
@@ -696,7 +767,7 @@ def run_lifecycle_phase(
             reference = completed.reference
         return completed
     store = _PhaseStore(tracking_uri, context)
-    if phase == "prepare":
+    if phase in {"prepare", "initialize"}:
         return _run_prepare_phase(
             spark,
             store,
@@ -707,14 +778,36 @@ def run_lifecycle_phase(
             operator_options,
             now,
             tracking_uri,
+            graph_version=3 if phase == "initialize" else 2,
         )
     if reference is None:
         raise ValueError("Lifecycle phase requires its predecessor reference.")
     store.bind(reference)
-    expected_predecessor = "prepare" if phase == "complete" else _PREDECESSORS[phase]
+    expected_predecessor = (
+        "prepare" if phase in {"complete", "model_decision"} else store.predecessor(phase)
+    )
     if reference["phase"] != expected_predecessor:
         raise ValueError("Lifecycle phase received the wrong predecessor reference.")
+    if phase == "model_decision":
+        return _run_model_decision(spark, store, tracking_uri, reference)
     if phase == "complete":
         return _complete_invocation(spark, store, tracking_uri, reference, task_states)
     _validate_active_phase(store, phase)
     return _execute_phase(spark, store, phase, reference)
+
+
+def _run_model_decision(
+    spark: Any, store: _PhaseStore, tracking_uri: str, reference: dict[str, str]
+) -> LifecyclePhaseResult:
+    """Route saved policy/operator intent through one visible decision task."""
+    phase = "operator"
+    if store.request["action"] == "train":
+        phase = "decide"
+        reference = store.reference(store.receipt("compare"))
+    return run_lifecycle_phase(
+        spark,
+        phase=phase,
+        context=store.context,
+        tracking_uri=tracking_uri,
+        reference=reference,
+    )

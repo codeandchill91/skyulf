@@ -56,6 +56,19 @@ def _generate_project(tmp_path, **overrides):
     return project
 
 
+def _read_jobs(project):
+    """Keep each job independently parseable with stable resource keys and no duplicates."""
+    jobs = {}
+    resources = project / "resources"
+    assert {path.name for path in resources.glob("*.yml")} == {"train.job.yml", "score.job.yml"}
+    for name in ("train", "score"):
+        document = yaml.safe_load((resources / f"{name}.job.yml").read_text())
+        resource_jobs = document["resources"]["jobs"]
+        assert set(resource_jobs) == {name}
+        jobs.update(resource_jobs)
+    return jobs
+
+
 def test_cli_basic_setup_defaults_match_explicit_advanced_settings(tmp_path):
     """Skipped tuning prompts must use defaults without losing explicit init-file values."""
     basic = tmp_path / "basic"
@@ -173,9 +186,7 @@ def test_cli_independent_schedules_preserve_shared_two_job_graph(tmp_path, train
         scoring_pause_status="UNPAUSED",
     )
     variables = yaml.safe_load((project / "databricks.yml").read_text())["variables"]
-    jobs = yaml.safe_load((project / "resources/workflow.jobs.yml").read_text())["resources"][
-        "jobs"
-    ]
+    jobs = _read_jobs(project)
     config = _read_validated_config(project)
     assert set(jobs) == {"train", "score"}
     bundle = yaml.safe_load((project / "databricks.yml").read_text())
@@ -216,9 +227,7 @@ def test_cli_independent_schedules_preserve_shared_two_job_graph(tmp_path, train
                 "workflow_contract"
             ] == documented_contract.group(1)
     assert tasks["run_batch_scoring"]["run_job_task"]["job_id"] == "${resources.jobs.score.id}"
-    assert (
-        tasks["train_and_register"]["max_retries"] == jobs["score"]["tasks"][0]["max_retries"] == 0
-    )
+    assert tasks["train_and_tune"]["max_retries"] == jobs["score"]["tasks"][0]["max_retries"] == 0
 
 
 @pytest.mark.parametrize("strategy,holdout", [("random", None), ("temporal", 2)])
@@ -310,9 +319,7 @@ def test_cli_six_month_schedule_keeps_data_window_independent(tmp_path):
         training_window_mode="full_snapshot",
     )
     bundle = yaml.safe_load((project / "databricks.yml").read_text())
-    jobs = yaml.safe_load((project / "resources/workflow.jobs.yml").read_text())["resources"][
-        "jobs"
-    ]
+    jobs = _read_jobs(project)
     assert bundle["variables"]["retraining_cron_expression"]["default"] == "0 0 3 1 1,7 ?"
     assert bundle["variables"]["retraining_timezone_id"]["default"] == "Europe/Copenhagen"
     assert jobs["train"]["schedule"]["pause_status"] == "${var.retraining_pause_status}"
@@ -348,9 +355,7 @@ def test_cli_guided_pipeline_cv_and_offline_preview(tmp_path, engine, task):
         training_sample_seed="19",
     )
     config = _read_validated_config(project)
-    jobs = yaml.safe_load((project / "resources/workflow.jobs.yml").read_text())["resources"][
-        "jobs"
-    ]
+    jobs = _read_jobs(project)
     for job in jobs.values():
         for entry in job["tasks"]:
             if "notebook_task" in entry:
@@ -549,9 +554,7 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
         quality_threshold="100.0",
         retraining_mode="scheduled" if monthly else "manual",
     )
-    jobs = yaml.safe_load((project / "resources/workflow.jobs.yml").read_text())["resources"][
-        "jobs"
-    ]
+    jobs = _read_jobs(project)
     config = _read_validated_config(project)
     assert set(jobs) == {"train", "score"}
     for job in jobs.values():
@@ -560,43 +563,45 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
     synced_notebooks = {path for path in bundle["sync"]["include"] if path.startswith("src/")}
     assert all((project / path).is_file() for path in synced_notebooks)
     tasks = {task["task_key"]: task for task in jobs["train"]["tasks"]}
+    chain = [
+        "load_data",
+        "prepare_dataset",
+        "train_and_tune",
+        "select_best_model",
+        "register_model",
+        "evaluate_model",
+    ]
     assert set(tasks) == {
-        "prepare_request",
-        "training_requested",
-        "train_and_register",
-        "compare_and_decide",
-        "apply_operator_action",
-        "finalize_and_report",
+        "initialize_run",
+        "choose_action",
+        *chain,
+        "model_decision",
+        "training_report",
         "scoring_requested",
         "run_batch_scoring",
     }
-    assert tasks["training_requested"]["depends_on"] == [{"task_key": "prepare_request"}]
-    assert tasks["training_requested"]["condition_task"] == {
+    assert tasks["choose_action"]["depends_on"] == [{"task_key": "initialize_run"}]
+    assert tasks["choose_action"]["condition_task"] == {
         "op": "EQUAL_TO",
-        "left": "{{tasks.prepare_request.values.training_requested}}",
+        "left": "{{tasks.initialize_run.values.training_requested}}",
         "right": "true",
     }
-    for task, branch in (("train_and_register", "true"), ("apply_operator_action", "false")):
-        assert tasks[task]["depends_on"] == [{"task_key": "training_requested", "outcome": branch}]
-    assert tasks["compare_and_decide"]["depends_on"] == [{"task_key": "train_and_register"}]
-    assert {item["task_key"] for item in tasks["finalize_and_report"]["depends_on"]} == {
-        "compare_and_decide",
-        "apply_operator_action",
-    }
-    # Cleanup runs after success, failure or upstream failure on the active branch.
-    # The runtime publishes score_requested only after verifying successful evidence.
-    assert tasks["finalize_and_report"]["run_if"] == "ALL_DONE"
-    completion_parameters = tasks["finalize_and_report"]["notebook_task"]["base_parameters"]
-    assert completion_parameters["training_result_state"] == (
-        "{{tasks.compare_and_decide.result_state}}"
-    )
-    assert completion_parameters["operator_result_state"] == (
-        "{{tasks.apply_operator_action.result_state}}"
-    )
-    assert tasks["scoring_requested"]["depends_on"] == [{"task_key": "finalize_and_report"}]
+    assert tasks["load_data"]["depends_on"] == [{"task_key": "choose_action", "outcome": "true"}]
+    for previous, following in zip(chain, chain[1:], strict=False):
+        assert tasks[following]["depends_on"] == [{"task_key": previous}]
+    assert tasks["model_decision"]["run_if"] == "NONE_FAILED"
+    assert tasks["model_decision"]["depends_on"] == [
+        {"task_key": "choose_action", "outcome": "false"},
+        {"task_key": "evaluate_model"},
+    ]
+    assert tasks["training_report"]["depends_on"] == [{"task_key": "model_decision"}]
+    assert tasks["training_report"]["run_if"] == "ALL_DONE"
+    completion = tasks["training_report"]["notebook_task"]["base_parameters"]
+    assert completion["decision_result_state"] == "{{tasks.model_decision.result_state}}"
+    assert tasks["scoring_requested"]["depends_on"] == [{"task_key": "training_report"}]
     assert tasks["scoring_requested"]["condition_task"] == {
         "op": "EQUAL_TO",
-        "left": "{{tasks.finalize_and_report.values.score_requested}}",
+        "left": "{{tasks.training_report.values.score_requested}}",
         "right": "true",
     }
     assert tasks["run_batch_scoring"]["depends_on"] == [
@@ -615,7 +620,7 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
         "rejection_reason",
         "promotion_receipt_json",
     }
-    parameters = tasks["prepare_request"]["notebook_task"]["base_parameters"]
+    parameters = tasks["initialize_run"]["notebook_task"]["base_parameters"]
     for name in defaults:
         assert parameters[name] == "{{job.parameters." + name + "}}"
     score_task = jobs["score"]["tasks"][0]
@@ -625,7 +630,7 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
     score_parameters = score_task["notebook_task"]["base_parameters"]
     assert score_parameters["score_model_version"] == "{{job.parameters.score_model_version}}"
     for notebook_parameters in (parameters, score_parameters):
-        assert notebook_parameters["workflow_contract"] == "2"
+        assert notebook_parameters["workflow_contract"] == "3"
         assert notebook_parameters["deployed_score_handoff"] == handoff
     assert (project / "src/score.py").is_file()
     assert config["score_model_selection"] == selection
@@ -638,10 +643,10 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
     else:
         assert "schedule" not in jobs["train"]
     if compute == "serverless":
-        assert tasks["train_and_register"]["environment_key"] == "skyulf"
+        assert tasks["train_and_tune"]["environment_key"] == "skyulf"
         assert "job_clusters" not in jobs["train"]
     else:
-        assert tasks["train_and_register"]["job_cluster_key"] == "skyulf"
+        assert tasks["train_and_tune"]["job_cluster_key"] == "skyulf"
         assert "environments" not in jobs["train"]
     for task in tasks.values():
         assert task["max_retries"] == 0
@@ -654,8 +659,8 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
             assert runtime["job_run_id"] == "{{job.run_id}}"
             assert runtime["repair_count"] == "{{job.repair_count}}"
             assert runtime["execution_count"] == "{{task.execution_count}}"
-            if task["task_key"] != "prepare_request":
-                assert runtime["tracking_uri"] == "{{tasks.prepare_request.values.tracking_uri}}"
+            if task["task_key"] != "initialize_run":
+                assert runtime["tracking_uri"] == "{{tasks.initialize_run.values.tracking_uri}}"
 
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])

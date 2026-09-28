@@ -736,16 +736,16 @@ def _fit_candidate(
     engine: str,
     cv: LocalCVSpec,
     risk_category: str | None,
+    prepared_data: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, int] | None = None,
 ) -> _FittedCandidate:
     """Fit CV and final training rows, persisting selection and provenance evidence."""
     run.log_config(pipeline_config, artifact_file="pipeline_config.json")
     run.client.log_dict(run.run_id, config, "training_pipeline_config.json")
     run.log_params({key: getattr(cv, field) for key, field in CV_FIELDS.items()})
     run.client.log_dict(run.run_id, _training_spec_payload(spec, engine), "training_snapshot.json")
-    frame = read_training_snapshot(spark, spec)
     temporal_cv = cv.enabled and cv.method == "time_series_split"
-    train_frame, holdout, unavailable = split_labeled_snapshot(
-        frame, spec, keep_training_event=temporal_cv, engine=engine
+    frame, train_frame, holdout, unavailable = prepared_data or _read_training_partitions(
+        spark, spec, temporal_cv=temporal_cv, engine=engine
     )
     spec = replace(
         spec,
@@ -813,6 +813,17 @@ def _fit_candidate(
         frame,
         holdout,
     )
+
+
+def _read_training_partitions(
+    spark: Any, spec: LocalTrainingSpec, *, temporal_cv: bool, engine: str
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, int]:
+    """Retain the sequential SDK read/split path alongside prepared lifecycle data."""
+    frame = read_training_snapshot(spark, spec)
+    train, holdout, unavailable = split_labeled_snapshot(
+        frame, spec, keep_training_event=temporal_cv, engine=engine
+    )
+    return frame, train, holdout, unavailable
 
 
 def _log_fitted_candidate(

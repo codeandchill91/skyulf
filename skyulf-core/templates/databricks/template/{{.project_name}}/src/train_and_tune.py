@@ -1,5 +1,5 @@
 # Databricks notebook source
-"""Compare pinned models and apply the saved promotion policy."""
+"""Fit preprocessing, feature engineering, CV and optional tuning."""
 
 from skyulf.integrations.databricks.job_runtime import run_lifecycle_notebook
 
@@ -7,7 +7,7 @@ if __name__ == "__main__":
     output = run_lifecycle_notebook(
         globals()["spark"],
         globals()["dbutils"],
-        phase="compare_decide",
+        phase="train",
         display_html=globals().get("displayHTML"),
         exit_notebook=False,
     )

@@ -122,6 +122,11 @@ def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
     """Show a completed phase's useful values while keeping technical receipts folded."""
     titles = {
         "prepare": "Request validated and data pinned",
+        "initialize": "Run initialized",
+        "load_data": "Source data loaded",
+        "prepare_dataset": "Dataset prepared and split",
+        "select_best_model": "Model selection completed",
+        "model_decision": "Model decision completed",
         "train": "Candidate pipeline trained",
         "evaluate_register": "Candidate evaluated and registered",
         "train_register": "Candidate trained, evaluated and registered",
@@ -146,7 +151,7 @@ def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
         )
     sections.extend(_comparison_summary(candidate))
     receipt = payload.get("alias_change") or payload.get("result") or {}
-    if phase == "operator" and receipt.get("model_name"):
+    if phase in {"operator", "model_decision"} and receipt.get("model_name"):
         sections.append(f"<p><strong>Model:</strong> {_text(receipt['model_name'])}</p>")
     sections.extend(_receipt_summary(receipt))
     _append_lifecycle_actions(sections, phase, payload)
@@ -235,16 +240,20 @@ def _append_training_output(sections: list[str], payload: dict[str, Any]) -> Non
 
 def _append_lifecycle_actions(sections: list[str], phase: str, payload: dict[str, Any]) -> None:
     """Explain unchanged aliases and point operators to the final report."""
-    if phase in {"decide", "compare_decide"} and not payload.get("alias_change"):
+    if (
+        phase in {"decide", "compare_decide", "model_decision"}
+        and "promotion_policy" in payload
+        and not payload.get("alias_change")
+    ):
         sections.append(
             "<p>Awaiting manual review. Champion is unchanged.</p>"
             if payload.get("promotion_policy") == "manual_approval"
             else "<p>Champion is unchanged. The candidate did not pass promotion gates.</p>"
         )
-    if phase in {"decide", "compare_decide", "operator"}:
+    if phase in {"decide", "compare_decide", "operator", "model_decision"}:
+        report = "training_report" if phase == "model_decision" else "finalize_and_report"
         sections.append(
-            "<p>Open <strong>finalize_and_report</strong> for the final decision "
-            "and operator actions.</p>"
+            f"<p>Open <strong>{report}</strong> for the final decision and operator actions.</p>"
         )
 
 

@@ -13,7 +13,14 @@ and model fitting run locally on the selected compute.
 | `src/tuning.py` | Optional `build_search_space()` override; returning `None` uses Core defaults |
 | `src/ensemble.py` | Optional voting/stacking composition; returning `None` keeps JSON parameters and Core defaults |
 | `databricks.yml` | Workspace/UC bindings for `dev`, `test`, `syst`, `prod`; schedule and compute variables |
-| `resources/workflow.jobs.yml` | Generated task definitions; keep them aligned with the installed wheel |
+| `resources/train.job.yml` | Training, comparison, approval/rollback and optional scoring handoff |
+| `resources/score.job.yml` | Batch scoring job and its independent schedule/compute |
+
+`databricks.yml` includes both job files through `resources/*.yml`. Keep the
+resource keys `train` and `score` stable; the training handoff references
+`${resources.jobs.score.id}` across files. When updating an older generated
+project, replace `resources/workflow.jobs.yml` with these two files; do not
+leave all three present. The job definitions and resource keys stay the same.
 
 Review source column names and positive `max_rows`/`max_input_mb` budgets.
 Overflow fails. `training_version: null` pins the latest snapshot at run start;
@@ -151,19 +158,37 @@ The `train` job has one active run, with queued training and operator actions:
 
 | Task | Purpose |
 | --- | --- |
-| `prepare_request` | Validate and pin the request |
-| `training_requested` | Select training or operator branch |
-| `train_and_register` | Fit, evaluate and register the candidate |
-| `compare_and_decide` | Compare with champion and apply promotion policy |
-| `apply_operator_action` | Approve, reject or roll back without fitting |
-| `finalize_and_report` | Finalize either branch and publish verified results |
+| `initialize_run` | Validate settings and pin source version, recipe and expected champion |
+| `choose_action` | Select training or an explicit approve/reject/rollback action |
+| `load_data` | Read the bounded pinned source and save its verified dataset |
+| `prepare_dataset` | Apply fixed cleanup and eligibility rules, then save training/holdout partitions |
+| `train_and_tune` | Fit preprocessing inside training folds, run configured CV/tuning, and save the fitted pipeline |
+| `select_best_model` | Verify the candidate; currently reports one candidate, without multi-model competition |
+| `register_model` | Check heldout evaluation before registering and nominating the candidate |
+| `evaluate_model` | Compare the registered candidate with the pinned champion on the same holdout |
+| `model_decision` | Apply promotion policy or execute an explicit approve/reject/rollback action |
+| `training_report` | Finalize the run and publish verified results and next actions |
 | `scoring_requested` | Check whether scoring was requested |
 | `run_batch_scoring` | Invoke the existing score job |
 
-The separate score job has the `score` task. Open **`finalize_and_report`** for
-metrics, the decision and ready-to-copy `next_actions`. Comparison output is in
-`compare_and_decide`; score results are in the child or independent score run.
-Finalization can run after failure; that does not imply a successful result.
+The separate score job has the `score` task. Open **`training_report`** for
+metrics, the decision and ready-to-copy `next_actions`. Search details are in
+`train_and_tune`; champion comparison is in `evaluate_model`. Score results are
+in the child or independent score run. Manual actions skip data and training
+and use `model_decision` directly. Finalization can run after failure; that
+does not imply a successful result.
+
+`prepare_dataset` applies only fixed transformations and filters. Learned
+preprocessing and feature engineering stay inside `train_and_tune` so each CV
+fold learns from its own training rows. With tuning disabled, that task fits
+the configured model directly. `select_best_model` currently receives a single
+candidate; multi-model competition is a separate planned feature.
+
+Bounded source and split datasets are saved as Parquet artifacts under the
+MLflow run's `lifecycle/data/`. Downstream training verifies their saved digests
+and preserves split membership without rereading the source. These artifacts
+contain training data: apply the experiment's access and retention policy.
+Registration and approval retain their source/evidence replay checks.
 
 This project's policies are:
 
@@ -203,10 +228,11 @@ MLflow evidence and registry state before a fresh lifecycle run; lifecycle repai
 and retry are rejected because effects may already have committed.
 See [failure evidence and pinned replay][replay] and [recovery][schedules].
 
-Keep `workflow_contract: "2"` fixed in the generated notebook parameters.
+Keep `workflow_contract: "3"` fixed in the generated notebook parameters.
 `config_version: 1` is the separate workflow JSON schema version. Changing
 `score_handoff` requires updating `deployed_score_handoff` wherever present in
-`resources/workflow.jobs.yml` and redeploying the matching graph/notebooks/wheel.
+`resources/train.job.yml` and `resources/score.job.yml`, then redeploying the
+matching graph/notebooks/wheel.
 
 [setup]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle/#guided-setup-and-offline-preview
 [recipes]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle/#custom-preprocessing-recipes

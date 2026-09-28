@@ -426,7 +426,7 @@ scores remain negative, with larger scores better. The
 With CV disabled, search uses one training-only 80/20 validation split; an ordinary
 model adds no fold fits. Search runs save `tuning.json` with effective settings,
 trials, best parameters and the actual scorer. Negative loss scores remain negative
-and higher is better. `train_and_register` displays a compact search summary.
+and higher is better. `train_and_tune` displays a compact search summary.
 
 Optional `pipeline.explainability` accepts `{"method": "shap", "max_samples": 100,
 "max_features": 30, "max_display_samples": 10}`. It uses bounded training rows and
@@ -450,11 +450,11 @@ To enable SHAP in a generated project, add this entry inside the existing
 The training runtime also needs the optional `shap>=0.46.0,<1.0.0` dependency
 declared by Core's `explainability` extra. The generated wheel/MLflow dependency
 list does not install this extra automatically. For serverless training, add SHAP
-to the training environment's `dependencies` in `resources/workflow.jobs.yml`;
+to the training environment's `dependencies` in `resources/train.job.yml`;
 for classic compute, include it in the training task's PyPI libraries.
 
 Run the normal training job; do not execute `local_explanations.py` directly.
-`train_and_register` reports the explanation status, sample count and artifact name.
+`train_and_tune` reports the explanation status, sample count and artifact name.
 Open that training run in MLflow and read **Artifacts > explanations.json** for
 global feature importance and the bounded per-row explanations. The Bundle
 currently publishes JSON evidence and a status summary, not SHAP charts.
@@ -735,21 +735,30 @@ versions; it does not change promotion gates or relabel existing versions.
 
 ## Where the workflow lives
 
-The generated notebooks are small entrypoints with fixed lifecycle steps or
-the score role. `src/workflow.py` prepares a request; `train_and_register`
-fits, evaluates and registers it, then `compare_and_decide` compares models
-and applies the promotion policy. The shared `finalize_and_report` task closes
-training even on failure and publishes only a verified successful result.
-Approve/reject/rollback use a separate branch without training. The installed
-`job_runtime` adapter reads configuration once and exchanges durable MLflow
-references between phases. Computation and lifecycle changes reuse existing
-Core services; no extra control tables or jobs are introduced. See the
-[task graph and operator walkthrough](databricks_bundle_walkthrough.md#the-two-jobs-and-their-tasks).
-`prediction_output` creates output tables and safely switches full-rebuild
-views. Imports do not create a Spark session or cloud resource.
+The generated notebooks have fixed lifecycle steps or the score role.
+`initialize_run` freezes the request; `load_data` reads bounded pinned data;
+`prepare_dataset` applies fixed cleanup and saves the split. `train_and_tune`
+fits learned preprocessing within training folds and runs configured CV/search.
+`select_best_model` currently verifies a single candidate; multiple candidates
+in one run are not implemented yet. `register_model` evaluates the fitted
+artifact before registration; `evaluate_model` compares registered versions.
+`model_decision` applies the saved policy or an explicit approve/reject/rollback
+request. Manual actions skip the data and training stages. `training_report`
+closes training even on failure and publishes only a verified successful result.
 
-Regenerate and deploy the notebook files and job graph together with the
-matching wheel; graph contract 2 deliberately rejects older generated graphs.
+Tasks exchange durable MLflow references. Source and split datasets are bounded
+Parquet artifacts under `lifecycle/data/`, with digests and membership metadata
+checked before reuse. The experiment therefore stores training rows as well as
+model evidence; its access and retention policies apply to those rows.
+Computation and lifecycle changes reuse existing Core services; no additional
+control tables or jobs are introduced. See the
+[task graph and operator walkthrough](databricks_bundle_walkthrough.md#the-two-jobs-and-their-tasks).
+`prediction_output` creates output tables and switches full-rebuild views.
+Imports do not create a Spark session or cloud resource.
+
+Regenerate and deploy notebooks, graph and wheel together for graph contract 3.
+Existing graph-2 bundles retain their legacy runtime path; changing only a
+contract marker does not migrate a bundle.
 The workflow configuration schema remains version 1.
 
 Notebook entrypoints are explicit: generated `src/score.py` calls
@@ -1199,3 +1208,17 @@ retries independently. A training retry can register another candidate version.
 Inspect failed run evidence and registry state before rerunning; retry score
 separately after an already-committed approval. This is not an exactly-once
 training guarantee. See the [Databricks serverless retry behavior](https://docs.databricks.com/aws/en/jobs/run-serverless-jobs).
+
+
+### Job resource files
+
+Generated projects keep training/lifecycle tasks in `resources/train.job.yml`
+and batch scoring in `resources/score.job.yml`. The root `databricks.yml`
+includes both through `resources/*.yml`. Each job retains its own schedule and
+compute settings; training calls scoring through `${resources.jobs.score.id}`.
+
+When upgrading a project generated with `resources/workflow.jobs.yml`, replace
+that file with the two new files rather than keeping all three. Preserve the
+resource keys `train` and `score`, the bundle identity, target and workspace
+root so a redeploy continues to address the existing jobs. Preview and validate
+before deploying; splitting these files alone does not change task behavior.

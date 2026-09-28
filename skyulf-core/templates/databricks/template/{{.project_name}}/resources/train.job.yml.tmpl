@@ -24,12 +24,12 @@ resources:
 {{end}}
       tasks:
         - &lifecycle_task
-          task_key: prepare_request
+          task_key: initialize_run
           max_retries: 0
           notebook_task:
-            notebook_path: ../src/workflow.py
+            notebook_path: ../src/initialize_run.py
             base_parameters: &lifecycle_parameters
-              workflow_contract: "2"
+              workflow_contract: "3"
               job_id: '{{"{{job.id}}"}}'
               job_run_id: '{{"{{job.run_id}}"}}'
               repair_count: '{{"{{job.repair_count}}"}}'
@@ -57,67 +57,107 @@ resources:
             - pypi:
                 package: mlflow==3.16.1
 {{end}}
-        - task_key: training_requested
+        - task_key: choose_action
           depends_on:
-            - task_key: prepare_request
+            - task_key: initialize_run
           max_retries: 0
           condition_task:
             op: EQUAL_TO
-            left: '{{"{{tasks.prepare_request.values.training_requested}}"}}'
+            left: '{{"{{tasks.initialize_run.values.training_requested}}"}}'
             right: "true"
         - <<: *lifecycle_task
-          task_key: train_and_register
+          task_key: load_data
           depends_on:
-            - task_key: training_requested
+            - task_key: choose_action
               outcome: "true"
           notebook_task:
-            notebook_path: ../src/train_and_register.py
+            notebook_path: ../src/load_data.py
             base_parameters:
               <<: *lifecycle_parameters
-              reference_json: '{{"{{tasks.prepare_request.values.reference_json}}"}}'
-              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
+              reference_json: '{{"{{tasks.initialize_run.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
         - <<: *lifecycle_task
-          task_key: compare_and_decide
+          task_key: prepare_dataset
           depends_on:
-            - task_key: train_and_register
+            - task_key: load_data
           notebook_task:
-            notebook_path: ../src/compare_and_decide.py
+            notebook_path: ../src/prepare_dataset.py
             base_parameters:
               <<: *lifecycle_parameters
-              reference_json: '{{"{{tasks.train_and_register.values.reference_json}}"}}'
-              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
+              reference_json: '{{"{{tasks.load_data.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
         - <<: *lifecycle_task
-          task_key: apply_operator_action
+          task_key: train_and_tune
           depends_on:
-            - task_key: training_requested
+            - task_key: prepare_dataset
+          notebook_task:
+            notebook_path: ../src/train_and_tune.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{"{{tasks.prepare_dataset.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+        - <<: *lifecycle_task
+          task_key: select_best_model
+          depends_on:
+            - task_key: train_and_tune
+          notebook_task:
+            notebook_path: ../src/select_best_model.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{"{{tasks.train_and_tune.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+        - <<: *lifecycle_task
+          task_key: register_model
+          depends_on:
+            - task_key: select_best_model
+          notebook_task:
+            notebook_path: ../src/register_model.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{"{{tasks.select_best_model.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+        - <<: *lifecycle_task
+          task_key: evaluate_model
+          depends_on:
+            - task_key: register_model
+          notebook_task:
+            notebook_path: ../src/evaluate_model.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{"{{tasks.register_model.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+        - <<: *lifecycle_task
+          task_key: model_decision
+          run_if: NONE_FAILED
+          depends_on:
+            - task_key: choose_action
               outcome: "false"
+            - task_key: evaluate_model
           notebook_task:
-            notebook_path: ../src/apply_operator_action.py
+            notebook_path: ../src/model_decision.py
             base_parameters:
               <<: *lifecycle_parameters
-              reference_json: '{{"{{tasks.prepare_request.values.reference_json}}"}}'
-              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
+              reference_json: '{{"{{tasks.initialize_run.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
         - <<: *lifecycle_task
-          task_key: finalize_and_report
+          task_key: training_report
           run_if: ALL_DONE
           depends_on:
-            - task_key: compare_and_decide
-            - task_key: apply_operator_action
+            - task_key: model_decision
           notebook_task:
-            notebook_path: ../src/finalize_and_report.py
+            notebook_path: ../src/training_report.py
             base_parameters:
               <<: *lifecycle_parameters
-              reference_json: '{{"{{tasks.prepare_request.values.reference_json}}"}}'
-              tracking_uri: '{{"{{tasks.prepare_request.values.tracking_uri}}"}}'
-              training_result_state: '{{"{{tasks.compare_and_decide.result_state}}"}}'
-              operator_result_state: '{{"{{tasks.apply_operator_action.result_state}}"}}'
+              reference_json: '{{"{{tasks.initialize_run.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+              decision_result_state: '{{"{{tasks.model_decision.result_state}}"}}'
         - task_key: scoring_requested
           depends_on:
-            - task_key: finalize_and_report
+            - task_key: training_report
           max_retries: 0
           condition_task:
             op: EQUAL_TO
-            left: '{{"{{tasks.finalize_and_report.values.score_requested}}"}}'
+            left: '{{"{{tasks.training_report.values.score_requested}}"}}'
             right: "true"
         - task_key: run_batch_scoring
           max_retries: 0
@@ -128,66 +168,6 @@ resources:
             job_id: ${resources.jobs.score.id}
             job_parameters:
               score_model_version: ""
-{{if eq .compute_mode "serverless"}}
-      environments:
-        - environment_key: skyulf
-          spec:
-            client: "4"
-            dependencies:
-              - ${workspace.file_path}/dist/skyulf_core-0.9.0-py3-none-any.whl
-              - mlflow==3.16.1
-{{else}}
-      job_clusters:
-        - job_cluster_key: skyulf
-          new_cluster:
-            spark_version: {{.spark_version}}
-            node_type_id: {{.node_type_id}}
-            policy_id: ${var.cluster_policy_id}
-            custom_tags:
-              {{.cost_tag_key}}: ${var.cost_tag_value}
-            autoscale:
-              min_workers: 2
-              max_workers: 4
-{{end}}
-    score:
-      name: ${bundle.name}_score
-      max_concurrent_runs: 1
-      queue:
-        enabled: true
-      parameters:
-        - name: score_model_version
-          default: ""
-{{if eq .scoring_mode "scheduled"}}
-      schedule:
-        quartz_cron_expression: ${var.scoring_cron_expression}
-        timezone_id: ${var.scoring_timezone_id}
-        pause_status: ${var.scoring_pause_status}
-{{end}}
-      tasks:
-        - task_key: score
-          max_retries: 0
-          notebook_task:
-            notebook_path: ../src/score.py
-            base_parameters:
-              workflow_contract: "2"
-              deployed_score_handoff: "{{.score_handoff}}"
-              score_model_version: '{{"{{job.parameters.score_model_version}}"}}'
-              config_path: ${workspace.file_path}/config/workflow.json
-              catalog: ${var.catalog}
-              input_schema: ${var.input_schema}
-              output_schema: ${var.output_schema}
-              metadata_schema: ${var.metadata_schema}
-              resource_suffix: ${var.resource_suffix}
-{{if eq .compute_mode "serverless"}}
-          environment_key: skyulf
-          disable_auto_optimization: true
-{{else}}
-          job_cluster_key: skyulf
-          libraries:
-            - whl: ${workspace.file_path}/dist/skyulf_core-0.9.0-py3-none-any.whl
-            - pypi:
-                package: mlflow==3.16.1
-{{end}}
 {{if eq .compute_mode "serverless"}}
       environments:
         - environment_key: skyulf
