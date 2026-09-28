@@ -1,0 +1,7 @@
+skyulf-core==0.8.8
+scikit-learn==1.8.0
+numpy==2.4.4
+scipy==1.17.1
+pandas==2.3.3
+polars==1.40.1
+mlflow==3.15.2

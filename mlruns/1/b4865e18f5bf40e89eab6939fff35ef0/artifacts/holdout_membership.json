@@ -1,0 +1,8 @@
+{
+  "dataset_id": "workspace.test.labels@3/random/fa9ac986fdd3c941156e5b9db82b4c62b25c51e58b89715ad3d040feb206245a",
+  "holdout_key_sha256": "76f8434bcc296d9ddafa4685e68136541460864d5dd12b624a2fe83df3383484",
+  "holdout_rows": 2,
+  "record_key_columns": [
+    "id"
+  ]
+}

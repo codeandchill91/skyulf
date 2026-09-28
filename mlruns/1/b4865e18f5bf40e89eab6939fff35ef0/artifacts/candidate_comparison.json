@@ -1,0 +1,26 @@
+{
+  "dataset_id": "workspace.test.labels@3/random/fa9ac986fdd3c941156e5b9db82b4c62b25c51e58b89715ad3d040feb206245a",
+  "row_count": 2,
+  "code_version": "0.8.8",
+  "model_name": "custom_eligibility",
+  "candidate_version": "1",
+  "candidate_digest": "91812e7fd42c6f3f886ecec35d049dc5c25c1876c363fb81fc1bee14fe205533",
+  "champion_version": null,
+  "champion_digest": null,
+  "metric": "heldout_rmse",
+  "metric_direction": "minimize",
+  "min_improvement": 0.0,
+  "quality_threshold": 100.0,
+  "candidate_metrics": {
+    "heldout_mae": 0.1436464088397793,
+    "heldout_mse": 0.025029760996306823,
+    "heldout_rmse": 0.1582079675500157,
+    "heldout_r2": 0.9993047288612137,
+    "heldout_mape": 0.019643953345610903,
+    "heldout_explained_variance": 0.9994268252563177
+  },
+  "champion_metrics": null,
+  "improvement": null,
+  "eligible": false,
+  "reason": "no_champion"
+}

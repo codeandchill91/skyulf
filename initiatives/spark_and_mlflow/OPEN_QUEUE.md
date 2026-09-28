@@ -1,6 +1,6 @@
 # Spark ve MLflow — Open Queue
 
-Updated: 2026-09-27. **SM-00 through SM-16, SM-15L/15I/24a/25/26, SM-22a/b/c/28a/28b, SM-20a/20R/20S and SM-27/29 complete for their documented scopes. Target: 0.9.0.**
+Updated: 2026-09-28 (dbml re-comparison queued; see report93). **SM-00 through SM-16, SM-15L/15I/24a/25/26, SM-22a/b/c/28a/28b, SM-20a/20R/20S and SM-27/29 complete for their documented scopes. Target: 0.9.0.**
 The pre-Spark local Bundle lifecycle gate passed live: selectable rescoring,
 automatic champion selection, failed-score recovery and serialized handoff.
 This is functional completion for the selected workflow. Production must
@@ -154,12 +154,12 @@ on an existing candidate without retraining or reuploading the model.
 | SM-36g | Nested temporal cross-validation | SM-36f | READY | Past-to-future inner/outer splits, explicit window/gap/timestamp policies, fold-local preprocessing, final search and evidence across Core/backend/Canvas/Bundle. Not implemented. [Scope and acceptance](90-sm36g-nested-temporal-cv-task.md) |
 | SM-36h | Nested group cross-validation | SM-36f | READY | Aligned group metadata, disjoint inner/outer membership, group-aware final search, validation and saved evidence across all entrypoints. Not implemented. [Scope and acceptance](91-sm36h-nested-group-cv-task.md) |
 | SM-36i | Nested decision-threshold tuning | SM-36f | READY | Training-only threshold selection inside each outer fold, threshold-aware outer scoring, independent final threshold and artifact/UI/MLflow parity. Not implemented. [Scope and acceptance](92-sm36i-nested-threshold-tuning-task.md) |
-| SM-37 | Production identities and enforced writer ownership | SM-32, SM-33 | WAIT | Per-target run_as/permissions/hosts/roots; one lifecycle writer; scoring cannot move aliases; actual denial and lifecycle queue evidence |
-| SM-38 | Operational limits, retry/recovery and run summaries | SM-34, SM-37 | WAIT | Configurable timeouts/retries/notifications; source/model/count/no-op summaries; score-only recovery and no blind alias retry |
-| SM-39 | Reproducible packaging and per-target compute | SM-33 | WAIT | Central compatible wheel/runtime pins, clean install/load, configurable policy/worker/cost settings and strict target validation |
-| SM-40 | Generated-project tests and generic CI/CD | SM-37, SM-38, SM-39 | WAIT | Standalone project tests/build/validate and optional company adapter; explicit deployment approvals; no default chargeable PR runs |
+| SM-37 | Production identities and enforced writer ownership | SM-32, SM-33 | WAIT | Per-target run_as/permissions/hosts/roots; one lifecycle writer; scoring cannot move aliases; actual denial and lifecycle queue evidence; report93 additions: optional UC `registered_models`/`schemas` grants, experiment permissions, operator `CAN_MANAGE_RUN`, optional per-target host/catalog prompts; shared non-home `root_path` for syst/prod (today `~/<project>/<target>`, so the experiment lands in the deployer's home) ([report93](93-dbml-reference-recomparison.md)) |
+| SM-38 | Operational limits, retry/recovery and run summaries | SM-34, SM-37 | WAIT | Configurable timeouts/retries/notifications; source/model/count/no-op summaries; score-only recovery and no blind alias retry; report93 additions: email/webhook notifications, `health.rules` duration limits, task `timeout_seconds` ([report93](93-dbml-reference-recomparison.md)) |
+| SM-39 | Reproducible packaging and per-target compute | SM-33 | WAIT | Central compatible wheel/runtime pins, clean install/load, configurable policy/worker/cost settings and strict target validation; report93 additions: DAB `artifacts:` wheel build, one Skyulf/MLflow version variable, automatic Optuna dependencies, serverless `budget_policy_id` and job tags ([report93](93-dbml-reference-recomparison.md)) |
+| SM-40 | Generated-project tests and generic CI/CD | SM-37, SM-38, SM-39 | WAIT | Standalone project tests/build/validate and optional company adapter; explicit deployment approvals; no default chargeable PR runs; report93 additions: `ci` target, generated recipe/preflight tests and lint config, credential-free render of every init example checked against the Bundle schema in repository CI; per-project working directory for several generated projects in one repository ([report93](93-dbml-reference-recomparison.md)) |
 | SM-41 | CDF recovery, full refresh and generation retention | SM-31, SM-33, SM-38 | WAIT | Explicit CDF-expiry/source-change recovery; preserve active outputs/grants and rollback generations; update/delete policy never silently inferred |
-| SM-42 | Complete modular setup, scenario examples and operator guide | SM-30 through SM-41 | WAIT | Progressive setup sections with optional custom/multi-model scenarios; registry-backed parameters, editable config, execution preview and both-engine lifecycle/recovery examples |
+| SM-42 | Complete modular setup, scenario examples and operator guide | SM-30 through SM-41 | WAIT | Progressive setup sections with optional custom/multi-model scenarios; registry-backed parameters, editable config, execution preview and both-engine lifecycle/recovery examples; report93 additions: optional demo source setup so a first deploy runs end to end; generated README links pinned to the docs version matching the wheel ([report93](93-dbml-reference-recomparison.md)) |
 | SM-43a | Combined personal-workspace acceptance | SM-42 | WAIT | Representative real-data FE/models, both engines, manual/auto, retained challenger, new rows, no-op, failure/rollback/queue; exact run/resource evidence |
 | SM-43b | Company-target production readiness gate | SM-43a; confirmed company environment | WAIT | Approved identities/UC/policy compute/dependency/CI/data checks in the actual company target; no inference from personal serverless tests |
 
@@ -167,6 +167,57 @@ The tasks are sequenced by this table when dependencies allow. SM-43b needs
 actual company settings and access; it must not prevent unrelated local work.
 No new live resources or company deployments are authorized merely by a queue
 status. Existing explicit live authorizations retain their original scope.
+
+## dbml reference re-comparison - 2026-09-28
+
+Static re-read of `/Users/BH7043/repositories/dbml-mlops-template` against the
+current template and integrations. Most remaining gaps already belong to
+SM-37 through SM-42 and SM-19/21/23; the review adds acceptance items to
+those tasks and four new tasks. Full mapping, acceptance and corrections:
+[report93](93-dbml-reference-recomparison.md). Planning only; no code change.
+
+Acceptance additions (details in report93):
+
+- **SM-37:** optional UC `registered_models`/`schemas` grants, experiment
+  permissions, operator `CAN_MANAGE_RUN`, optional per-target host/catalog prompts,
+  shared non-home syst/prod `root_path`.
+- **SM-38:** email/webhook notifications, `health.rules` duration limits, task timeouts.
+- **SM-39:** DAB `artifacts:` wheel build, one Skyulf/MLflow version variable,
+  automatic Optuna dependencies, serverless `budget_policy_id` and job tags.
+- **SM-40:** `ci` target, generated recipe/preflight tests and lint config,
+  credential-free render of every init example checked against the Bundle schema in repository CI,
+  per-project working directory.
+- **SM-42:** optional demo source setup so a first deploy runs end to end; docs
+  links pinned to the wheel version.
+- **SM-23a:** reuse Core `DriftCalculator`, delayed-label performance join,
+  optional `quality_monitors` and dashboard.
+
+| Task | Status | Dependency / scope |
+| --- | --- | --- |
+| SM-45 | WAIT | SM-37, SM-40; suffix-scoped dev/CI cleanup job, dry-run default, production targets refused; separate from SM-41 retention |
+| SM-46 | WAIT | SM-34, SM-38; optional `scoring_mode: on_table_update` via Jobs table-update trigger, reusing CDF/queue/no-op |
+| SM-47 | WAIT | SM-38; MLflow dataset input for UC lineage, model-version card, optional experiment resource; MLflow 3 deployment jobs investigated without a second alias writer |
+| SM-23c | LATER | SM-23a, SM-37; optional drift/performance-triggered retraining through the existing train job; never approves |
+| SM-48 | READY | None; split `resources/workflow.jobs.yml` into `train.job.yml`/`score.job.yml` and optionally clearer job display names; keep job keys `train`/`score` (renaming recreates jobs and loses IDs/history) |
+| SM-49 | WAIT | SM-39, SM-48; upgrade path for generated projects: regenerate from saved answers into a temporary directory, review the diff, run config migration and deployed-contract checks |
+| SM-50 | WAIT | SM-41; optional explicit period backfill operator action reusing `publish_replace_period`, separate from incremental and full rebuild |
+| SM-51 | WAIT | SM-37, SM-41; production model-version and MLflow run retention preview; never deletes aliased or receipt-referenced versions |
+
+## Integrations code-quality review - 2026-09-28
+
+Gates are clean for `skyulf-core/skyulf/integrations/`: Ruff/format, ty at the
+locked 0.0.75, Lizard CCN 10, 0.4% duplication, no missing docstrings.
+Fifteen local subprocess-test failures were caused by a missing editable
+install, not code. Details: ([report94](94-integrations-code-quality-review.md)).
+
+| Task | Status | Dependency / scope |
+| --- | --- | --- |
+| SM-52 | READY | None; declare the ~20 cross-module underscore helpers as one internal API (shared private helper module or explicit package-internal names); do it before SM-37/38/39 edit those modules; behavior-preserving |
+| SM-53 | WAIT | SM-36g, SM-36h, SM-36i, SM-52; split `local_retraining.py` (1525 lines) along snapshot read, split, fit and evidence boundaries; `promotion.py` stays as designed (report64) |
+
+Rules for every task touching integrations: 88 functions sit at CCN 9–10, so
+budget helper extraction inside the feature task instead of raising the gate;
+fix >100-character strings/docstrings in edited lines (no gate reports them).
 
 ## SM-34B local and live closure - 2026-09-26/27
 
@@ -259,8 +310,9 @@ See [the delivery contract](39-serving-and-feature-lookup-delivery-plan.md).
 | SM-19d | LATER | SM-19a; A/B/canary routing, endpoint update/rollback; batch rollout separately explicit |
 | SM-21a | LATER | SM-43a; UC feature lookup, keys and point-in-time correctness |
 | SM-21b | LATER | SM-21a/19a; optional online publication, freshness and serving lookup |
-| SM-23a | LATER | SM-43a; batch quality/drift/delayed-label reporting and optional dashboards; SM-38 covers basic operations first |
+| SM-23a | LATER | SM-43a; batch quality/drift/delayed-label reporting and optional dashboards; SM-38 covers basic operations first; report93 additions: reuse Core `DriftCalculator`, delayed-label performance join on record keys, optional `quality_monitors` InferenceLog and dashboard ([report93](93-dbml-reference-recomparison.md)) |
 | SM-23b | LATER | SM-19a; endpoint inference tables and version-aware model-performance monitoring |
+| SM-23c | LATER | SM-23a, SM-37; optional drift/performance-triggered retraining through the existing train job; gates unchanged, never approves ([report93](93-dbml-reference-recomparison.md)) |
 | SM-19c | PARKED | Continuous streaming remains outside the current user-approved implementation sequence |
 
 SM-17/24c/20b remain later Spark enhancements after SM-43a. SM-18 stays parked.
@@ -309,8 +361,18 @@ SM-17/24c/20b remain later Spark enhancements after SM-43a. SM-18 stays parked.
 | SM-19 | Optional live HTTP / SQL ai_query / endpoint operations | SM-20a, compatible pyfunc package | LATER | Add only after serving parity; streaming remains parked |
 | SM-21 | Optional Databricks feature tables / online lookup | SM-20a; SM-19a for online serving | LATER | Point-in-time lookups and optional online freshness; declare any Spark dependency |
 | SM-23 | Optional monitoring and inference observability | SM-20a, relevant batch/serving adapter | LATER | Existing Skyulf metrics + optional Databricks monitoring/inference tables |
+| SM-23c | Drift/performance-triggered retraining | SM-23a, SM-37 | LATER | Optional `on_drift` mode runs the existing train job; gates unchanged, never approves, no stacked runs; [report93](93-dbml-reference-recomparison.md) |
 | SM-24c | Spark batch workflow adapter | SM-20a, existing Spark sink | LATER | Expose tested Spark runner after first local Bundle |
 | SM-20b | Spark Bundle enhancement | SM-24c, selected SM-17 slices | LATER | Add tested Spark engine choice while preserving local variant |
+| SM-45 | Suffix-scoped dev/CI resource cleanup | SM-37, SM-40 | WAIT | Dry-run default, confirmation, production targets refused; deleted set equals preview; other suffixes untouched; [report93](93-dbml-reference-recomparison.md) |
+| SM-46 | Optional table-update scoring trigger | SM-34, SM-38 | WAIT | `scoring_mode: on_table_update`; bursts queue without duplicate rows, unchanged source no-op, paused in dev; [report93](93-dbml-reference-recomparison.md) |
+| SM-47 | MLflow/UC lineage and model-version card | SM-38 | WAIT | Pinned source logged as MLflow dataset input, lineage visible live, card matches saved evidence; no second alias writer; [report93](93-dbml-reference-recomparison.md) |
+| SM-48 | Split Bundle job resources and clearer display names | — | READY | Two resource files, same job keys/IDs on redeploy, cross-file `${resources.jobs.score.id}` resolves; template/generation tests, guide and README updated; strict validation passes; `src/` layout unchanged; [report93](93-dbml-reference-recomparison.md) |
+| SM-49 | Generated-project upgrade path | SM-39, SM-48 | WAIT | Regenerate from saved init answers into a temporary directory, reviewed diff, `migrate_workflow_config` and deployed-contract checks; same job IDs after upgrade; guide section; ([report93](93-dbml-reference-recomparison.md)) |
+| SM-50 | Explicit period backfill action | SM-41 | WAIT | Optional operator action on the score job reusing `publish_replace_period`; rows outside the period preserved, pinned model version, receipt, no-op replay; ([report93](93-dbml-reference-recomparison.md)) |
+| SM-51 | Production model/run retention | SM-37, SM-41 | WAIT | Preview then scoped delete of old registry versions/runs; champion, previous_champion, challenger and receipt-referenced versions protected; rollback still works; ([report93](93-dbml-reference-recomparison.md)) |
+| SM-52 | Integrations internal-helper boundary | — | READY | Cross-module underscore imports replaced by one declared internal API; no behavior change; integration suite, Ruff, ty 0.0.75 and Lizard pass; ([report94](94-integrations-code-quality-review.md)) |
+| SM-53 | Split `local_retraining.py` | SM-36g/h/i, SM-52 | WAIT | Cohesive modules for snapshot read, split, fit and evidence; public imports and saved evidence unchanged; complexity not increased; ([report94](94-integrations-code-quality-review.md)) |
 
 SM-28b added no second score writer; shared-target admission remains a gate
 before any later scoring workflow writes the same prediction table.
@@ -478,7 +540,7 @@ olarak yazılır; yerel test sonucu gerçek UC/Databricks sonucu yerine geçmez.
 
 ## Devam oturumu için kısa talimat
 
-Önce README, mimari ve bu kuyruğu oku. Güncel git durumunu ve ilgili kaynakları
+Önce README, mimari ve bu kuyruğu oku. Test öncesi ortamı CI ile eşitle: `uv pip install -r requirements-ci.txt` (editable `skyulf-core`, ty 0.0.75); aksi halde subprocess testleri ve ty yanlış hata verir ([report94](94-integrations-code-quality-review.md)). Güncel git durumunu ve ilgili kaynakları
 doğrula; kullanıcı değişikliklerini koru. İlk READY görevi ACTIVE yap, kendi
 test döngüsüyle tamamla ve kanıtı yaz. Sonraki bağımlılığı aç. İlk local Bundle
 kapısından önce Spark veya endpoint işine başlama. SM-00 yalnız test/runtime

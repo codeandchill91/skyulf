@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "dataset_id": "workspace.test.labels@3/random/7e619c660c9fc6096898556f4e94c82689837af7784cf8bfc784657cb0c4a19f",
+  "project_source_sha256": "2dd387bb9d633bf502da62db0f9f7e11c69bd572825766bf641e1375e9d1e732",
+  "pre_split_steps": [
+    {
+      "name": "fixed_x",
+      "transformer": "ValueReplacement",
+      "params": {
+        "columns": [
+          "x"
+        ],
+        "to_replace": 1.0,
+        "value": 1.25
+      }
+    },
+    {
+      "name": "canonical_flag",
+      "transformer": "TextCleaning",
+      "params": {
+        "columns": [
+          "is_test"
+        ],
+        "operations": [
+          {
+            "op": "trim"
+          }
+        ]
+      }
+    },
+    {
+      "name": "eligible",
+      "transformer": "_skyulf_project_2dd387bb9d633bf502da62db0f9f7e11c69bd572825766bf641e1375e9d1e732.EligibleCalculator.EligibleApplier",
+      "params": {},
+      "pre_split": {
+        "effect": "filter",
+        "required_columns": [
+          "is_test"
+        ],
+        "learns_from_data": false
+      }
+    }
+  ],
+  "recipe_sha256": "a592648b7288a7c3fc7056ee7efd6001ffc8ed7b151f250d2185b2ad11bf9c39",
+  "record_key_columns": [
+    "id"
+  ],
+  "pre_filter_key_sha256": "140493adb07f0fe2eb45e174297936fce838ecb2d612d993de4af9e5717e4865",
+  "survivor_key_sha256": "246a8324ae32dc1a93c824ed1405db1e1727ac46ea7a7f2565696c94550709d5",
+  "train_key_sha256": "2d7bde69477c484c3fcdb57b635d6d15ab56c88d7ab4692bbf23e272dfd6f464",
+  "holdout_key_sha256": "76f8434bcc296d9ddafa4685e68136541460864d5dd12b624a2fe83df3383484",
+  "sample_key_sha256": null,
+  "source_rows": 10,
+  "pre_filter_rows": 10,
+  "survivor_rows": 9,
+  "training_rows": 7,
+  "holdout_rows": 2,
+  "filter_counts": [
+    {
+      "name": "fixed_x",
+      "transformer": "ValueReplacement",
+      "input_rows": 10,
+      "excluded_rows": 0,
+      "output_rows": 10
+    },
+    {
+      "name": "canonical_flag",
+      "transformer": "TextCleaning",
+      "input_rows": 10,
+      "excluded_rows": 0,
+      "output_rows": 10
+    },
+    {
+      "name": "eligible",
+      "transformer": "_skyulf_project_2dd387bb9d633bf502da62db0f9f7e11c69bd572825766bf641e1375e9d1e732.EligibleCalculator.EligibleApplier",
+      "input_rows": 10,
+      "excluded_rows": 1,
+      "output_rows": 9
+    }
+  ]
+}

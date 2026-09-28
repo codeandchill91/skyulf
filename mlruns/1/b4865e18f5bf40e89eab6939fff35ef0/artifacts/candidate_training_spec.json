@@ -1,0 +1,80 @@
+{
+  "table": "workspace.test.labels",
+  "version": 3,
+  "record_key_columns": [
+    "id"
+  ],
+  "input_columns": [
+    "x"
+  ],
+  "target_column": "target",
+  "max_rows": 30,
+  "max_bytes": 100000,
+  "split_strategy": "random",
+  "test_size": 0.2,
+  "random_state": 42,
+  "stratify": false,
+  "start": null,
+  "holdout_start": null,
+  "cutoff": null,
+  "event_column": null,
+  "filter_unavailable_results": false,
+  "result_available_at_column": null,
+  "result_cutoff": null,
+  "event_time_parsing": {
+    "format": null,
+    "timezone": null,
+    "date_only": "reject"
+  },
+  "result_time_parsing": {
+    "format": null,
+    "timezone": null,
+    "date_only": "reject"
+  },
+  "holdout_key_sha256": "76f8434bcc296d9ddafa4685e68136541460864d5dd12b624a2fe83df3383484",
+  "training_sample_rows": null,
+  "training_sample_seed": 42,
+  "sample_key_sha256": null,
+  "pre_split_steps": [
+    {
+      "name": "fixed_x",
+      "transformer": "ValueReplacement",
+      "params": {
+        "columns": [
+          "x"
+        ],
+        "to_replace": 1.0,
+        "value": 1.25
+      }
+    },
+    {
+      "name": "canonical_flag",
+      "transformer": "TextCleaning",
+      "params": {
+        "columns": [
+          "is_test"
+        ],
+        "operations": [
+          {
+            "op": "trim"
+          }
+        ]
+      }
+    },
+    {
+      "name": "eligible",
+      "transformer": "_skyulf_project_2dd387bb9d633bf502da62db0f9f7e11c69bd572825766bf641e1375e9d1e732.EligibleCalculator.EligibleApplier",
+      "params": {},
+      "pre_split": {
+        "effect": "filter",
+        "required_columns": [
+          "changed_flag"
+        ],
+        "learns_from_data": false
+      }
+    }
+  ],
+  "survivor_key_sha256": "246a8324ae32dc1a93c824ed1405db1e1727ac46ea7a7f2565696c94550709d5",
+  "training_evidence_sha256": "5a35c8e17dee4548270443499f235b716592825396bcfacf6f281df2e3a42f5a",
+  "engine": "pandas"
+}

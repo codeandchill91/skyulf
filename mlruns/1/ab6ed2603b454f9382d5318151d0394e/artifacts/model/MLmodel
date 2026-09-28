@@ -1,0 +1,39 @@
+artifact_path: model
+flavors:
+  python_function:
+    artifacts:
+      bundle:
+        path: artifacts/bundle
+        uri: bundle
+    cloudpickle_version: 3.1.2
+    code: null
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.pyfunc.model
+    python_model: python_model.pkl
+    python_version: 3.12.14
+    streamable: false
+is_signature_from_type_hint: false
+metadata:
+  skyulf_bundle_digest: a04f51929a4fdfbcf286166b8ad136c7b02c18169b58d013386b40fb237394d3
+  skyulf_feature_order: x
+  skyulf_input_stage: raw
+  skyulf_task: regression
+mlflow_version: 3.15.2
+model_id: null
+model_size_bytes: 1989
+model_uuid: ce319894ffc844c98985b2d387d34818
+prompts: null
+run_id: ab6ed2603b454f9382d5318151d0394e
+saved_input_example_info:
+  artifact_path: input_example.json
+  pandas_orient: split
+  serving_input_path: serving_input_example.json
+  type: dataframe
+signature:
+  inputs: '[{"type": "double", "name": "x", "required": true}]'
+  outputs: '[{"type": "double", "name": "prediction", "required": true}]'
+  params: null
+type_hint_from_example: false
+utc_time_created: '2026-09-28 05:51:30.116064'
