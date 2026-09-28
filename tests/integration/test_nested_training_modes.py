@@ -150,43 +150,75 @@ def test_backend_training_modes_preserve_cv_and_artifacts(tmp_path, model, mode,
         assert any(key.startswith("cv_") and key.endswith("_mean") for key in metrics)
 
 
-@pytest.mark.parametrize("policy", ["time_series_split", "group_k_fold", "stratified_group_k_fold"])
+@pytest.mark.parametrize(
+    "model,policy",
+    [
+        (model, policy)
+        for model in (
+            "logistic_regression",
+            "ridge_regression",
+            "voting_classifier",
+            "voting_regressor",
+            "stacking_classifier",
+            "stacking_regressor",
+        )
+        for policy in (
+            "k_fold",
+            "stratified_k_fold",
+            "time_series_split",
+            "group_k_fold",
+            "stratified_group_k_fold",
+        )
+        if not policy.startswith("stratified")
+        or model.endswith("classifier")
+        or model == "logistic_regression"
+    ],
+)
+@pytest.mark.parametrize("method", ["ordinary", "nested_cv"])
 @pytest.mark.parametrize("mode", ["fixed", "tuned"])
-def test_backend_nested_policy_routes_preserve_metadata(tmp_path, policy, mode):
-    """Policy metadata survives preprocessing and reaches independent nested searches."""
+def test_backend_policy_routes_preserve_metadata(tmp_path, policy, mode, method, model):
+    """Single and ensemble routes must honor ordinary/nested CV without leaking metadata."""
     temporal = policy == "time_series_split"
+    grouped = policy in {"group_k_fold", "stratified_group_k_fold"}
+    classification = model.endswith("classifier") or model == "logistic_regression"
     count = 240
     rng = np.random.default_rng(76)
     frame = pd.DataFrame({"x": rng.normal(size=count), "target": np.tile([0, 1], count // 2)})
-    frame["metadata"] = (
-        pd.date_range("2025-01-01", periods=count).astype(str)
-        if temporal
-        else np.repeat([f"customer_{i}" for i in range(24)], 10)
-    )
+    if not classification:
+        frame["target"] = 2 * frame.x + rng.normal(size=count) * 0.1
+    if temporal or grouped:
+        frame["metadata"] = (
+            pd.date_range("2025-01-01", periods=count).astype(str)
+            if temporal
+            else np.repeat([f"customer_{i}" for i in range(24)], 10)
+        )
     csv = tmp_path / "policy.csv"
     frame.to_csv(csv, index=False)
     cv = {
         "cv_enabled": True,
-        "cv_type": "nested_cv",
-        "cv_nested_type": policy,
+        "cv_type": "nested_cv" if method == "nested_cv" else policy,
         "cv_folds": 2,
-        "cv_inner_folds": 2,
         "cv_shuffle": False,
-        "cv_time_column" if temporal else "cv_group_column": "metadata",
     }
+    if method == "nested_cv":
+        cv.update(cv_nested_type=policy, cv_inner_folds=2)
+    if temporal or grouped:
+        cv["cv_time_column" if temporal else "cv_group_column"] = "metadata"
     if temporal:
         cv.update(cv_gap=1, cv_test_size=15, cv_max_train_size=100)
-    params = {"run_mode": mode, "algorithm": "logistic_regression", "target_column": "target"}
+    model_params, space = _model_settings(model, classification)
+    params = {"run_mode": mode, "algorithm": model, "target_column": "target"}
     if mode == "fixed":
-        params.update(hyperparameters={"C": 0.5}, **cv)
+        params.update(hyperparameters=model_params, **cv)
     else:
         params["tuning_config"] = {
+            **model_params,
             **cv,
             "strategy": "grid",
-            "metric": "accuracy",
-            "search_space": {"C": [0.1, 1.0]},
+            "metric": "accuracy" if classification else "r2",
+            "search_space": space,
             "n_trials": 2,
-            "tune_threshold": True,
+            "tune_threshold": classification and method == "nested_cv",
         }
     nodes = [
         NodeConfig(
@@ -215,13 +247,27 @@ def test_backend_nested_policy_routes_preserve_metadata(tmp_path, policy, mode):
         key: value.error for key, value in result.node_results.items()
     }
     metrics = result.node_results["training"].metrics
+    assert metrics["fold_refit_audit"]["isolation_ok"] is True
+    fitted, saved = store.load("training")
+    assert fitted.n_features_in_ == 1
+    assert np.isfinite(saved.best_score)
+    heldout, _ = store.load("scale").test
+    heldout = heldout.to_pandas() if hasattr(heldout, "to_pandas") else heldout
+    predictions = fitted.predict(heldout[["x"]])
+    assert len(predictions) == 60 and np.isfinite(predictions).all()
+    if model.startswith(("voting", "stacking")):
+        assert [name for name, _ in fitted.estimators] == model_params["base_estimators"]
+    if method == "ordinary":
+        assert "nested_cv" not in metrics
+        assert saved.nested_cv is None
+        assert any(key.startswith("cv_") and key.endswith("_mean") for key in metrics)
+        return
     report = metrics["nested_cv"]
     assert report["split_policy"]["method"] == policy
-    assert metrics["fold_refit_audit"]["isolation_ok"] is True
-    model, saved = store.load("training")
-    assert model.n_features_in_ == 1
     assert saved.nested_cv == report
-    if mode == "tuned":
+    assert report["outer_folds"] == report["inner_folds"] == 2
+    assert report["total_trials"] == (6 if mode == "tuned" else 3)
+    if mode == "tuned" and classification:
         assert (
             saved.decision_thresholds and report["threshold_selection"]["selection"] == "inner_oof"
         )
@@ -229,4 +275,4 @@ def test_backend_nested_policy_routes_preserve_metadata(tmp_path, policy, mode):
             fold["threshold_selection"]["selection"] == "inner_oof" for fold in report["folds"]
         )
     else:
-        assert report["total_trials"] == 3
+        assert saved.decision_thresholds is None

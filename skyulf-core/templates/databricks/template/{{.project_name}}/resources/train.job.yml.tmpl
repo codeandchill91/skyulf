@@ -27,7 +27,7 @@ resources:
           task_key: initialize_run
           max_retries: 0
           notebook_task:
-            notebook_path: ../src/initialize_run.py
+            notebook_path: ../src/jobs/initialize_run.py
             base_parameters: &lifecycle_parameters
               workflow_contract: "3"
               job_id: '{{"{{job.id}}"}}'
@@ -71,7 +71,7 @@ resources:
             - task_key: choose_action
               outcome: "true"
           notebook_task:
-            notebook_path: ../src/load_data.py
+            notebook_path: ../src/jobs/load_data.py
             base_parameters:
               <<: *lifecycle_parameters
               reference_json: '{{"{{tasks.initialize_run.values.reference_json}}"}}'
@@ -81,7 +81,7 @@ resources:
           depends_on:
             - task_key: load_data
           notebook_task:
-            notebook_path: ../src/prepare_dataset.py
+            notebook_path: ../src/jobs/prepare_dataset.py
             base_parameters:
               <<: *lifecycle_parameters
               reference_json: '{{"{{tasks.load_data.values.reference_json}}"}}'
@@ -91,7 +91,7 @@ resources:
           depends_on:
             - task_key: prepare_dataset
           notebook_task:
-            notebook_path: ../src/train_and_tune.py
+            notebook_path: ../src/jobs/train_and_tune.py
             base_parameters:
               <<: *lifecycle_parameters
               reference_json: '{{"{{tasks.prepare_dataset.values.reference_json}}"}}'
@@ -101,7 +101,7 @@ resources:
           depends_on:
             - task_key: train_and_tune
           notebook_task:
-            notebook_path: ../src/select_best_model.py
+            notebook_path: ../src/jobs/select_best_model.py
             base_parameters:
               <<: *lifecycle_parameters
               reference_json: '{{"{{tasks.train_and_tune.values.reference_json}}"}}'
@@ -111,7 +111,7 @@ resources:
           depends_on:
             - task_key: select_best_model
           notebook_task:
-            notebook_path: ../src/register_model.py
+            notebook_path: ../src/jobs/register_model.py
             base_parameters:
               <<: *lifecycle_parameters
               reference_json: '{{"{{tasks.select_best_model.values.reference_json}}"}}'
@@ -121,7 +121,7 @@ resources:
           depends_on:
             - task_key: register_model
           notebook_task:
-            notebook_path: ../src/evaluate_model.py
+            notebook_path: ../src/jobs/evaluate_model.py
             base_parameters:
               <<: *lifecycle_parameters
               reference_json: '{{"{{tasks.register_model.values.reference_json}}"}}'
@@ -134,7 +134,7 @@ resources:
               outcome: "false"
             - task_key: evaluate_model
           notebook_task:
-            notebook_path: ../src/model_decision.py
+            notebook_path: ../src/jobs/model_decision.py
             base_parameters:
               <<: *lifecycle_parameters
               reference_json: '{{"{{tasks.initialize_run.values.reference_json}}"}}'
@@ -145,7 +145,7 @@ resources:
           depends_on:
             - task_key: model_decision
           notebook_task:
-            notebook_path: ../src/training_report.py
+            notebook_path: ../src/jobs/training_report.py
             base_parameters:
               <<: *lifecycle_parameters
               reference_json: '{{"{{tasks.initialize_run.values.reference_json}}"}}'

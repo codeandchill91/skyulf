@@ -9,9 +9,13 @@ and model fitting run locally on the selected compute.
 | File | Edit here |
 | --- | --- |
 | `config/workflow.json` | Existing input tables, record keys, features/target, model parameters, validation/search, data selection, limits and promotion/scoring policies |
-| `src/preprocessing.py` | `build_pre_split_steps()` for fixed cleanup/eligibility; `build_preprocessing()` for learned transformations |
-| `src/tuning.py` | Optional `build_search_space()` override; returning `None` uses Core defaults |
-| `src/ensemble.py` | Optional voting/stacking composition; returning `None` keeps JSON parameters and Core defaults |
+| `src/features/pre_split.py` | `build_pre_split_steps()` for fixed cleanup and training eligibility |
+| `src/features/preprocessing.py` | `build_preprocessing()` for transformations fitted inside each CV fold |
+| `src/features/custom/` | Optional Calculator/Applier pairs and helper modules; use relative imports |
+| `src/modeling/tuning.py` | Optional `build_search_space()` override; returning `None` uses Core defaults |
+| `src/modeling/ensemble.py` | Optional voting/stacking composition; returning `None` keeps JSON parameters and Core defaults |
+| `src/jobs/` | Notebook entrypoints referenced by the two jobs |
+| `src/tools/preview.py` | Offline configuration preview and installed-node discovery |
 | `databricks.yml` | Workspace/UC bindings for `dev`, `test`, `syst`, `prod`; schedule and compute variables |
 | `resources/train.job.yml` | Training, comparison, approval/rollback and optional scoring handoff |
 | `resources/score.job.yml` | Batch scoring job and its independent schedule/compute |
@@ -21,6 +25,42 @@ resource keys `train` and `score` stable; the training handoff references
 `${resources.jobs.score.id}` across files. When updating an older generated
 project, replace `resources/workflow.jobs.yml` with these two files; do not
 leave all three present. The job definitions and resource keys stay the same.
+
+Training captures every Python file under `src/features/` in one versioned
+64 KiB snapshot. Relative imports keep custom modules available after MLflow
+reload, even if editable project files change. Add `__init__.py` to subpackages.
+Third-party dependencies must be installed in training/scoring environments;
+non-Python assets and modules outside features are not embedded.
+
+Custom implementations live in two modules. Their step calls appear directly
+inside the parent builders' returned lists, alongside the Core steps:
+
+| Parent recipe | Inline custom step |
+| --- | --- |
+| `src/features/pre_split.py` | `minimum_completeness(columns=["a", "b", "c"], min_present=2)` |
+| `src/features/preprocessing.py` | `frequency_encoding(columns=["category"])` |
+
+Uncomment the corresponding import and step, then adapt its column names.
+The list defines execution order; custom factories return normal Core step
+dictionaries. There are no separate column-selection variables or enable
+switches. Keep the JSON preprocessing and pre_split_steps lists empty.
+
+For `minimum_completeness(columns=["a", "b", "c"], min_present=2)`, rows with at least
+two observed fields survive unchanged. Null/NaN are missing; blanks/infinity are
+values. Filter fields need not become model inputs. Training filters do not run
+on scoring rows; use only fields known at the observation cutoff.
+
+For `frequency_encoding(columns=["category"])`, training `["A", "A", "B", null]` learns
+A=0.5 and B=0.25. Missing/new categories map to zero during inference. Each CV
+fold fits its own mapping; the saved model reuses its trained frequencies.
+Other columns and row order stay unchanged. Select string/null categorical
+features in input_columns; do not select target or record-key columns.
+
+Preview the configured project:
+
+```bash
+python src/tools/preview.py --action train
+```
 
 Review source column names and positive `max_rows`/`max_input_mb` budgets.
 Overflow fails. `training_version: null` pins the latest snapshot at run start;
@@ -37,7 +77,7 @@ models require composition settings such as `base_estimators`; setup asks for
 `model_params` when one is selected. Use `--list-models` to inspect available
 models and their parameter metadata.
 
-For voting or stacking, `src/ensemble.py:build_ensemble_params(model_type)`
+For voting or stacking, `src/modeling/ensemble.py:build_ensemble_params(model_type)`
 receives the selected registered model type and can return a JSON object of
 ensemble parameters. Its keys override matching keys in
 `pipeline.modeling.base_model.params`; other JSON parameters remain. The default
@@ -60,7 +100,7 @@ axes; leave it off to search only the ensemble's own parameters.
 
 The generated config uses Core's `hyperparameter_tuner` wrapper. The Core model
 registry supplies a search space for the selected model and strategy. For a project
-override, edit `src/tuning.py:build_search_space()` and return finite candidate
+override, edit `src/modeling/tuning.py:build_search_space()` and return finite candidate
 lists, or provide `search_space` as a JSON object in an init file. The generated
 `pipeline.modeling.search_space: {}` requests Core defaults. The checked-in
 `skyulf-core/templates/databricks/examples/tuning-init.example.json` shows a
@@ -72,7 +112,7 @@ narrow the space. Random, halving-random and Optuna use `n_trials` (maximum 1000
 as a candidate budget. Halving supports `factor`, `min_resources`,
 and `resource`; `n_estimators` resource also needs numeric starting and maximum
 budgets and a compatible estimator. The resource cannot also be a search axis;
-remove `n_estimators` from the search space with `src/tuning.py` when using that
+remove `n_estimators` from the search space with `src/modeling/tuning.py` when using that
 resource. Optuna needs `optuna` and `optuna-integration` in the
 training environment; its timeout is a soft stop between fits, not a hard
 interruption of a running estimator.
@@ -107,19 +147,17 @@ remain untouched. The saved artifact applies the independent final threshold;
 probabilities and multiclass threshold tuning fail explicitly.
 
 The preprocessing and tuning recipes start empty; `ensemble.py` has disabled
-examples to adapt. Keep
-`pipeline.preprocessing` empty in JSON. Put custom classes in the same Python
-file: training saves its source and fitted state; imported sibling modules are
-not packaged with that custom class. Approval and scoring use the saved code,
-even if this file later changes.
+examples to adapt. Keep `pipeline.preprocessing` and `pre_split_steps` empty in
+JSON. Put custom pairs in the features package and enable them in the appropriate
+builder. Approval and scoring use saved code, even after project source changes.
 See [setup and advanced inputs][setup] and [custom recipes][recipes].
 
 Install the matching Skyulf wheel in your local environment, then from this project:
 
 ```powershell
-python src/preview.py --action train
-python src/preview.py --list-models
-python src/preview.py --list-preprocessors
+python src/tools/preview.py --action train
+python src/tools/preview.py --list-models
+python src/tools/preview.py --list-preprocessors
 ```
 
 Preview executes your trusted recipe builders and checks configuration; it does

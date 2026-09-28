@@ -387,17 +387,16 @@ def test_custom_recipes_restore_before_cv_in_separate_task(
     from skyulf.registry import NodeRegistry
 
     _, client, config, _, frame = staged
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "templates/databricks/examples/preprocessing_custom.py"
-    ).read_text(encoding="utf-8")
+    source = (Path(__file__).resolve().parents[2] / "tests/fixtures/custom_recipe.py").read_text(
+        encoding="utf-8"
+    )
     source += '''
 def build_preprocessing():
-    """Enable the published centering recipe."""
+    """Enable the synthetic centering recipe."""
     return [example_custom_step("x")]
 
 def build_pre_split_steps():
-    """Enable the published eligibility recipe."""
+    """Enable the synthetic eligibility recipe."""
     return [example_custom_pre_split("is_test")]
 '''
     if not custom_filter:

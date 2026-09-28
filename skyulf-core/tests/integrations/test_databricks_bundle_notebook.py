@@ -64,7 +64,7 @@ def test_notebook_delegates_bound_target_and_selected_action(
     action = "score" if inherited_action else action
     path = (
         Path(__file__).resolve().parents[2]
-        / "templates/databricks/template/{{.project_name}}/src"
+        / "templates/databricks/template/{{.project_name}}/src/jobs"
         / ("score.py" if action == "score" else "workflow.py")
     )
     config: dict[str, Any] = {

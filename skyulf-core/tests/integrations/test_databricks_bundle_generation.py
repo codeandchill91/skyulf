@@ -69,6 +69,74 @@ def _read_jobs(project):
     return jobs
 
 
+def _synced_sources(project, bundle):
+    """Expand source patterns so notebook and custom-module coverage stays explicit."""
+    sources = set()
+    for pattern in bundle["sync"]["include"]:
+        if pattern.startswith("src/"):
+            matches = list(project.glob(pattern))
+            assert matches and all(path.is_file() for path in matches), pattern
+            sources.update(path.relative_to(project).as_posix() for path in matches)
+    return sources
+
+
+def test_generated_source_layout_connects_both_custom_recipes(tmp_path):
+    """Generated relative imports, preview, hooks and all job paths must agree."""
+    from skyulf.integrations.databricks.project import load_project_workflow
+
+    project = _generate_project(tmp_path)
+    assert {path.name for path in (project / "src").iterdir()} == {
+        "jobs",
+        "features",
+        "modeling",
+        "tools",
+    }
+    for job in _read_jobs(project).values():
+        for task in job["tasks"]:
+            if "notebook_task" in task:
+                path = project / "resources" / task["notebook_task"]["notebook_path"]
+                assert path.is_file(), path
+    features = project / "src/features"
+    config = _read_validated_config(project)
+    baseline = load_project_workflow(config, features)
+    assert baseline["pre_split_steps"] == baseline["pipeline"]["preprocessing"] == []
+    for filename, factory, shown, configured in (
+        (
+            "pre_split.py",
+            "minimum_completeness",
+            'minimum_completeness(columns=["field_a", "field_b", "field_c"], min_present=2)',
+            'minimum_completeness(columns=["quality_a", "quality_b"], min_present=1)',
+        ),
+        (
+            "preprocessing.py",
+            "frequency_encoding",
+            'frequency_encoding(columns=["category"])',
+            'frequency_encoding(columns=["category"])',
+        ),
+    ):
+        path = features / filename
+        text = path.read_text(encoding="utf-8")
+        module = filename.removesuffix(".py") + "_custom"
+        text = text.replace(
+            f"# from .custom.{module} import {factory}", f"from .custom.{module} import {factory}"
+        )
+        assert f"# {shown}," in text
+        path.write_text(text.replace(f"# {shown},", f"{configured},"), encoding="utf-8")
+    config["input_columns"] = ["category", "amount"]
+    (project / "config/workflow.json").write_text(json.dumps(config), encoding="utf-8")
+    enabled = load_project_workflow(config, features)
+    assert enabled["pre_split_steps"][0]["pre_split"]["effect"] == "filter"
+    assert enabled["pipeline"]["preprocessing"][0]["params"]["columns"] == ["category"]
+    result = subprocess.run(
+        [sys.executable, str(project / "src/tools/preview.py"), "--action", "train"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_cli_basic_setup_defaults_match_explicit_advanced_settings(tmp_path):
     """Skipped tuning prompts must use defaults without losing explicit init-file values."""
     basic = tmp_path / "basic"
@@ -190,7 +258,7 @@ def test_cli_independent_schedules_preserve_shared_two_job_graph(tmp_path, train
     config = _read_validated_config(project)
     assert set(jobs) == {"train", "score"}
     bundle = yaml.safe_load((project / "databricks.yml").read_text())
-    synced_notebooks = {path for path in bundle["sync"]["include"] if path.startswith("src/")}
+    synced_notebooks = _synced_sources(project, bundle)
     assert all((project / path).is_file() for path in synced_notebooks)
     defaults = {entry["name"]: entry["default"] for entry in jobs["train"]["parameters"]}
     assert defaults["lifecycle_action"] == "train"
@@ -379,16 +447,16 @@ def test_cli_guided_pipeline_cv_and_offline_preview(tmp_path, engine, task):
             "params": {"columns": ["feature_value"]},
         },
     ]
-    source_path = project / "src/preprocessing.py"
+    source_path = project / "src/features/preprocessing.py"
     with source_path.open("a", encoding="utf-8") as stream:
         stream.write("\n\ndef build_preprocessing():\n    return " + repr(steps) + "\n")
     from skyulf.integrations.databricks.project import load_project_workflow
 
-    config = load_project_workflow(config, source_path)
+    config = load_project_workflow(config, source_path.parent)
     assert config["cv_enabled"] is True and config["cv_folds"] == 3
     assert config["training_sample_rows"] == 500 and config["training_sample_seed"] == 19
     preview = subprocess.run(
-        [sys.executable, str(project / "src/preview.py"), "--action", "train"],
+        [sys.executable, str(project / "src/tools/preview.py"), "--action", "train"],
         capture_output=True,
         text=True,
         timeout=60,
@@ -560,7 +628,7 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
     for job in jobs.values():
         assert job["max_concurrent_runs"] == 1 and job["queue"]["enabled"] is True
     bundle = yaml.safe_load((project / "databricks.yml").read_text())
-    synced_notebooks = {path for path in bundle["sync"]["include"] if path.startswith("src/")}
+    synced_notebooks = _synced_sources(project, bundle)
     assert all((project / path).is_file() for path in synced_notebooks)
     tasks = {task["task_key"]: task for task in jobs["train"]["tasks"]}
     chain = [
@@ -624,7 +692,7 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
     for name in defaults:
         assert parameters[name] == "{{job.parameters." + name + "}}"
     score_task = jobs["score"]["tasks"][0]
-    assert score_task["notebook_task"]["notebook_path"] == "../src/score.py"
+    assert score_task["notebook_task"]["notebook_path"] == "../src/jobs/score.py"
     assert "lifecycle_action" not in score_task["notebook_task"]["base_parameters"]
     assert jobs["score"]["parameters"] == [{"name": "score_model_version", "default": ""}]
     score_parameters = score_task["notebook_task"]["base_parameters"]
@@ -632,7 +700,7 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
     for notebook_parameters in (parameters, score_parameters):
         assert notebook_parameters["workflow_contract"] == "3"
         assert notebook_parameters["deployed_score_handoff"] == handoff
-    assert (project / "src/score.py").is_file()
+    assert (project / "src/jobs/score.py").is_file()
     assert config["score_model_selection"] == selection
     assert config["promotion_policy"] == policy
     assert config["score_handoff"] == handoff
@@ -771,7 +839,7 @@ def test_cli_training_examples_pass_manual_preflight(tmp_path, filename):
     if inputs.get("start"):
         assert checked["training_window_mode"] == "fixed_window"
     preview = subprocess.run(
-        [sys.executable, str(project / "src/preview.py"), "--action", "train"],
+        [sys.executable, str(project / "src/tools/preview.py"), "--action", "train"],
         capture_output=True,
         text=True,
         timeout=60,

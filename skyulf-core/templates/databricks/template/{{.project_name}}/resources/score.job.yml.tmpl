@@ -18,7 +18,7 @@ resources:
         - task_key: score
           max_retries: 0
           notebook_task:
-            notebook_path: ../src/score.py
+            notebook_path: ../src/jobs/score.py
             base_parameters:
               workflow_contract: "3"
               deployed_score_handoff: "{{.score_handoff}}"

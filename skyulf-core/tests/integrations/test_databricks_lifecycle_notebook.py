@@ -218,7 +218,7 @@ def test_generated_notebooks_bind_their_own_phase_and_defer_exit(monkeypatch, fi
 
     path = (
         Path(__file__).resolve().parents[2]
-        / "templates/databricks/template/{{.project_name}}/src"
+        / "templates/databricks/template/{{.project_name}}/src/jobs"
         / f"{filename}.py"
     )
     execute = Mock(return_value='{"ok": true}')

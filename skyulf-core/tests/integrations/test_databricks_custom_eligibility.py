@@ -371,6 +371,7 @@ def test_registered_custom_recipe_reloads_from_saved_source_in_fresh_process(tmp
     from skyulf.inference.local_pipeline import load_local_pipeline
     from skyulf.integrations.databricks.local_approval import _load_evidence
 
+    monkeypatch.chdir(tmp_path)
     workflow = _project(tmp_path)
     spec = _spec(steps=tuple(workflow["pre_split_steps"]))
     monkeypatch.setattr(training, "read_training_snapshot", lambda spark, request: _frame())

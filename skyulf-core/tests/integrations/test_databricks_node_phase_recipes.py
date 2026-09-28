@@ -161,11 +161,10 @@ def test_empty_text_partition_retains_fitted_columns_and_dtypes(engine, node_id)
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
 def test_template_custom_eligibility_example_keeps_only_known_false_flags(engine):
-    """The published custom example must work on both engines without target or key edits."""
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "templates/databricks/examples/preprocessing_custom.py"
-    ).read_text(encoding="utf-8")
+    """The synthetic custom fixture must work on both engines without target or key edits."""
+    source = (Path(__file__).resolve().parents[2] / "tests/fixtures/custom_recipe.py").read_text(
+        encoding="utf-8"
+    )
     module = load_project_module(source)
     spec = LocalTrainingSpec(
         table="workspace.example.source",

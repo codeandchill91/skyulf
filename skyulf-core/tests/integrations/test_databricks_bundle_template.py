@@ -11,7 +11,7 @@ import pytest
 
 WORKFLOW = (
     Path(__file__).resolve().parents[2]
-    / "templates/databricks/template/{{.project_name}}/src/initialize_run.py"
+    / "templates/databricks/template/{{.project_name}}/src/jobs/initialize_run.py"
 )
 
 
@@ -24,7 +24,7 @@ def test_initializer_only_shows_task_specific_models_and_metrics(task):
     from skyulf.modeling.base import BaseModelCalculator
     from skyulf.registry import NodeRegistry
 
-    schema = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())
+    schema = json.loads((WORKFLOW.parents[4] / "databricks_template_schema.json").read_text())
     properties = schema["properties"]
     other = "regression" if task == "classification" else "classification"
     for suffix in ("model", "metric"):
@@ -69,7 +69,7 @@ def test_date_questions_follow_declared_representation(prefix, kind, text_kind, 
     """Users should only answer parsing questions relevant to their declared column format."""
     from jsonschema import Draft7Validator
 
-    properties = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())[
+    properties = json.loads((WORKFLOW.parents[4] / "databricks_template_schema.json").read_text())[
         "properties"
     ]
     values = {key: spec["default"] for key, spec in properties.items()}
@@ -89,7 +89,7 @@ def test_unused_dates_hide_all_followup_questions(prefix):
     """A date-free workflow must never ask about date types or parsing details."""
     from jsonschema import Draft7Validator
 
-    properties = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())[
+    properties = json.loads((WORKFLOW.parents[4] / "databricks_template_schema.json").read_text())[
         "properties"
     ]
     values = {key: spec["default"] for key, spec in properties.items()}
@@ -102,7 +102,7 @@ def test_optional_setup_sections_hide_their_details_until_selected(enabled):
     """Scheduling and cluster details appear only when the user selects them."""
     from jsonschema import Draft7Validator
 
-    properties = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())[
+    properties = json.loads((WORKFLOW.parents[4] / "databricks_template_schema.json").read_text())[
         "properties"
     ]
     values = {key: spec["default"] for key, spec in properties.items()}
@@ -126,7 +126,7 @@ def test_data_settings_use_defaults_without_extra_prompts(task):
     """Enabling CV should expose folds while keeping unrelated data details quiet."""
     from jsonschema import Draft7Validator
 
-    properties = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())[
+    properties = json.loads((WORKFLOW.parents[4] / "databricks_template_schema.json").read_text())[
         "properties"
     ]
     values = {key: spec["default"] for key, spec in properties.items()}
@@ -152,7 +152,7 @@ def test_schedule_questions_follow_each_independent_mode(train_mode, score_mode)
     """Selecting a scoring clock must not expose or enable an unrelated training clock."""
     from jsonschema import Draft7Validator
 
-    properties = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())[
+    properties = json.loads((WORKFLOW.parents[4] / "databricks_template_schema.json").read_text())[
         "properties"
     ]
     values = {key: spec["default"] for key, spec in properties.items()}
@@ -172,7 +172,7 @@ def test_window_control_questions_follow_active_data_policies(window, strategy, 
     """Holdout and result maturity prompts apply only to the policies that use them."""
     from jsonschema import Draft7Validator
 
-    properties = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())[
+    properties = json.loads((WORKFLOW.parents[4] / "databricks_template_schema.json").read_text())[
         "properties"
     ]
     values = {key: spec["default"] for key, spec in properties.items()}
@@ -197,7 +197,7 @@ def test_explicit_boundary_questions_only_apply_to_fixed_windows(window, strateg
     """Rolling runs derive boundaries, so setup must not ask for dates it will replace."""
     from jsonschema import Draft7Validator
 
-    properties = json.loads((WORKFLOW.parents[3] / "databricks_template_schema.json").read_text())[
+    properties = json.loads((WORKFLOW.parents[4] / "databricks_template_schema.json").read_text())[
         "properties"
     ]
     values = {key: spec["default"] for key, spec in properties.items()}
@@ -217,9 +217,9 @@ def _output():
 
 def _render_default_config(record_key="entity_id", risk_category=""):
     """Resolve default branches for offline checks; real CLI tests cover Go rendering."""
-    template = WORKFLOW.parents[1] / "config/workflow.json.tmpl"
+    template = WORKFLOW.parents[2] / "config/workflow.json.tmpl"
     schema = json.loads(
-        (WORKFLOW.parents[3] / "databricks_template_schema.json").read_text(encoding="utf-8")
+        (WORKFLOW.parents[4] / "databricks_template_schema.json").read_text(encoding="utf-8")
     )
     values = {key: spec["default"] for key, spec in schema["properties"].items()}
     values.update(
@@ -325,7 +325,7 @@ def _render_default_config(record_key="entity_id", risk_category=""):
 @pytest.mark.parametrize("risk_category", ["", "Low", "High"])
 def test_bundle_risk_category_is_optional_and_configurable(risk_category):
     """Initialization must preserve the chosen business label without inventing a default risk."""
-    root = WORKFLOW.parents[3]
+    root = WORKFLOW.parents[4]
     schema = json.loads((root / "databricks_template_schema.json").read_text())
     choice = schema["properties"]["risk_category"]
     assert choice["default"] == ""
@@ -338,7 +338,7 @@ def test_bundle_risk_category_is_optional_and_configurable(risk_category):
 
 def test_company_cost_tag_example_keeps_the_generic_cluster_choice():
     """A company setup must select PayingRegNo without changing the generic template default."""
-    root = WORKFLOW.parents[3]
+    root = WORKFLOW.parents[4]
     schema = json.loads((root / "databricks_template_schema.json").read_text())
     example = json.loads((root / "examples/paying-reg-no-init.example.json").read_text())
     assert schema["properties"]["cost_tag_key"]["default"] == "CostCenter"
@@ -412,7 +412,7 @@ def test_generated_config_has_no_admission_or_alias_state():
 
 def test_init_record_key_becomes_prediction_table_key():
     """A chosen source identity must be carried into the generated output schema."""
-    root = WORKFLOW.parents[3]
+    root = WORKFLOW.parents[4]
     schema = json.loads((root / "databricks_template_schema.json").read_text(encoding="utf-8"))
     assert schema["properties"]["record_key_columns"]["default"] == "entity_id"
 
@@ -436,7 +436,7 @@ def test_init_record_key_becomes_prediction_table_key():
 
 def test_generated_bundle_has_only_train_and_serialized_score_jobs():
     """A new project must not silently bring back setup or control jobs."""
-    resources = WORKFLOW.parents[1] / "resources"
+    resources = WORKFLOW.parents[2] / "resources"
     template = "\n".join(
         (resources / f"{name}.job.yml.tmpl").read_text(encoding="utf-8")
         for name in ("train", "score")
@@ -460,7 +460,7 @@ def test_preview_cli_exposes_one_training_action(monkeypatch, capsys):
     """Offline preview must present the same training action for every trigger."""
     monkeypatch.setattr(sys, "argv", ["preview.py", "--help"])
     with pytest.raises(SystemExit) as stopped:
-        runpy.run_path(str(WORKFLOW.with_name("preview.py.tmpl")), run_name="__main__")
+        runpy.run_path(str(WORKFLOW.parent.parent / "tools/preview.py.tmpl"), run_name="__main__")
     assert stopped.value.code == 0
     output = capsys.readouterr().out
     assert "{score,train}" in output
@@ -469,20 +469,20 @@ def test_preview_cli_exposes_one_training_action(monkeypatch, capsys):
 
 def test_init_exposes_both_model_change_modes_and_editable_training_cadence():
     """The generated Bundle must let users choose scoring semantics and cron."""
-    root = WORKFLOW.parents[3]
+    root = WORKFLOW.parents[4]
     schema = json.loads((root / "databricks_template_schema.json").read_text(encoding="utf-8"))
     properties = schema["properties"]
     assert properties["model_change_mode"]["enum"] == ["incremental_append", "full_rebuild"]
     assert properties["retraining_cron_expression"]["default"] == "0 0 3 3 * ?"
     assert properties["retraining_timezone_id"]["default"] == "UTC"
-    bundle = (WORKFLOW.parents[1] / "databricks.yml.tmpl").read_text(encoding="utf-8")
+    bundle = (WORKFLOW.parents[2] / "databricks.yml.tmpl").read_text(encoding="utf-8")
     assert 'default: "{{.retraining_cron_expression}}"' in bundle
     assert 'default: "{{.retraining_timezone_id}}"' in bundle
 
 
 def test_auto_champion_init_exposes_metric_gates_and_reuses_score_job():
     """Automatic selection must be explicit and call the serialized score job."""
-    root = WORKFLOW.parents[3]
+    root = WORKFLOW.parents[4]
     schema = json.loads((root / "databricks_template_schema.json").read_text(encoding="utf-8"))
     properties = schema["properties"]
     assert properties["score_model_selection"]["enum"] == [
@@ -494,11 +494,11 @@ def test_auto_champion_init_exposes_metric_gates_and_reuses_score_job():
     assert "heldout_f1" in properties["classification_metric"]["enum"]
     assert properties["quality_threshold"]["type"] == "string"
     assert properties["quality_threshold"]["default"] == "null"
-    config = (WORKFLOW.parents[1] / "config/workflow.json.tmpl").read_text(encoding="utf-8")
+    config = (WORKFLOW.parents[2] / "config/workflow.json.tmpl").read_text(encoding="utf-8")
     assert '"score_model_selection": "{{.score_model_selection}}"' in config
     assert _render_default_config()["metric"] == "heldout_rmse"
     jobs = "\n".join(
-        (WORKFLOW.parents[1] / f"resources/{name}.job.yml.tmpl").read_text(encoding="utf-8")
+        (WORKFLOW.parents[2] / f"resources/{name}.job.yml.tmpl").read_text(encoding="utf-8")
         for name in ("train", "score")
     )
     assert "job_id: ${resources.jobs.score.id}" in jobs

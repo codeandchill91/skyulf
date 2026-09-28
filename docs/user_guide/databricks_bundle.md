@@ -72,7 +72,7 @@ databricks bundle init skyulf-core/templates/databricks --config-file skyulf-cor
 
 Review table and feature names in the example first. If editing generated JSON,
 use `full_snapshot`, `fixed_window` or `rolling_calendar` for the window mode;
-`auto` is resolved during initialization. Run `python src/preview.py --action train`
+`auto` is resolved during initialization. Run `python src/tools/preview.py --action train`
 from the generated project to validate the resulting combination.
 
 For each date column you actually use, declare how it is stored:
@@ -126,9 +126,11 @@ months of data a rolling window reads. Independent score scheduling is SM-34.
 | Lifecycle | Metric/gates, manual/automatic promotion, score selector/handoff and enabled retraining cron |
 | Compute | Serverless or approved policy cluster and cost tags |
 
-Preprocessing is edited in the generated **`src/preprocessing.py`** file, not in
-the initializer or JSON. `build_preprocessing()` returns normal Core steps in
+Preprocessing is edited in **`src/features/preprocessing.py`**.
+`build_preprocessing()` returns normal Core steps in
 execution order. Keep the JSON `pipeline.preprocessing` list empty.
+Use **`src/features/pre_split.py`** for `build_pre_split_steps()` and keep the
+JSON `pre_split_steps` list empty. The package exports both builders separately.
 
 ```python
 def build_preprocessing():
@@ -143,37 +145,111 @@ def build_preprocessing():
 
 ### Custom preprocessing recipes
 
-Select per-step columns when mixing numeric and categorical features. For your
-own logic, define top-level Calculator/Applier classes in the same file and add
-`custom_step("my_step", MyCalculator, MyApplier, params={...})` to this list.
-The self-contained
-[custom recipe example](https://github.com/flyingriverhorse/Skyulf/blob/master/skyulf-core/templates/databricks/examples/preprocessing_custom.py)
-in `skyulf-core/templates/databricks/examples/preprocessing_custom.py` provides
-mean-centering and fixed eligibility examples for pandas/Polars. Copy the needed
-imports, classes and helper functions into your generated `src/preprocessing.py`;
-keep your two recipe builders and add `example_custom_step("income")` to
-`build_preprocessing()` to enable centering. Do not import the example as a
-sibling module: training snapshots only `src/preprocessing.py`. Fit returns learned state;
-apply uses it without learning again. Preserve row count/order and implement
-the engines your project uses. CV refits the custom step within every fold.
+Select per-step columns when mixing numeric and categorical features. Generated
+projects contain two reusable, domain-independent custom operations:
+
+| Custom module | Operation | Configuration location |
+| --- | --- | --- |
+| `src/features/custom/pre_split_custom.py` | Keep rows with at least `min_present` nonmissing values among selected columns | `src/features/pre_split.py` |
+| `src/features/custom/preprocessing_custom.py` | Replace selected string categories with their training frequencies | `src/features/preprocessing.py` |
+
+The custom modules contain Calculator/Applier implementations and step factories.
+Each factory returns a normal Core step dictionary. The parent recipe files show
+these calls directly beside the built-in steps in the returned list. Uncomment
+the matching import and step, then adapt the columns:
+
+```python
+# src/features/pre_split.py
+from .custom.pre_split_custom import minimum_completeness
+
+
+def build_pre_split_steps():
+    return [
+        minimum_completeness(columns=["field_a", "field_b", "field_c"], min_present=2),
+    ]
+```
+
+```python
+# src/features/preprocessing.py
+from .custom.preprocessing_custom import frequency_encoding
+
+
+def build_preprocessing():
+    return [
+        frequency_encoding(columns=["category"]),
+    ]
+```
+
+The list order is the execution order. Add Core operations to the same list.
+The template starts with commented steps because source column names vary across
+projects. There are no separate column-selection variables or enable switches.
+Keep both JSON recipe lists empty.
+
+Completeness treats null/NaN as missing; blank strings and infinity count as
+values. With three selected fields and `min_present=2`, rows with two or three
+observed values survive without any value or order changes. Required filter
+columns are read automatically and need not be model inputs. Use only data known
+at the observation cutoff; do not make eligibility depend on future information.
+
+Frequency encoding learns `count / training_rows` per observed string category.
+For training values `["A", "A", "B", null]`, scoring `["A", "B", "NEW", null]`
+produces `[0.5, 0.25, 0.0, 0.0]`. It replaces selected columns in place, preserving
+other columns and row order. Each CV fold learns its own mapping; saved-model
+inference never recomputes frequencies on the score batch. Missing/unseen values
+map to zero. Cast numeric category identifiers to strings upstream if needed.
+Select these columns in workflow `input_columns`, excluding target/record keys.
+
+```bash
+python src/tools/preview.py --action train
+```
+
+The tests configure these actual parent builders, then run filtering, training,
+CV and fresh-process model reload on pandas and Polars. No separate demonstration
+files need to be copied into a project.
+
+Custom pre-split steps remain declared fixed filters: they must preserve survivor
+values/order and cannot learn statistics. They do not run on unlabeled score
+input. Custom value transformations belong in preprocessing; its Calculator fits
+inside each CV training fold and its Applier reuses that state during inference.
 
 Training saves the exact Python source with the fitted artifact. Both local
 and MLflow loading restore this saved source, including custom classes. Changing
 the project file affects future training; score, approve and rollback continue
-using saved model code/state. Different source versions use distinct module
-identities. This supports a self-contained file up to 64 KiB, with imports from
-installed packages. Sibling files and new package dependencies are not packaged
-automatically. Only load trusted code/models, as with existing pickle artifacts.
-Broader project packaging, row filtering/output rules, Optuna and multiple model
-branches remain later tasks.
+using saved model code/state. Different source versions use distinct package
+identities. All Python files under `src/features/` are captured in a bounded
+64 KiB snapshot. Use relative imports and an `__init__.py` in every subpackage.
+Non-Python assets and third-party dependencies are not embedded; install external
+dependencies explicitly in both training and scoring environments. Keep jobs and
+modeling hooks outside the feature package. Only load trusted code/models, as
+with existing pickle artifacts. Scoring exclusions, historical feature context
+and post-prediction business rules remain separate work.
+
+### Source layout and existing projects
+
+| Directory | Responsibility |
+| --- | --- |
+| `src/jobs/` | Databricks notebook entrypoints, referenced by the two job YAMLs |
+| `src/features/` | Saved pre-split and preprocessing recipes, custom pairs/helpers |
+| `src/modeling/` | Optional standalone `tuning.py` and `ensemble.py` settings hooks |
+| `src/tools/` | Offline `preview.py` CLI |
+
+Existing single-file projects and their saved models remain supported. To migrate,
+move your builders into the two feature recipe files, move custom pairs into
+`features/custom/`, and add relative imports. Pass the `src/features` directory
+to `load_project_workflow`; update `initialize_run.py` to use
+`preprocessing_path="../src/features"` (relative to the configuration directory).
+Move tuning/ensemble hooks into `src/modeling/`, update YAML notebook paths to
+`../src/jobs/<name>.py` and sync the new directories. Run the new preview command
+before deploying. Keep only one active copy of each builder. Newly trained models
+capture the new package; older model versions retain their original snapshot.
 
 From the generated project, with the matching Core wheel installed locally:
 
 ```powershell
-python src/preview.py
-python src/preview.py --list-models
-python src/preview.py --list-preprocessors
-python src/preview.py --action train
+python src/tools/preview.py
+python src/tools/preview.py --list-models
+python src/tools/preview.py --list-preprocessors
+python src/tools/preview.py --action train
 ```
 
 Preview executes the trusted Python recipe to resolve its steps. Keep data access
@@ -358,7 +434,7 @@ Basic/Advanced mode flag. The generated `config/workflow.json` uses Core's
 | `optuna` | Trial limit, sampler, pruner, pruning and optional soft timeout |
 
 Search spaces come from Core's model/strategy catalog or ensemble builder.
-Override them in `src/tuning.py::build_search_space(model_type, strategy, params)`;
+Override them in `src/modeling/tuning.py::build_search_space(model_type, strategy, params)`;
 return `None` to preserve an explicit JSON space or use Core defaults. A returned
 dictionary of finite candidate lists takes precedence over the JSON space.
 The resolved space and exact Python source are saved with the trained artifact.
@@ -498,12 +574,12 @@ explicit `unavailable` reason.
 ### Ensemble recipes
 
 Select `voting_classifier`, `stacking_classifier`, `voting_regressor` or
-`stacking_regressor` for your task. Edit the generated **`src/ensemble.py`** to
+`stacking_regressor` for your task. Edit the generated **`src/modeling/ensemble.py`** to
 choose the component models and their settings. Set `USE_EXAMPLES = True` to
 activate its four example recipes, then edit the recipe for your selected model.
 Returning `None` keeps the parameters already configured in JSON and Core defaults.
 Returned keys override matching `pipeline.modeling.base_model.params` keys before
-`src/tuning.py` resolves the search space. Both recipes are pinned for future replay.
+`src/modeling/tuning.py` resolves the search space. Both recipes are pinned for future replay.
 
 | Setting from Canvas | Bundle ensemble recipe |
 | --- | --- |
@@ -515,7 +591,7 @@ Returned keys override matching `pipeline.modeling.base_model.params` keys befor
 | Stacking meta-learner | `final_estimator`, `final_estimator_params`, `passthrough` |
 | Stacking OOF folds | Ensemble `cv`, independent of the shared search `cv_*` settings |
 | Tune component hyperparameters | Defaults to `true` for all four ensembles in Bundle search; `false` opts out of automatic component spaces |
-| Search strategy / search CV | Existing workflow settings and optional `src/tuning.py`; no second tuning engine |
+| Search strategy / search CV | Existing workflow settings and optional `src/modeling/tuning.py`; no second tuning engine |
 
 Use task-compatible member keys from Core; optional XGBoost/LightGBM require the
 corresponding runtime dependency. Invalid members, duplicates, weights, parameter
@@ -802,7 +878,7 @@ remain supported: score delegates to the score entrypoint, while lifecycle keeps
 its sequential behavior and does not acquire durable phase/retry semantics.
 `run_bundle_action`, `run_action` and `train_local_candidate` retain their APIs.
 
-Edit preprocessing in `src/preprocessing.py` and model/workflow settings in
+Edit preprocessing in `src/features/preprocessing.py` and model/workflow settings in
 `config/workflow.json`. These remain project choices; common workflow fixes ship in the
 Skyulf wheel instead of requiring edits to every generated notebook.
 
@@ -1168,7 +1244,7 @@ WHERE customer_id = 'C123';
 
 Build and place the matching Skyulf wheel in the generated project's `dist/`,
 then edit `config/workflow.json` for real source columns, model, split policy
-and size limits, and `src/preprocessing.py` for feature engineering.
+and size limits, and `src/features/preprocessing.py` for feature engineering.
 The JSON values are an example, not a dataset.
 Enable Change Data Feed on the scoring source before later inserts arrive.
 

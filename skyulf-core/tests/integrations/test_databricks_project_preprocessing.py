@@ -39,18 +39,25 @@ def build_preprocessing():
 """
 
 
-def _project(tmp_path, source_text=SOURCE):
+def _project(tmp_path, source_text=SOURCE, *, package=False):
     """Resolve the editable Python source into a normal Core pipeline config."""
     from skyulf.integrations.databricks.project import load_project_workflow
 
-    source = tmp_path / "preprocessing.py"
+    root = tmp_path
+    if package:
+        root = tmp_path / "features"
+        root.mkdir()
+        (root / "__init__.py").write_text(
+            "from .preprocessing import build_preprocessing\n", encoding="utf-8"
+        )
+    source = root / "preprocessing.py"
     source.write_text(source_text, encoding="utf-8")
     config = {"pipeline": {"preprocessing": [], "modeling": {"type": "linear_regression"}}}
-    return load_project_workflow(config, source), source
+    return load_project_workflow(config, root if package else source), source
 
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
-@pytest.mark.parametrize("recipe", ["synthetic", "published_example"])
+@pytest.mark.parametrize("recipe", ["synthetic", "custom_fixture"])
 def test_project_code_and_fitted_state_survive_without_the_project_file(tmp_path, engine, recipe):
     """Inference must use saved training code/state even after the project file changes."""
     from skyulf.data.dataset import SplitDataset
@@ -58,14 +65,13 @@ def test_project_code_and_fitted_state_survive_without_the_project_file(tmp_path
     from skyulf.integrations.databricks.local_batch import fit_local_workflow
 
     source_text = SOURCE
-    if recipe == "published_example":
+    if recipe == "custom_fixture":
         source_text = (
-            Path(__file__).resolve().parents[2]
-            / "templates/databricks/examples/preprocessing_custom.py"
+            Path(__file__).resolve().parents[2] / "tests/fixtures/custom_recipe.py"
         ).read_text(encoding="utf-8")
         source_text += '''
 def build_preprocessing():
-    """Enable the published centering example after fitted imputation."""
+    """Enable the synthetic centering fixture after fitted imputation."""
     return [
         {"name": "impute", "transformer": "SimpleImputer",
          "params": {"columns": ["x"], "strategy": "mean"}},
@@ -272,7 +278,8 @@ def test_project_custom_fit_is_repeated_inside_cv_folds(tmp_path, monkeypatch, e
 
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
-def test_mlflow_custom_code_loads_in_a_fresh_process(tmp_path, monkeypatch, engine):
+@pytest.mark.parametrize("package", [False, True])
+def test_mlflow_custom_code_loads_in_a_fresh_process(tmp_path, monkeypatch, engine, package):
     """The complete MLflow package must predict without access to the project source."""
     mlflow = pytest.importorskip("mlflow")
     from skyulf.data.dataset import SplitDataset
@@ -281,7 +288,7 @@ def test_mlflow_custom_code_loads_in_a_fresh_process(tmp_path, monkeypatch, engi
     from skyulf.integrations.mlflow.tracking import TrackingConfig, track_run
 
     monkeypatch.chdir(tmp_path)
-    config, source = _project(tmp_path)
+    config, source = _project(tmp_path, package=package)
     frame = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "target": [3.0, 5.0, 7.0, 9.0]})
     if engine == "polars":
         frame = pl.from_pandas(frame)

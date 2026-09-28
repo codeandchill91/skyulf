@@ -12,6 +12,7 @@ from ...inference.project_code import (
     load_project_module,
     project_source_digest,
 )
+from ._project_files import modeling_hook, project_source
 from .local_ensemble import ENSEMBLE_MODELS
 from .local_search import _bounded_space
 
@@ -46,7 +47,7 @@ def _load_ensemble_hook(result: dict[str, Any], preprocessing_path: Path) -> Non
     )
     if selected.get("type") not in ENSEMBLE_MODELS:
         return
-    hook_path = preprocessing_path.with_name("ensemble.py")
+    hook_path = modeling_hook(preprocessing_path, "ensemble.py")
     if not hook_path.is_file():
         return
     with hook_path.open("rb") as stream:
@@ -78,7 +79,7 @@ def _load_search_hook(result: dict[str, Any], preprocessing_path: Path) -> None:
     modeling = result["pipeline"].get("modeling", {})
     if modeling.get("type") != "hyperparameter_tuner":
         return
-    hook_path = preprocessing_path.with_name("tuning.py")
+    hook_path = modeling_hook(preprocessing_path, "tuning.py")
     if not hook_path.is_file():
         return
     with hook_path.open("rb") as stream:
@@ -116,11 +117,7 @@ def load_project_workflow(config: dict[str, Any], path: str | Path) -> dict[str,
         raise ValueError("Configure preprocessing in the Python file; leave the JSON list empty.")
     if config.get("pre_split_steps"):
         raise ValueError("Configure pre_split_steps in the Python file; leave the JSON list empty.")
-    with Path(path).open("rb") as stream:
-        payload = stream.read(MAX_PROJECT_SOURCE_BYTES + 1)
-    if len(payload) > MAX_PROJECT_SOURCE_BYTES:
-        raise ValueError("Project preprocessing source exceeds 64 KiB.")
-    source = payload.decode("utf-8")
+    source = project_source(Path(path))
     module = load_project_module(source)
     factory = getattr(module, "build_preprocessing", None)
     if not callable(factory):

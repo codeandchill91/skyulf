@@ -139,10 +139,10 @@ def test_generated_ensemble_recipes_cover_each_supervised_ensemble(tmp_path):
     template = (
         Path(__file__).resolve().parents[2] / "templates/databricks/template/{{.project_name}}"
     )
-    source = template / "src/ensemble.py"
+    source = template / "src/modeling/ensemble.py"
     assert source.is_file()
     bundle = (template / "databricks.yml.tmpl").read_text(encoding="utf-8")
-    assert "    - src/ensemble.py" in bundle
+    assert "    - src/modeling/ensemble.py" in bundle
     example = tmp_path / "ensemble.py"
     example.write_text(
         source.read_text(encoding="utf-8").replace("USE_EXAMPLES = False", "USE_EXAMPLES = True"),

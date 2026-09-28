@@ -177,7 +177,7 @@ def test_generated_notebook_keeps_report_and_exit_in_separate_cells(entrypoint):
 
     path = (
         Path(__file__).resolve().parents[2]
-        / "templates/databricks/template/{{.project_name}}/src"
+        / "templates/databricks/template/{{.project_name}}/src/jobs"
         / entrypoint
     )
     cells = path.read_text().split("# COMMAND ----------")
