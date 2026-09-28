@@ -223,6 +223,7 @@ def test_empty_recipe_preserves_legacy_dataset_identity():
         "max_bytes",
         "survivor_key_sha256",
         "training_evidence_sha256",
+        "group_column",
     ):
         old.pop(key)
     for key in ("start", "holdout_start", "cutoff", "result_cutoff"):
@@ -230,10 +231,12 @@ def test_empty_recipe_preserves_legacy_dataset_identity():
     expected = hashlib.sha256(json.dumps(old, sort_keys=True).encode()).hexdigest()
     saved = asdict(spec)
     saved.pop("pre_split_steps")
+    saved.pop("group_column")
     saved["event_time_parsing"] = spec.event_time_parsing
     saved["result_time_parsing"] = spec.result_time_parsing
     restored = training.LocalTrainingSpec(**saved)
     assert spec.dataset_id == restored.dataset_id == f"{spec.table}@3/random/{expected}"
+    assert training.replace(spec, group_column="entity").dataset_id != spec.dataset_id
     assert (
         training.replace(
             spec,

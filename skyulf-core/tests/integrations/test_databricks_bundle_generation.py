@@ -795,3 +795,65 @@ def test_generated_nested_search_preserves_separate_inner_folds(tmp_path):
     )
     assert recipe["modeling"]["cv_folds"] == 4
     assert recipe["modeling"]["cv_inner_folds"] == 2
+
+
+@pytest.mark.parametrize("method", ["time_series_split", "nested_cv"])
+def test_temporal_cv_initializes_a_usable_default_holdout(tmp_path, method):
+    """Temporal selection must generate a chronological window without hidden manual pins."""
+    project = _generate_project(
+        tmp_path,
+        omit_fields=("split_strategy", "cv_shuffle", "cv_random_state"),
+        cv_enabled="true",
+        cv_type=method,
+        cv_nested_type="time_series_split" if method == "nested_cv" else "auto",
+        event_column="observed_at",
+    )
+    config = _read_validated_config(project)
+    assert config["split_strategy"] == "temporal"
+    assert config["training_window_mode"] == "rolling_calendar"
+    assert config["event_column"] == "observed_at"
+    assert config["cv_shuffle"] is False
+    assert config["holdout_months"] == 1
+
+
+@pytest.mark.parametrize("policy", ["time_series_split", "stratified_group_k_fold"])
+def test_generated_nested_policies_preserve_controls_and_two_jobs(tmp_path, policy):
+    """Real template expansion must carry split metadata and threshold opt-in into Core."""
+    from skyulf.integrations.databricks.local_cv import LocalCVSpec
+    from skyulf.integrations.databricks.local_search import prepare_search_pipeline
+
+    settings = {"cv_enabled": "true", "cv_type": "nested_cv", "cv_nested_type": policy}
+    temporal = policy == "time_series_split"
+    if temporal:
+        settings.update(
+            split_strategy="temporal",
+            event_column="event",
+            cv_gap="2",
+            cv_test_size="4",
+            cv_max_train_size="30",
+        )
+    else:
+        settings.update(
+            task="classification",
+            classification_model="logistic_regression",
+            cv_group_column="customer",
+            search_tune_threshold="true",
+        )
+    project = _generate_project(tmp_path, **settings)
+    config = _read_validated_config(project)
+    cv = LocalCVSpec.from_workflow(config)
+    recipe = prepare_search_pipeline(
+        config["pipeline"],
+        cv,
+        target_column=config["target_column"],
+        event_column=config.get("event_column"),
+    )
+    assert set(_read_jobs(project)) == {"train", "score"}
+    assert recipe["modeling"]["cv_nested_type"] == policy
+    if temporal:
+        assert recipe["modeling"]["cv_time_column"] == "event"
+        assert recipe["modeling"]["cv_gap"] == 2
+        assert recipe["modeling"]["cv_shuffle"] is False
+    else:
+        assert recipe["modeling"]["cv_group_column"] == "customer"
+        assert recipe["modeling"]["tune_threshold"] is True

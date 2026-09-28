@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft7Validator
 
 TEMPLATE_ROOT = Path(__file__).resolve().parents[2] / "templates/databricks"
@@ -15,7 +16,24 @@ def _properties():
 
 def _visible(properties, name, values):
     """Apply the same skip predicate used by the template initializer."""
-    return not Draft7Validator(properties[name]["skip_prompt_if"]).is_valid(values)
+    return not Draft7Validator(properties[name].get("skip_prompt_if", False)).is_valid(values)
+
+
+def test_nested_policy_questions_follow_active_metadata_and_task():
+    """Guided setup must expose only the metadata required by its nested policy."""
+    properties = _properties()
+    values = {name: item["default"] for name, item in properties.items()}
+    values.update(cv_enabled="true", cv_type="nested_cv", cv_nested_type="time_series_split")
+    assert _visible(properties, "cv_nested_type", values)
+    assert all(
+        _visible(properties, name, values)
+        for name in ("cv_gap", "cv_test_size", "cv_max_train_size")
+    )
+    assert not _visible(properties, "cv_group_column", values)
+    values.update(cv_nested_type="stratified_group_k_fold", task="classification")
+    assert _visible(properties, "cv_group_column", values)
+    assert _visible(properties, "search_tune_threshold", values)
+    assert not _visible(properties, "cv_gap", values)
 
 
 def test_search_questions_follow_strategy_and_keep_cv_single():
@@ -122,6 +140,33 @@ def test_cv_questions_follow_enabled_method():
     values["cv_type"] = "shuffle_split"
     assert not _visible(properties, "cv_shuffle", values)
     assert _visible(properties, "cv_random_state", values)
+
+
+def test_nested_temporal_hides_unused_randomization_questions():
+    """Temporal nested splitting must not ask for shuffling or its unused seed."""
+    properties = _properties()
+    values = {name: item["default"] for name, item in properties.items()}
+    values.update(cv_enabled="true", cv_type="nested_cv", cv_nested_type="time_series_split")
+    assert not _visible(properties, "cv_shuffle", values)
+    assert not _visible(properties, "cv_random_state", values)
+
+
+@pytest.mark.parametrize("method", ["time_series_split", "nested_cv"])
+def test_temporal_cv_opens_required_data_questions_with_default_window(method):
+    """Selecting chronological CV must expose its clock and final holdout window."""
+    properties = _properties()
+    values = {name: item["default"] for name, item in properties.items()}
+    values.update(cv_enabled="true", cv_type=method, cv_nested_type="time_series_split")
+    assert not _visible(properties, "split_strategy", values)
+    for name in (
+        "event_column",
+        "event_time_kind",
+        "window_timezone",
+        "monthly_lookback_months",
+        "holdout_months",
+    ):
+        assert _visible(properties, name, values), name
+        assert properties[name]["order"] > properties["cv_nested_type"]["order"]
 
 
 def test_search_example_names_compatible_model_axis():

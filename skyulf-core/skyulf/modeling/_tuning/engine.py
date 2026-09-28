@@ -37,10 +37,18 @@ from ..base import BaseModelApplier, BaseModelCalculator
 from ..cross_validation import _sort_by_time
 from ..pruning import resolve_pruning_plan, unsupported_pruning_reason
 from . import splitters
+from .cv_policy import (
+    policy_splitter,
+    prediction_features,
+    prepare_policy_data,
+    uses_explicit_policy,
+    validate_holdout_metadata,
+)
 from .fold_pipeline import FoldAwareModelStep
 from .grid_random import fit_and_score_candidate_fold, run_grid_or_random_search
 from .metrics import is_multiclass_target, resolve_metric, resolve_scorer
 from .nested import run_nested_search
+from .nested_threshold import remap_nested_thresholds
 from .params import (
     clean_search_space,
     instantiate_model,
@@ -155,6 +163,52 @@ def _prepare_time_series_data(
             validation_frames, original_columns, feature_columns
         )
     return X, y, validation_data, validation_frames
+
+
+def _prepare_policy_inputs(
+    X: Any,
+    y: Any,
+    config: TuningConfig,
+    problem_type: str,
+    validation_data: Any,
+    validation_frames: Any,
+    preprocessing: Any,
+) -> tuple[Any, Any, Any, Any, Any]:
+    """Extract metadata before conversion and keep validation feature order aligned."""
+    if not uses_explicit_policy(config):
+        return X, y, validation_data, validation_frames, None
+    raw_validation = validation_frames if validation_frames is not None else validation_data
+    if raw_validation is not None:
+        validate_holdout_metadata(X, raw_validation[0], config, problem_type)
+    columns = list(X.columns)
+    X, y, metadata = prepare_policy_data(X, y, config, problem_type)
+    validation_data = _align_time_series_validation(
+        validation_data,
+        columns,
+        list(X.columns),
+        array_is_preprocessed=preprocessing is not None and validation_frames is not None,
+    )
+    validation_frames = _align_time_series_validation(validation_frames, columns, list(X.columns))
+    return X, y, validation_data, validation_frames, metadata
+
+
+def _finish_threshold_selection(
+    calculator: Any,
+    model: Any,
+    result: TuningResult,
+    config: TuningConfig,
+    validation_data: Any,
+    log_callback: Any,
+    y_raw: Any,
+    y_refit: Any,
+) -> None:
+    """Keep nested training-only thresholds separate from ordinary validation tuning."""
+    if not config.tune_threshold:
+        return
+    if config.cv_enabled and config.cv_type == "nested_cv":
+        remap_nested_thresholds(result, model, y_raw, y_refit)
+    else:
+        tune_decision_thresholds(calculator, model, result, config, validation_data, log_callback)
 
 
 def _report_search_warnings(
@@ -595,6 +649,7 @@ class TuningCalculator(BaseModelCalculator):
         intact.
         """
         tuning_config = self._build_tuning_config(config)
+        original_columns = tuple(getattr(X, "columns", ()))
 
         # Core-only console progress: the backend always supplies its own
         # callback (and never sets `progress`), so this only ever fires for
@@ -610,9 +665,19 @@ class TuningCalculator(BaseModelCalculator):
         # Mirrors the same fix already applied to perform_cross_validation();
         # without it, tuning with cv_type="time_series_split" silently leaks
         # the time column and evaluates folds out of chronological order.
-        X, y, validation_data, validation_frames = _prepare_time_series_data(
-            X, y, tuning_config, validation_data, validation_frames, preprocessing, log_callback
+        X, y, validation_data, validation_frames, split_metadata = _prepare_policy_inputs(
+            X,
+            y,
+            tuning_config,
+            self.problem_type,
+            validation_data,
+            validation_frames,
+            preprocessing,
         )
+        if split_metadata is None:
+            X, y, validation_data, validation_frames = _prepare_time_series_data(
+                X, y, tuning_config, validation_data, validation_frames, preprocessing, log_callback
+            )
 
         # Convert data to Numpy for tuning
         X_np, y_np = SklearnBridge.to_sklearn((X, y), validate_features=preprocessing is None)
@@ -668,8 +733,10 @@ class TuningCalculator(BaseModelCalculator):
                 preprocessing=preprocessing,
                 preprocessing_frames=(X, y) if preprocessing is not None else None,
                 validation_frames=validation_frames,
+                split_metadata=split_metadata,
             )
         _report_search_warnings(caught, log_callback)
+        _record_feature_exclusions(tuning_result, original_columns, X)
 
         # Refit the best model on the full dataset. With per-fold refit
         # enabled, the full dataset is the full-split frame run once through
@@ -695,15 +762,16 @@ class TuningCalculator(BaseModelCalculator):
         # F-13: optionally search a decision threshold for a binary
         # classifier on the validation split. Best-effort — a failure logs and
         # leaves predict() on the default decision rule.
-        if tuning_config.tune_threshold:
-            tune_decision_thresholds(
-                self.model_calculator,
-                model,
-                tuning_result,
-                tuning_config,
-                validation_data,
-                log_callback,
-            )
+        _finish_threshold_selection(
+            self.model_calculator,
+            model,
+            tuning_result,
+            tuning_config,
+            validation_data,
+            log_callback,
+            y,
+            y_refit,
+        )
 
         if reporter is not None:
             reporter.finish(tuning_result)
@@ -868,8 +936,13 @@ class TuningCalculator(BaseModelCalculator):
         preprocessing: "FoldPreprocessor | None" = None,
         preprocessing_frames: tuple[Any, Any] | None = None,
         validation_frames: tuple[Any, Any] | None = None,
+        split_metadata: dict[str, np.ndarray] | None = None,
+        cv_override: Any = None,
     ) -> TuningResult:
         """Runs hyperparameter tuning."""
+        X, y, preprocessing_frames, split_metadata = _policy_search_data(
+            X, y, config, self.problem_type, preprocessing, preprocessing_frames, split_metadata
+        )
         if config.cv_enabled and config.cv_type == "nested_cv":
             raw_x, raw_y = preprocessing_frames if preprocessing_frames is not None else (X, y)
             return run_nested_search(
@@ -880,6 +953,7 @@ class TuningCalculator(BaseModelCalculator):
                 preprocessing=preprocessing,
                 progress_callback=progress_callback,
                 log_callback=log_callback,
+                split_metadata=split_metadata,
             )
         # 1. Prepare Estimator
         # We need a base estimator. Since our Calculator wraps the class,
@@ -911,6 +985,7 @@ class TuningCalculator(BaseModelCalculator):
         cv, X_for_search, y_for_search = self._prepare_search_splitter(
             X, y, config, preprocessing, preprocessing_frames, validation_data, validation_frames
         )
+        cv = _effective_search_cv(cv, cv_override, config, self.problem_type, y, split_metadata)
 
         # 3. Select Search Strategy
         # Handle multiclass metrics and map user-friendly names
@@ -1028,6 +1103,7 @@ class TuningApplier(BaseModelApplier):
         # model_artifact is (fitted_model, tuning_result)
         if isinstance(model_artifact, tuple) and len(model_artifact) == 2:
             model, tuning_result = model_artifact
+            df = prediction_features(df, tuning_result)
             thresholds = getattr(tuning_result, "decision_thresholds", None)
             if (
                 thresholds is not None
@@ -1064,6 +1140,41 @@ class TuningApplier(BaseModelApplier):
         the ``(model, tuning_result)`` tuple the tuner produces.
         """
         if isinstance(model_artifact, tuple) and len(model_artifact) == 2:
-            model, _ = model_artifact
+            model, result = model_artifact
+            df = prediction_features(df, result)
             return self.base_applier.predict_proba(df, model)
         return None
+
+
+def _policy_search_data(
+    X: Any,
+    y: Any,
+    config: TuningConfig,
+    problem_type: str,
+    preprocessing: Any,
+    frames: Any,
+    metadata: Any,
+) -> tuple[Any, Any, Any, Any]:
+    """Prepare metadata once for direct tune calls or retain the fit-owned alignment."""
+    if metadata is None and uses_explicit_policy(config):
+        raw_x, raw_y = frames if frames is not None else (X, y)
+        X, y, metadata = prepare_policy_data(raw_x, raw_y, config, problem_type)
+        frames = (X, y) if preprocessing is not None else None
+    return X, y, frames, metadata
+
+
+def _effective_search_cv(
+    default: Any, override: Any, config: TuningConfig, problem_type: str, y: Any, metadata: Any
+) -> Any:
+    """Use verified nested folds or metadata-aware ordinary folds across every strategy."""
+    if override is not None:
+        return override
+    if metadata is not None:
+        return policy_splitter(config, problem_type, y, metadata)
+    return default
+
+
+def _record_feature_exclusions(result: TuningResult, original: tuple[str, ...], X: Any) -> None:
+    """Persist only columns removed by the split policy, not learned feature changes."""
+    remaining = getattr(X, "columns", original)
+    result.excluded_feature_columns = [name for name in original if name not in remaining]

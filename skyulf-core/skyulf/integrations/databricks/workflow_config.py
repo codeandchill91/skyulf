@@ -100,7 +100,7 @@ def _columns(config: dict[str, Any]) -> None:
     names.append(config.get("target_column"))
     names.extend(
         config[key]
-        for key in ("event_column", "result_available_at_column")
+        for key in ("event_column", "result_available_at_column", "cv_group_column")
         if config.get(key) is not None
     )
     _validate_column_roles(names, config["record_key_columns"])
@@ -268,6 +268,7 @@ def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str
     _training_contract(config, action)
     cv = LocalCVSpec.from_workflow(config)
     if action == "train":
+        _validate_bundle_cv_holdout(config, cv)
         # Saved-model actions never execute the editable project training hooks.
         cv.validate_pipeline(
             config["pipeline"],
@@ -275,6 +276,19 @@ def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str
             event_column=config.get("event_column"),
         )
     return deepcopy(config)
+
+
+def _validate_bundle_cv_holdout(config: dict[str, Any], cv: LocalCVSpec) -> None:
+    """Check policy isolation without resolving source versions or runtime dates."""
+    if (
+        cv.enabled
+        and cv.method == "nested_cv"
+        and cv.temporal
+        and config.get("split_strategy") != "temporal"
+    ):
+        raise ValueError("Nested temporal CV requires a temporal final holdout.")
+    if cv.group_column and config.get("stratify", False):
+        raise ValueError("Group holdout uses whole groups; set stratify=false.")
 
 
 def _preview_window(checked: dict[str, Any]) -> tuple[str, Any, Any]:
@@ -415,6 +429,10 @@ def _preview_search(checked: dict[str, Any], cv: LocalCVSpec) -> list[str]:
         f"cv_random_state={cv.random_state} (independent seeds).",
     ]
     _append_search_cv_preview(lines, cv)
+    if effective.get("tune_threshold"):
+        lines.append(
+            "Decision threshold: binary inner out-of-fold selection; outer and final holdout labels stay untouched."
+        )
     if strategy == "optuna" and effective.get("timeout") is not None:
         lines.append(
             f"Optuna timeout: {effective['timeout']} seconds is a soft study limit; "
@@ -433,7 +451,16 @@ def _append_search_cv_preview(lines: list[str], cv: LocalCVSpec) -> None:
         inner = cv.inner_folds or (min(3, cv.folds - 1) if cv.folds > 2 else 2)
         lines.append(
             f"Nested CV: independent {inner}-fold inner search inside each of {cv.folds} outer folds, "
-            "then a separate final training search. Search budgets apply to each search."
+            f"then a separate final training search; policy={cv.nested_type}. Search budgets apply to each search."
+        )
+
+    if cv.temporal:
+        lines.append(
+            f"Temporal CV: gap={cv.gap} rows, test_size={cv.test_size}, max_train_size={cv.max_train_size}; stable event ordering."
+        )
+    if cv.group_column:
+        lines.append(
+            f"Group CV: {cv.group_column} is split metadata; final holdout isolates whole groups."
         )
 
 

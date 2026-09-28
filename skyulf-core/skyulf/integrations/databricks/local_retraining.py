@@ -21,6 +21,7 @@ from typing import Any, Literal, cast
 
 import pandas as pd
 import polars as pl
+from sklearn.model_selection import GroupShuffleSplit
 
 from ...data.dataset import SplitDataset
 from ...inference.local_evaluation import evaluate_local_holdout
@@ -82,6 +83,7 @@ class LocalTrainingSpec:
     holdout_start: datetime | None = None
     cutoff: datetime | None = None
     event_column: str | None = None
+    group_column: str | None = None
     filter_unavailable_results: bool = False
     result_available_at_column: str | None = None
     result_cutoff: datetime | None = None
@@ -183,7 +185,12 @@ class LocalTrainingSpec:
         _pre_split_columns(
             self.pre_split_steps,
             self.target_column,
-            (*self.record_key_columns, self.event_column, self.result_available_at_column),
+            (
+                *self.record_key_columns,
+                self.event_column,
+                self.result_available_at_column,
+                self.group_column,
+            ),
         )
         names = self.source_columns
         for name in names:
@@ -191,6 +198,7 @@ class LocalTrainingSpec:
         base_names = (
             *self.record_key_columns,
             self.event_column,
+            self.group_column,
             self.result_available_at_column,
             *self.input_columns,
             self.target_column,
@@ -234,16 +242,26 @@ class LocalTrainingSpec:
     @property
     def source_columns(self) -> tuple[str, ...]:
         """Project identities, active dates and model columns without inventing source fields."""
-        dates = tuple(
+        metadata_columns = tuple(
             name
-            for name in (self.event_column, self.result_available_at_column)
+            for name in (self.event_column, self.result_available_at_column, self.group_column)
             if name is not None
         )
-        base = (*self.record_key_columns, *dates, *self.input_columns, self.target_column)
+        base = (
+            *self.record_key_columns,
+            *metadata_columns,
+            *self.input_columns,
+            self.target_column,
+        )
         extra = _pre_split_columns(
             self.pre_split_steps,
             self.target_column,
-            (*self.record_key_columns, self.event_column, self.result_available_at_column),
+            (
+                *self.record_key_columns,
+                self.event_column,
+                self.result_available_at_column,
+                self.group_column,
+            ),
         )
         return (
             *base,
@@ -254,6 +272,8 @@ class LocalTrainingSpec:
     def dataset_id(self) -> str:
         """Pin source, selection, split and seed independently of mutable driver limits."""
         settings = asdict(self)
+        if self.group_column is None:
+            settings.pop("group_column")
         settings.pop("survivor_key_sha256")
         if not self.training_evidence_sha256:
             settings.pop("training_evidence_sha256")
@@ -412,7 +432,12 @@ def read_training_snapshot(spark: Any, spec: LocalTrainingSpec) -> pd.DataFrame:
     _pre_split_columns(
         spec.pre_split_steps,
         spec.target_column,
-        (*spec.record_key_columns, spec.event_column, spec.result_available_at_column),
+        (
+            *spec.record_key_columns,
+            spec.event_column,
+            spec.result_available_at_column,
+            spec.group_column,
+        ),
     )
     names = spec.source_columns
     source = spark.read.format("delta").option("versionAsOf", spec.version).table(spec.table)
@@ -630,6 +655,10 @@ def split_labeled_snapshot(
     holdout_frame.attrs["survivor_rows"] = len(selected)
     holdout_frame.attrs["training_rows"] = len(train)
     holdout_frame.attrs["source_rows"] = len(frame)
+    if spec.group_column:
+        holdout_frame.attrs["group_split"] = _group_split_evidence(
+            train, heldout, spec.group_column
+        )
     unavailable = int((~available).sum()) + frame.attrs.get("training_selection", {}).get(
         "unavailable_labels", 0
     )
@@ -694,8 +723,14 @@ def _candidate_config(
     _pre_split_columns(
         spec.pre_split_steps,
         spec.target_column,
-        (*spec.record_key_columns, spec.event_column, spec.result_available_at_column),
+        (
+            *spec.record_key_columns,
+            spec.event_column,
+            spec.result_available_at_column,
+            spec.group_column,
+        ),
     )
+    _validate_cv_holdout_policy(spec, cv)
     validate_explanation_config(config)
     pipeline_config = prepare_search_pipeline(
         config, cv, target_column=spec.target_column, event_column=spec.event_column
@@ -743,7 +778,7 @@ def _fit_candidate(
     run.client.log_dict(run.run_id, config, "training_pipeline_config.json")
     run.log_params({key: getattr(cv, field) for key, field in CV_FIELDS.items()})
     run.client.log_dict(run.run_id, _training_spec_payload(spec, engine), "training_snapshot.json")
-    temporal_cv = cv.enabled and cv.method == "time_series_split"
+    temporal_cv = cv.enabled and cv.temporal
     frame, train_frame, holdout, unavailable = prepared_data or _read_training_partitions(
         spark, spec, temporal_cv=temporal_cv, engine=engine
     )
@@ -1331,7 +1366,12 @@ def _validate_labeled_snapshot(frame: pd.DataFrame, spec: LocalTrainingSpec, eng
     _pre_split_columns(
         spec.pre_split_steps,
         spec.target_column,
-        (*spec.record_key_columns, spec.event_column, spec.result_available_at_column),
+        (
+            *spec.record_key_columns,
+            spec.event_column,
+            spec.result_available_at_column,
+            spec.group_column,
+        ),
     )
     if engine not in ("pandas", "polars"):
         raise ValueError("engine must be pandas or polars.")
@@ -1409,11 +1449,67 @@ def _validate_training_survivors(
         )
 
 
+def _group_split_evidence(
+    train: pd.DataFrame, heldout: pd.DataFrame, column: str
+) -> dict[str, Any]:
+    """Record bounded group membership receipts without exposing raw identities."""
+    train_groups = train[[column]].drop_duplicates().sort_values(column)
+    heldout_groups = heldout[[column]].drop_duplicates().sort_values(column)
+    return {
+        "column": column,
+        "training_groups": len(train_groups),
+        "holdout_groups": len(heldout_groups),
+        "training_groups_sha256": _key_digest(train_groups, (column,)),
+        "holdout_groups_sha256": _key_digest(heldout_groups, (column,)),
+    }
+
+
+def _validate_cv_holdout_policy(spec: LocalTrainingSpec, cv: LocalCVSpec) -> None:
+    """Require final holdout boundaries that match the requested nested split policy."""
+    if (
+        cv.enabled
+        and cv.method == "nested_cv"
+        and cv.temporal
+        and spec.split_strategy != "temporal"
+    ):
+        raise ValueError("Nested temporal CV requires a temporal final holdout.")
+    if cv.group_column != spec.group_column:
+        raise ValueError("cv_group_column must match the training spec group_column.")
+    if spec.group_column and spec.stratify:
+        raise ValueError("Group holdout uses whole groups; set stratify=false.")
+
+
+def _partition_group_rows(
+    selected: pd.DataFrame, spec: LocalTrainingSpec
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Isolate complete entities in the final holdout, rejecting missing identities."""
+    groups = selected[spec.group_column]
+    if groups.isna().any():
+        raise ValueError("Group metadata must be nonnull.")
+    if spec.stratify:
+        raise ValueError("Group holdout uses whole groups; set stratify=false.")
+    if spec.split_strategy == "temporal":
+        mask = selected[spec.event_column] >= spec.holdout_start
+        train, heldout = selected.loc[~mask], selected.loc[mask]
+        if set(train[spec.group_column]) & set(heldout[spec.group_column]):
+            raise ValueError("Final temporal holdout must contain disjoint groups.")
+        return train, heldout
+    if groups.nunique() < 2:
+        raise ValueError("Group holdout requires at least two distinct groups.")
+    splitter = GroupShuffleSplit(
+        n_splits=1, test_size=spec.test_size, random_state=spec.random_state
+    )
+    train, heldout = next(splitter.split(selected, groups=groups))
+    return selected.iloc[train], selected.iloc[heldout]
+
+
 def _partition_training_rows(
     selected: pd.DataFrame, spec: LocalTrainingSpec
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build reproducible random or temporal partitions with viable labeled row counts."""
-    if spec.split_strategy == "random":
+    if spec.group_column:
+        train, heldout = _partition_group_rows(selected, spec)
+    elif spec.split_strategy == "random":
         if spec.stratify:
             counts = selected[spec.target_column].value_counts()
             if counts.empty or counts.min() < 2:
@@ -1447,6 +1543,8 @@ def _raw_model_partitions(
     train_columns = (
         [*columns, spec.event_column] if keep_training_event and spec.event_column else columns
     )
+    if spec.group_column:
+        train_columns = [*train_columns, spec.group_column]
     if spec.pre_split_steps:
         raw_positions = {
             key: index
@@ -1508,8 +1606,8 @@ def _final_fit_frame(
     temporal_cv: bool,
     search: bool,
 ) -> pd.DataFrame | pl.DataFrame:
-    """Remove CV-only event metadata before fitting a fixed final model."""
-    if temporal_cv and not search:
+    """Remove CV-only split metadata before fitting a fixed final model."""
+    if (temporal_cv or spec.group_column) and not search:
         model_columns = [*spec.input_columns, spec.target_column]
         native_train = (
             native_train.select(model_columns)

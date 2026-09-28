@@ -1,15 +1,18 @@
+{{- $temporal_cv := and (eq .cv_enabled "true") (or (eq .cv_type "time_series_split") (and (eq .cv_type "nested_cv") (eq .cv_nested_type "time_series_split"))) -}}
+{{- $split := .split_strategy -}}
+{{- if $temporal_cv -}}{{- $split = "temporal" -}}{{- end -}}
 {{- $window := .training_window_mode -}}
 {{- if eq $window "auto" -}}
-{{- if eq .split_strategy "temporal" -}}{{- $window = "rolling_calendar" -}}{{- else -}}{{- $window = "full_snapshot" -}}{{- end -}}
+{{- if eq $split "temporal" -}}{{- $window = "rolling_calendar" -}}{{- else -}}{{- $window = "full_snapshot" -}}{{- end -}}
 {{- end -}}
 {
   "config_version": 1,
   "task": "{{.task}}",
   "engine": "{{.engine}}",
-  "split_strategy": "{{.split_strategy}}",
+  "split_strategy": "{{$split}}",
   "training_window_mode": "{{$window}}",
   "window_timezone": {{if eq $window "rolling_calendar"}}"{{.window_timezone}}"{{else}}null{{end}},
-  "holdout_months": {{if and (eq $window "rolling_calendar") (eq .split_strategy "temporal")}}{{.holdout_months}}{{else}}null{{end}},
+  "holdout_months": {{if and (eq $window "rolling_calendar") (eq $split "temporal")}}{{.holdout_months}}{{else}}null{{end}},
   "result_availability_lag_hours": {{if eq .filter_unavailable_results "true"}}{{.result_availability_lag_hours}}{{else}}null{{end}},
   "test_size": {{.test_size}},
   "random_state": {{.random_state}},
@@ -19,7 +22,12 @@
 {{if .cv_inner_folds}}  "cv_inner_folds": {{.cv_inner_folds}},
 {{end}}
   "cv_type": "{{.cv_type}}",
-  "cv_shuffle": {{if eq .cv_type "time_series_split"}}false{{else if eq .cv_type "shuffle_split"}}true{{else}}{{.cv_shuffle}}{{end}},
+  "cv_nested_type": "{{.cv_nested_type}}",
+  "cv_group_column": {{if .cv_group_column}}"{{.cv_group_column}}"{{else}}null{{end}},
+  "cv_gap": {{.cv_gap}},
+  "cv_test_size": {{.cv_test_size}},
+  "cv_max_train_size": {{.cv_max_train_size}},
+  "cv_shuffle": {{if or (eq .cv_type "time_series_split") (and (eq .cv_type "nested_cv") (eq .cv_nested_type "time_series_split"))}}false{{else if eq .cv_type "shuffle_split"}}true{{else}}{{.cv_shuffle}}{{end}},
   "cv_random_state": {{.cv_random_state}},
   "training_sample_rows": {{.training_sample_rows}},
   "training_sample_seed": {{.training_sample_seed}},
@@ -61,6 +69,7 @@
       "strategy": "{{.search_strategy}}",
       "metric": "{{if eq .task "classification"}}{{.classification_search_metric}}{{else}}{{.regression_search_metric}}{{end}}",
       "n_trials": {{.search_n_trials}},
+      "tune_threshold": {{.search_tune_threshold}},
       {{if or (eq .search_strategy "grid") (eq .search_strategy "halving_grid")}}"max_candidates": {{.search_max_candidates}},
       {{end}}
       "timeout": {{if and (eq .search_strategy "optuna") (eq .search_settings "custom")}}{{.search_timeout}}{{else}}null{{end}},

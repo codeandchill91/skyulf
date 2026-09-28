@@ -96,7 +96,11 @@ def fit_local_workflow(
     _validate_training_frames(data, max_rows, max_bytes)
     pipeline = SkyulfPipeline(config)
     pipeline.fit(data, target_column=target_column)
-    save_local_pipeline(pipeline, artifact_path)
+    save_local_pipeline(
+        pipeline,
+        artifact_path,
+        use_tuned_thresholds=bool(config.get("modeling", {}).get("tune_threshold", False)),
+    )
     return load_local_pipeline(artifact_path)
 
 

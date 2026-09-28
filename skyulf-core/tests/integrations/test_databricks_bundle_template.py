@@ -228,9 +228,15 @@ def _render_default_config(record_key="entity_id", risk_category=""):
         risk_category=risk_category,
     )
     content = template.read_text(encoding="utf-8")
-    content = content[content.index("{\n") :].replace("{{$window}}", "full_snapshot")
+    content = (
+        content[content.index("{\n") :]
+        .replace("{{$window}}", "full_snapshot")
+        .replace("{{$split}}", "random")
+    )
     content = content.replace(
-        '{{if eq .cv_type "time_series_split"}}false{{else if eq .cv_type "shuffle_split"}}true{{else}}{{.cv_shuffle}}{{end}}',
+        '{{if or (eq .cv_type "time_series_split") '
+        '(and (eq .cv_type "nested_cv") (eq .cv_nested_type "time_series_split"))}}false'
+        '{{else if eq .cv_type "shuffle_split"}}true{{else}}{{.cv_shuffle}}{{end}}',
         "true",
     )
     # This lightweight resolver checks non-model defaults. The actual Go CLI
@@ -242,7 +248,7 @@ def _render_default_config(record_key="entity_id", risk_category=""):
         flags=re.DOTALL,
     )
     content = content.replace(
-        '{{if and (eq $window "rolling_calendar") (eq .split_strategy "temporal")}}'
+        '{{if and (eq $window "rolling_calendar") (eq $split "temporal")}}'
         "{{.holdout_months}}{{else}}null{{end}}",
         "null",
     ).replace(
@@ -261,6 +267,7 @@ def _render_default_config(record_key="entity_id", risk_category=""):
         "result_time_format",
         "result_time_timezone",
         "event_column",
+        "cv_group_column",
         "result_available_at_column",
         "start",
         "holdout_start",

@@ -177,22 +177,25 @@ def test_invalid_inner_folds_fail_before_any_fit(inner: Any) -> None:
         )
 
 
-def test_nested_threshold_selection_is_not_silently_excluded() -> None:
-    """An unevaluated threshold-selection procedure must not masquerade as nested evidence."""
+def test_nested_threshold_selection_rejects_regression() -> None:
+    """Binary threshold selection must reject regression instead of silently excluding it."""
     X, y = regression_rows()
-    with pytest.raises(ValueError, match="tune_threshold"):
+    with pytest.raises(ValueError, match="binary classification"):
         TuningCalculator(NodeRegistry.get_calculator("ridge_regression")()).fit(
-            X, y, TuningConfig(cv_type="nested_cv", tune_threshold=True)
+            X, y, TuningConfig(cv_type="nested_cv", tune_threshold=True, metric="r2")
         )
 
 
-def test_nonfinite_outer_fold_rejects_the_whole_evaluation() -> None:
+def test_nonfinite_outer_fold_rejects_the_whole_evaluation(monkeypatch) -> None:
     """A mean over surviving outer folds would overstate a failed selection procedure."""
     X, y = regression_rows()
+    monkeypatch.setattr(
+        "skyulf.modeling._tuning.nested.fit_and_score_candidate_fold", lambda **kwargs: float("nan")
+    )
     with pytest.raises(ValueError, match="outer fold 1 failed"):
         TuningCalculator(NodeRegistry.get_calculator("ridge_regression")()).fit(
-            X.head(6),
-            y.head(6),
+            X,
+            y,
             TuningConfig(
                 strategy="grid",
                 metric="r2",

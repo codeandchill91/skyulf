@@ -50,6 +50,7 @@ def build_training_evidence(
         "training_rows": attrs["training_rows"],
         "holdout_rows": len(heldout),
         "filter_counts": attrs["pre_split_filter_counts"],
+        **({"group_split": attrs["group_split"]} if "group_split" in attrs else {}),
     }
 
 

@@ -59,7 +59,7 @@ def prepare_dataset(store: _PhaseStore, spec: training.LocalTrainingSpec) -> dic
         frame,
         spec,
         engine=config["engine"],
-        keep_training_event=cv.enabled and cv.method == "time_series_split",
+        keep_training_event=cv.enabled and cv.temporal,
     )
     return {
         "split_strategy": spec.split_strategy,

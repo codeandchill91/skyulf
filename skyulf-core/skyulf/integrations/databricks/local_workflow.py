@@ -40,6 +40,7 @@ from .local_incremental import run_incremental_local_batch
 from .local_retraining import (
     LocalCandidateResult,
     LocalTrainingSpec,
+    _validate_cv_holdout_policy,
     read_training_snapshot,
     split_labeled_snapshot,
     train_local_candidate,
@@ -247,6 +248,7 @@ def _training_spec(config: dict[str, Any]) -> LocalTrainingSpec:
         holdout_start=_optional_boundary(config, "holdout_start"),
         cutoff=_optional_boundary(config, "cutoff"),
         event_column=config.get("event_column"),
+        group_column=config.get("cv_group_column"),
         filter_unavailable_results=config.get("filter_unavailable_results", False),
         result_available_at_column=config.get("result_available_at_column"),
         result_cutoff=_optional_boundary(config, "result_cutoff"),
@@ -390,6 +392,7 @@ def _training_settings(config: dict[str, Any], now: datetime) -> dict[str, Any]:
 def _resolve_training_spec(spark: Any, config: dict[str, Any], now: datetime) -> LocalTrainingSpec:
     """Pin an explicit or latest snapshot once, using the configured data window."""
     spec = _training_spec(_training_settings(config, now))
+    _validate_cv_holdout_policy(spec, LocalCVSpec.from_workflow(config))
     if config.get("training_version") is not None:
         return spec
     table = spec.table

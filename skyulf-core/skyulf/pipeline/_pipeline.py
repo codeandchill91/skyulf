@@ -19,8 +19,10 @@ from ..data.dataset import SplitDataset
 from ..engines import SkyulfDataFrame, get_engine
 from ..leakage import OnLeakage, validate_leakage_safety
 from ..modeling._evaluation.thresholds import apply_thresholds, optimize_thresholds
+from ..modeling._tuning.cv_policy import validate_holdout_metadata
 from ..modeling._tuning.engine import TuningApplier, TuningCalculator
 from ..modeling._tuning.refit import tune_decision_thresholds
+from ..modeling._tuning.schemas import TuningConfig
 from ..modeling.base import BaseModelApplier, BaseModelCalculator, StatefulEstimator, extract_xy
 from ..preprocessing.base import BaseApplier, apply_method
 from ..preprocessing.fold_adapter import FeatureEngineerFoldAdapter
@@ -113,6 +115,42 @@ def _merge_preprocessing_metrics(
         "rows_out": after["rows_out"] if suffix["steps"] else before["rows_out"],
     }
     return {"summary": summary, "steps": steps, **summary}
+
+
+def _validate_tuning_holdouts(
+    dataset: SplitDataset,
+    train_features: Any,
+    config: TuningConfig,
+    problem_type: str,
+    target_column: str,
+) -> None:
+    """Check all reserved raw partitions before fitting preprocessing or models."""
+    for heldout in (dataset.test, dataset.validation):
+        if StatefulEstimator._is_non_empty_split(heldout):
+            validate_holdout_metadata(
+                train_features, extract_xy(heldout, target_column)[0], config, problem_type
+            )
+
+
+def _tune_pipeline_holdout_threshold(
+    calculator: TuningCalculator,
+    artifact: Any,
+    config: TuningConfig,
+    validation: Any,
+    target_column: str,
+) -> None:
+    """Retain training-only nested thresholds while preserving ordinary holdout tuning."""
+    if not config.tune_threshold or (config.cv_enabled and config.cv_type == "nested_cv"):
+        return
+    model, result = artifact
+    validation_xy = (
+        extract_xy(validation, target_column)
+        if StatefulEstimator._is_non_empty_split(validation)
+        else None
+    )
+    tune_decision_thresholds(
+        calculator.model_calculator, model, result, config, validation_xy, None
+    )
 
 
 class SkyulfPipeline:
@@ -257,14 +295,20 @@ class SkyulfPipeline:
             raise RuntimeError("The tuning pipeline requires a tuning calculator.")
         calculator = estimator.calculator
         tuning_config = calculator._build_tuning_config(cast(dict[str, Any], self.modeling_config))
+        _validate_tuning_holdouts(
+            raw_dataset, raw_train[0], tuning_config, calculator.problem_type, target_column
+        )
+        nested = tuning_config.cv_enabled and tuning_config.cv_type == "nested_cv"
         estimator.model = calculator.fit(
             raw_train[0],
             raw_train[1],
-            replace(tuning_config, tune_threshold=False),
+            tuning_config if nested else replace(tuning_config, tune_threshold=False),
             preprocessing=adapter,
             validation_data=raw_validation,
             validation_frames=raw_validation,
         )
+        if nested:
+            self._tuned_thresholds = estimator.model[1].decision_thresholds
         if adapter._engineer is None or adapter.training_payload is None:
             raise RuntimeError("The tuner did not produce fitted preprocessing.")
 
@@ -280,18 +324,9 @@ class SkyulfPipeline:
             test=self._transform_tuning_split(adapter, raw_dataset.test, target_column),
             validation=self._transform_tuning_split(adapter, raw_dataset.validation, target_column),
         )
-        if tuning_config.tune_threshold:
-            model, tuning_result = estimator.model
-            tune_decision_thresholds(
-                calculator.model_calculator,
-                model,
-                tuning_result,
-                tuning_config,
-                extract_xy(transformed.validation, target_column)
-                if StatefulEstimator._is_non_empty_split(transformed.validation)
-                else None,
-                None,
-            )
+        _tune_pipeline_holdout_threshold(
+            calculator, estimator.model, tuning_config, transformed.validation, target_column
+        )
         return transformed, _merge_preprocessing_metrics(
             prefix_metrics, adapter.metrics, prefix_length
         )

@@ -104,6 +104,8 @@ def tuning_evidence(artifact: LocalPipelineArtifact) -> dict[str, Any] | None:
         "best_score": result.best_score,
         "best_params": _json_value(result.best_params),
         "n_trials": result.n_trials,
+        "decision_thresholds": _json_value(result.decision_thresholds),
+        "decision_threshold_metric": result.decision_threshold_metric,
         "trials": trials,
     }
     if getattr(result, "nested_cv", None) is not None:
@@ -132,6 +134,8 @@ def post_selection_cv(
     assert evidence is not None
     if evidence.get("nested_cv") is not None:
         return evidence["nested_cv"]
+    if cv.nested_type != "auto":
+        raise ValueError("Fitted search lacks evidence for the requested nested split policy.")
     selected = dict(modeling["base_model"])
     selected["params"] = {**selected.get("params", {}), **evidence["best_params"]}
     selected["params"].pop("tune_base_models", None)

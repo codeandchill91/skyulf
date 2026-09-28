@@ -284,3 +284,12 @@ it('opens best-parameter history in advanced mode', async () => {
   expect(jobsApi.getTuningHistory).toHaveBeenCalledWith('random_forest_classifier');
   expect(screen.queryByRole('button', { name: 'Apply' })).not.toBeInTheDocument();
 });
+
+/** Nested chronology needs visible window settings and permits training-only thresholds. */
+it('shows nested temporal policy and window controls', async () => {
+  await renderSettings({ run_mode: 'advanced', cv_enabled: true, cv_type: 'nested_cv', cv_nested_type: 'time_series_split', cv_time_column: 'created', cv_shuffle: false, tune_threshold: true, search_space: { max_depth: [2] } });
+  fireEvent.click(screen.getByRole('button', { name: 'Cross Validation' }));
+  expect(screen.getByRole('combobox', { name: 'Nested split policy' })).toHaveValue('time_series_split');
+  expect(screen.getByRole('spinbutton', { name: 'Gap (rows)' })).toHaveValue(0);
+  expect(screen.getByRole('button', { name: 'Tune model' })).toBeEnabled();
+});

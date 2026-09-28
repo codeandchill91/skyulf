@@ -190,17 +190,30 @@ def _bind_search_time(
     modeling: dict[str, Any], cv: "LocalCVSpec", problem_type: str, event_column: str | None
 ) -> None:
     """Validate splitter compatibility and bind authoritative temporal metadata."""
-    if cv.method == "stratified_k_fold" and problem_type != "classification":
-        raise ValueError("Stratified CV requires a classification model.")
-    if cv.method == "time_series_split" and (not cv.enabled or not event_column):
-        raise ValueError("Time-series search requires enabled CV and an event_column.")
+    _validate_search_split_policy(cv, problem_type, event_column)
     requested_time = modeling.get("cv_time_column")
-    if cv.method == "time_series_split":
+    if cv.temporal:
         if requested_time is not None and requested_time != event_column:
             raise ValueError("cv_time_column must match the shared event_column.")
         modeling["cv_time_column"] = event_column
     elif requested_time is not None:
         raise ValueError("cv_time_column is only used by time_series_split.")
+
+
+def _validate_search_split_policy(
+    cv: "LocalCVSpec", problem_type: str, event_column: str | None
+) -> None:
+    """Reject task and enabled-state conflicts before binding time metadata."""
+    method = cv.nested_type if cv.method == "nested_cv" else cv.method
+    if (
+        method in {"stratified_k_fold", "stratified_group_k_fold"}
+        and problem_type != "classification"
+    ):
+        raise ValueError("Stratified CV requires a classification model.")
+    if cv.group_column and not cv.enabled:
+        raise ValueError("Group search requires enabled CV.")
+    if cv.temporal and (not cv.enabled or not event_column):
+        raise ValueError("Time-series search requires enabled CV and an event_column.")
 
 
 def _bind_shared_cv(modeling: dict[str, Any], cv: "LocalCVSpec") -> None:
@@ -211,6 +224,11 @@ def _bind_shared_cv(modeling: dict[str, Any], cv: "LocalCVSpec") -> None:
         "cv_type": cv.method,
         "cv_shuffle": cv.shuffle,
         "cv_random_state": cv.random_state,
+        "cv_nested_type": cv.nested_type,
+        "cv_group_column": cv.group_column,
+        "cv_gap": cv.gap,
+        "cv_test_size": cv.test_size,
+        "cv_max_train_size": cv.max_train_size,
     }
     if cv.inner_folds is not None or "cv_inner_folds" in modeling:
         shared["cv_inner_folds"] = cv.inner_folds
@@ -236,6 +254,8 @@ def _validate_strategy(
     if type(max_candidates) is not int or not 1 <= max_candidates <= 10_000:
         raise ValueError("max_candidates must be an integer from 1 to 10000.")
     _validate_strategy_options(modeling, strategy, calculator)
+    if modeling.get("tune_threshold") and calculator.problem_type != "classification":
+        raise ValueError("tune_threshold requires binary classification.")
     seed = _validate_search_execution(modeling)
     _validate_metric(modeling.get("metric"), calculator.problem_type)
     modeling.update(
@@ -246,8 +266,11 @@ def _validate_strategy(
 
 def _validate_search_execution(modeling: dict[str, Any]) -> int:
     """Validate threshold, worker and seed controls before metric validation."""
-    if modeling.get("tune_threshold", False) is not False:
-        raise ValueError("tune_threshold is not supported by this search.")
+    threshold = modeling.get("tune_threshold", False)
+    if type(threshold) is not bool:
+        raise ValueError("tune_threshold must be boolean.")
+    if threshold and (modeling.get("cv_type") != "nested_cv" or not modeling.get("cv_enabled")):
+        raise ValueError("tune_threshold is supported only by nested_cv search.")
     if modeling.get("n_jobs", 1) != 1 or type(modeling.get("n_jobs", 1)) is not int:
         raise ValueError("n_jobs must be 1 to avoid nested parallel fits.")
     seed = modeling.get("random_state", 42)
@@ -457,5 +480,6 @@ def prepare_search_pipeline(
     modeling["search_space"] = _prepare_space(
         modeling, selected, calculator, strategy, max_candidates
     )
-    modeling.update({"n_jobs": 1, "tune_threshold": False})
+    modeling["n_jobs"] = 1
+    modeling.setdefault("tune_threshold", False)
     return prepared

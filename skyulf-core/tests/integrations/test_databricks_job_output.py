@@ -170,7 +170,7 @@ def test_notebook_renders_summary_and_preserves_machine_result(
     assert json.loads(notebook.exit.call_args.args[0])["result"] == {"noop": True}
 
 
-@pytest.mark.parametrize("entrypoint", ["workflow.py", "score.py"])
+@pytest.mark.parametrize("entrypoint", ["training_report.py", "score.py"])
 def test_generated_notebook_keeps_report_and_exit_in_separate_cells(entrypoint):
     """Databricks replaces same-cell output on exit, so the report needs its own cell."""
     from pathlib import Path
@@ -183,7 +183,7 @@ def test_generated_notebook_keeps_report_and_exit_in_separate_cells(entrypoint):
     cells = path.read_text().split("# COMMAND ----------")
     assert len(cells) == 2
     expected_call = (
-        "run_lifecycle_notebook(" if entrypoint == "workflow.py" else "run_score_notebook("
+        "run_lifecycle_notebook(" if entrypoint == "training_report.py" else "run_score_notebook("
     )
     assert "exit_notebook=False" in cells[0] and expected_call in cells[0]
     assert ".notebook.exit(output)" in cells[1]

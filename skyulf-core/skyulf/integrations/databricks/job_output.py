@@ -99,16 +99,32 @@ def _nested_search_output(tuning: dict[str, Any]) -> list[str]:
                 ("Outer score std", nested["std_score"]),
                 ("Metric", nested["scoring_metric"]),
                 ("Total search trials", nested["total_trials"]),
+                ("Split policy", json.dumps(nested.get("split_policy", {}), sort_keys=True)),
+                (
+                    "Final decision thresholds",
+                    json.dumps(tuning.get("decision_thresholds"), sort_keys=True),
+                ),
+                ("Threshold metric", tuning.get("decision_threshold_metric")),
             ],
         ),
         _table(
-            ("Fold", "Inner best score", "Outer score", "Selected parameters"),
+            (
+                "Fold",
+                "Inner best score",
+                "Outer score",
+                "Selected parameters",
+                "Decision thresholds",
+            ),
             [
                 (
                     fold["fold"],
                     fold["inner_best_score"],
                     fold["outer_score"],
                     json.dumps(fold["best_params"], sort_keys=True),
+                    json.dumps(
+                        fold.get("threshold_selection", {}).get("decision_thresholds"),
+                        sort_keys=True,
+                    ),
                 )
                 for fold in nested["folds"]
             ],

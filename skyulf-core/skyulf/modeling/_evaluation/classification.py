@@ -30,8 +30,10 @@ def evaluate_classification_model(
     X_train: pd.DataFrame | SkyulfDataFrame | None = None,
     y_train: pd.Series | Any | None = None,
     dataset_name: str = "test",
+    *,
+    predictions: Any | None = None,
 ) -> ModelEvaluationReport:
-    """Evaluate a classification model and return a structured report."""
+    """Evaluate classification, reusing supplied deployed predictions when available."""
     # Convert to Numpy for compatibility
     X_test_np, y_test_np = SklearnBridge.to_sklearn((X_test, y_test), validate_features=True)
 
@@ -40,7 +42,7 @@ def evaluate_classification_model(
     # recomputed inside calculate_classification_metrics too).
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*valid feature names.*")
-        y_pred = model.predict(X_test_np)
+        y_pred = _evaluation_predictions(model, X_test_np, predictions)
     y_prob = None
     if hasattr(model, "predict_proba"):
         try:
@@ -172,3 +174,10 @@ def _compute_confusion_matrix(
     matrix_data = cm.tolist()
 
     return ConfusionMatrixData(labels=labels, matrix=matrix_data)
+
+
+def _evaluation_predictions(model: Any, X: Any, predictions: Any | None) -> Any:
+    """Preserve the deployed decision rule without changing probability-based metrics."""
+    if predictions is None:
+        return model.predict(X)
+    return np.asarray(predictions)

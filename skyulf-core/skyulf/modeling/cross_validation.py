@@ -87,6 +87,13 @@ def perform_cross_validation(
     progress_callback: Callable[[int, int], None] | None = None,
     log_callback: Callable[[str], None] | None = None,
     preprocessing: "FoldPreprocessor | None" = None,
+    *,
+    cv_nested_type: str = "auto",
+    group_column: str | None = None,
+    gap: int = 0,
+    test_size: int | None = None,
+    max_train_size: int | None = None,
+    inner_folds: int | None = None,
 ) -> dict[str, Any]:
     """Performs K-Fold cross-validation.
 
@@ -101,6 +108,12 @@ def perform_cross_validation(
         shuffle: Whether to shuffle data before splitting (for KFold/Stratified).
         random_state: Random seed for shuffling.
         time_column: Optional column name for sorting when using time_series_split.
+        cv_nested_type: Explicit nested split policy; auto retains task defaults.
+        group_column: Split-only entity identifier excluded from model features.
+        gap: Number of omitted rows between temporal training and validation.
+        test_size: Optional row count per temporal validation fold.
+        max_train_size: Optional rolling training window row limit.
+        inner_folds: Optional fold count for explicit nested policies.
         progress_callback: Optional callback(current_fold, total_folds).
         log_callback: Optional callback for logging messages.
         preprocessing: Optional per-fold preprocessor (F-15). When given, it is
@@ -111,6 +124,33 @@ def perform_cross_validation(
     Returns:
         Dict containing aggregated metrics and per-fold details.
     """
+    from ._policy_cv import (  # noqa: PLC0415 - avoid tuning import cycle
+        perform_policy_cv,
+        policy_config,
+    )
+    from ._tuning.cv_policy import (  # noqa: PLC0415 - avoid tuning import cycle
+        uses_explicit_policy,
+    )
+
+    policy = policy_config(
+        cv_type,
+        n_folds,
+        shuffle,
+        random_state,
+        time_column,
+        {
+            "cv_nested_type": cv_nested_type,
+            "group_column": group_column,
+            "gap": gap,
+            "test_size": test_size,
+            "max_train_size": max_train_size,
+            "inner_folds": inner_folds,
+        },
+    )
+    if uses_explicit_policy(policy):
+        return perform_policy_cv(
+            calculator, X, y, config, policy, preprocessing, log_callback, progress_callback
+        )
     problem_type = calculator.problem_type
 
     if log_callback:

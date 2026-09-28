@@ -89,6 +89,23 @@ search selects the saved model. Each search gets the configured trial/time
 budget. Outer evaluation and final-search scores are reported separately.
 The final holdout is reserved for model comparison.
 
+`cv_nested_type` chooses `auto`, `k_fold`, `stratified_k_fold`,
+`time_series_split`, `group_k_fold` or `stratified_group_k_fold` at both nested
+levels. Temporal CV uses `event_column` and `cv_shuffle: false`; `cv_gap`,
+`cv_test_size` and `cv_max_train_size` are row counts (null maximum expands the
+training window). Nested temporal CV requires a temporal final holdout. Missing
+times and timestamps tied across fold boundaries fail explicitly.
+
+Group CV uses `cv_group_column` only as split metadata. Keep it out of
+`input_columns`. Random final holdout splits whole groups; set `stratify: false`.
+A temporal final holdout must also have disjoint groups. Missing groups fail.
+
+For binary nested search, set `pipeline.modeling.tune_threshold: true` to select
+thresholds from inner out-of-fold probabilities. Outer and final holdout labels
+remain untouched. The saved artifact applies the independent final threshold;
+`tuning.json` and the readable results retain threshold evidence. Models without
+probabilities and multiclass threshold tuning fail explicitly.
+
 The preprocessing and tuning recipes start empty; `ensemble.py` has disabled
 examples to adapt. Keep
 `pipeline.preprocessing` empty in JSON. Put custom classes in the same Python

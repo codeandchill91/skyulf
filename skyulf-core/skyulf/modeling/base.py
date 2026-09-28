@@ -262,9 +262,46 @@ class StatefulEstimator:
         progress_callback: Callable[[int, int], None] | None = None,
         log_callback: Callable[[str], None] | None = None,
         preprocessing: FoldPreprocessor | None = None,
+        *,
+        cv_nested_type: str = "auto",
+        group_column: str | None = None,
+        gap: int = 0,
+        test_size: int | None = None,
+        max_train_size: int | None = None,
+        inner_folds: int | None = None,
     ) -> dict[str, Any]:
         """Performs cross-validation on the training split."""
         X_train, y_train = self._extract_xy(dataset.train, target_column)
+        from ._policy_cv import (  # noqa: PLC0415 - avoid tuning import cycle
+            policy_config,
+        )
+        from ._tuning.cv_policy import (  # noqa: PLC0415 - avoid tuning import cycle
+            validate_holdout_metadata,
+        )
+
+        policy = policy_config(
+            cv_type,
+            n_folds,
+            shuffle,
+            random_state,
+            time_column,
+            {
+                "cv_nested_type": cv_nested_type,
+                "group_column": group_column,
+                "gap": gap,
+                "test_size": test_size,
+                "max_train_size": max_train_size,
+                "inner_folds": inner_folds,
+            },
+        )
+        for heldout in (dataset.test, dataset.validation):
+            if self._is_non_empty_split(heldout):
+                validate_holdout_metadata(
+                    X_train,
+                    self._extract_xy(heldout, target_column)[0],
+                    policy,
+                    self.calculator.problem_type,
+                )
 
         return perform_cross_validation(
             calculator=self.calculator,
@@ -280,6 +317,12 @@ class StatefulEstimator:
             progress_callback=progress_callback,
             log_callback=log_callback,
             preprocessing=preprocessing,
+            cv_nested_type=cv_nested_type,
+            group_column=group_column,
+            gap=gap,
+            test_size=test_size,
+            max_train_size=max_train_size,
+            inner_folds=inner_folds,
         )
 
     @staticmethod
@@ -537,6 +580,7 @@ class StatefulEstimator:
         if problem_type != "clustering" and y is None:
             return None
 
+        X = self._evaluation_features(X)
         y_pred = self.applier.predict(X, self.model)
         model_to_evaluate = self._unwrap_tuned_model()
 
@@ -556,7 +600,9 @@ class StatefulEstimator:
         y_proba = self._predict_proba_payload(X, problem_type)
         evaluation_data["splits"][split_name] = self._build_split_raw_data(y, y_pred, y_proba)
 
-        return self._evaluate_split_with_model(model_to_evaluate, split_name, X, y, problem_type)
+        return self._evaluate_split_with_model(
+            model_to_evaluate, split_name, X, y, problem_type, predictions=y_pred
+        )
 
     @staticmethod
     def _build_split_raw_data(
@@ -570,6 +616,16 @@ class StatefulEstimator:
         if y_proba:
             split_data["y_proba"] = y_proba
         return split_data
+
+    def _evaluation_features(self, X: Any) -> Any:
+        """Exclude persisted split metadata from both predictions and metric evaluation."""
+        from ._tuning.cv_policy import (  # noqa: PLC0415 - avoid tuning import cycle
+            prediction_features,
+        )
+
+        if isinstance(self.model, tuple) and len(self.model) == 2:
+            return prediction_features(X, self.model[1])
+        return X
 
     @staticmethod
     def _build_clustering_split_raw_data(labels: Any, split_report: Any = None) -> dict[str, Any]:
@@ -621,6 +677,8 @@ class StatefulEstimator:
         y: Any,
         problem_type: str,
         reference_column: str = "",
+        *,
+        predictions: Any | None = None,
     ) -> Any:
         """Dispatches to the classification, regression, or clustering evaluator.
 
@@ -630,7 +688,11 @@ class StatefulEstimator:
         """
         if problem_type == "classification":
             return evaluate_classification_model(
-                model=model_to_evaluate, dataset_name=split_name, X_test=X, y_test=y
+                model=model_to_evaluate,
+                dataset_name=split_name,
+                X_test=X,
+                y_test=y,
+                predictions=predictions,
             )
         elif problem_type == "regression":
             return evaluate_regression_model(

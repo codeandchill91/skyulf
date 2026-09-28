@@ -1,17 +1,72 @@
 """End-to-end regressions for fold-isolated preprocessing in the core pipeline."""
 
+from collections import Counter
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+from sklearn.model_selection import GroupKFold, TimeSeriesSplit
 
 from skyulf.data.dataset import SplitDataset
 from skyulf.modeling.base import StatefulEstimator, extract_xy
 from skyulf.pipeline import SkyulfPipeline
 from skyulf.preprocessing.pipeline import FeatureEngineer
 from skyulf.preprocessing.scaling.standard import StandardScalerCalculator
+
+
+@pytest.mark.parametrize("engine", ["pandas", "polars"])
+@pytest.mark.parametrize("policy", ["time_series_split", "group_k_fold"])
+def test_nested_metadata_preserves_exact_preprocessing_membership(monkeypatch, engine, policy):
+    """Every learned scaler must see exactly its own inner/outer/final training rows."""
+    frame = pd.DataFrame(
+        {
+            "row_id": np.arange(96),
+            "value": np.arange(96, dtype=float),
+            "target": np.sin(np.arange(96)) + np.arange(96),
+            "event": pd.date_range("2024-01-01", periods=96),
+            "entity": np.repeat(np.arange(24), 4),
+        }
+    )
+    temporal = policy == "time_series_split"
+    frame = frame.drop(columns="entity" if temporal else "event")
+    observed = []
+    original = StandardScalerCalculator.fit
+
+    def observe(self, data, config):
+        """Record membership while retaining the actual learned scaler implementation."""
+        current = data[0] if isinstance(data, tuple) else data
+        observed.append(tuple(sorted(current["row_id"].to_list())))
+        assert ("event" if temporal else "entity") not in current.columns
+        return original(self, data, config)
+
+    monkeypatch.setattr(StandardScalerCalculator, "fit", observe)
+    config = _tuning_config([_step("scale", "StandardScaler", columns=["value"])])
+    config["modeling"].update(
+        search_space={"alpha": [1.0]},
+        cv_type="nested_cv",
+        cv_nested_type=policy,
+        cv_folds=2,
+        cv_inner_folds=2,
+        cv_shuffle=False,
+        cv_time_column="event" if temporal else None,
+        cv_group_column=None if temporal else "entity",
+    )
+    native = frame if engine == "pandas" else pl.from_pandas(frame)
+    SkyulfPipeline(config).fit(native, target_column="target")
+    groups = None if temporal else frame.entity.to_numpy()
+    outer = TimeSeriesSplit(2) if temporal else GroupKFold(2)
+    expected = []
+    for train, _test in outer.split(frame, groups=groups):
+        inner = TimeSeriesSplit(2) if temporal else GroupKFold(2)
+        for inner_train, _ in inner.split(train, groups=None if groups is None else groups[train]):
+            expected.append(tuple(train[inner_train]))
+        expected.append(tuple(train))
+    for train, _ in outer.split(frame, groups=groups):
+        expected.append(tuple(train))
+    expected.append(tuple(range(96)))
+    assert Counter(observed) == Counter(expected)
 
 
 def _tuning_config(steps: list[dict[str, Any]]) -> dict[str, Any]:

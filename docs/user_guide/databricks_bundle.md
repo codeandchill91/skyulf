@@ -370,7 +370,8 @@ when Core fits the model; offline preview validates structure and budgets.
 Training is sequential (`n_jobs=1`). Grid admission fails if the full space exceeds
 the configured limit; it does not truncate it. Optuna requires its optional sklearn
 integration. Its timeout is a soft search deadline and cannot interrupt an active
-model fit. Decision-threshold tuning is not enabled by this adapter.
+model fit. Nested binary search can select a decision threshold from training-only
+inner out-of-fold predictions with `pipeline.modeling.tune_threshold: true`.
 
 Edit shared CV settings in the generated configuration:
 
@@ -394,7 +395,8 @@ supported; their CV evaluates independent fixed-parameter models.
 - `cv_folds` supports 2 through 20; each fold needs at least two training and
   validation rows. Stratified CV requires classification and at least as many
   training rows per class as folds.
-- Methods: `k_fold`, `stratified_k_fold`, `shuffle_split`, `time_series_split`, `nested_cv`.
+- Methods: `k_fold`, `stratified_k_fold`, `shuffle_split`, `time_series_split`,
+  `group_k_fold`, `stratified_group_k_fold`, `nested_cv`.
   Shuffle Split uses Core's 20% validation proportion and requires shuffle.
 - Time-series CV requires an explicit selected window with `event_column` and
   `cv_shuffle: false`. Its normalized timestamps order the folds and are removed
@@ -412,10 +414,41 @@ supported; their CV evaluates independent fixed-parameter models.
   selected parameters and aggregate mean/std separately from the final search
   score. Ordinary fixed-model configurations retain Core's stability diagnostics;
   historical artifacts without nested search evidence remain labeled diagnostic.
-  Nested tuning uses stratified folds for classification and K-fold for regression;
-  temporal/group nested splitters are not included. Combining it with
-  `tune_threshold: true` fails explicitly because threshold selection is not yet
-  evaluated independently within the outer folds.
+  `cv_nested_type: "auto"` uses stratified classification folds and regression
+  K-fold. Explicit policies are `k_fold`, `stratified_k_fold`, `time_series_split`,
+  `group_k_fold` and `stratified_group_k_fold`.
+- Temporal policies use `cv_gap` (default 0), `cv_test_size` and
+  `cv_max_train_size` (both default null) as **row counts** at both nested levels
+  and the separate final search. Null maximum training size expands the window;
+  an integer rolls it. Nested temporal CV requires a temporal final holdout.
+  Events are stable-sorted; missing times and ties across fold boundaries fail.
+- Group policies require `cv_group_column`, excluded from model inputs. The
+  final random holdout selects whole groups using the saved split seed;
+  `test_size` is the held-out proportion of groups. Set `stratify: false` for
+  this final split. A temporal final holdout must also have disjoint groups.
+  Missing group identities, insufficient groups and missing classes fail before
+  fitting. Row filtering and staged Parquet retain aligned group/time metadata.
+- Nested binary classification supports `pipeline.modeling.tune_threshold: true`
+  (initializer: `search_tune_threshold: "true"`). Each selected recipe generates
+  inner out-of-fold probabilities for its threshold. Outer labels and final
+  holdout labels never select thresholds. Ranking/probability scores still use
+  probabilities. Multiclass and models without probabilities fail explicitly.
+  `tuning.json` saves fold thresholds, provenance and the independent final
+  threshold; saved artifact predictions apply that threshold by default.
+  This decision threshold is distinct from the promotion quality threshold.
+
+During initialization, CV method/policy questions precede the data-window questions.
+Choosing ordinary or nested temporal CV fixes the generated final split to
+`temporal`, hides the random split and shuffle/seed questions, and opens the
+clock/window questions. With the default window mode, this produces a rolling
+calendar holdout. Explicit fixed-window settings still retain their date pins.
+Group and non-temporal CV preserve the chosen final split. These initializer
+rules do not rewrite an existing `config/workflow.json`.
+
+Initializer examples: `templates/databricks/examples/nested-temporal-init.example.json`
+and `templates/databricks/examples/nested-group-threshold-init.example.json`.
+These settings keep the existing two jobs and graph contract 3. Local tests do
+not establish cloud acceptance; record actual Databricks run evidence separately.
 
 MLflow stores `cross_validation.json` with fold results, aggregate metrics,
 source/split dataset identity and engine. Ordinary CV includes fold-refit counts
