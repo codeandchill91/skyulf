@@ -16,6 +16,7 @@ from .admission import PublishAdmission, validate_admission
 from .batch import _manifest
 from .delta import history, publish_replace_period, table_identity
 from .local_batch import LocalSourceSpec, score_local_source
+from .local_history import bind_period_history, prediction_history
 from .local_sdk import LocalWorkflowConfig, PreparedLocalWorkflow
 
 _OUTPUT_TYPES = {"float64": "double", "int64": "long", "string": "string", "bool": "boolean"}
@@ -91,6 +92,7 @@ def run_local_batch(
     spec: BatchSpec,
     *,
     admission: PublishAdmission | None,
+    history_state: dict[str, Any] | None = None,
 ) -> BatchResult:
     """Score one pinned month locally and publish only its final rows to Delta."""
     admission = _validate_request(spark, source, prepared, spec, admission)
@@ -106,7 +108,8 @@ def run_local_batch(
     )
     if snapshot is None or snapshot.committed_us > int(spec.as_of_utc.timestamp() * 1_000_000):
         raise ValueError("Source snapshot was not available at as_of or its history expired.")
-    scored = score_local_source(spark, source, prepared)
+    with prediction_history(prepared, history_state) as temporal_session:
+        scored = score_local_source(spark, source, prepared)
     count = len(scored.predictions)
     if count == 0 and not spec.allow_empty:
         raise ValueError("Empty period replacement requires allow_empty=True.")
@@ -130,6 +133,7 @@ def run_local_batch(
     output = bridge.join(source_period, on=list(source.record_key_columns), how="inner")
     output = _complete_local_output(output, target, spec, functions, count)
     manifest = _manifest(spec, source_id, source.table, snapshot.committed_us, count, count)
+    manifest = bind_period_history(manifest, temporal_session, history_state)
     committed_version, recorded, replayed = publish_replace_period(
         spark, output, spec, manifest=manifest, admission=admission
     )

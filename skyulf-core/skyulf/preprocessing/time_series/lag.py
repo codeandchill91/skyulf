@@ -1,7 +1,7 @@
 """Lag features: shift columns by N rows to expose past values to the model."""
 
 from numbers import Integral
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -21,6 +21,8 @@ from ._common import (
     sort_with_positions_pandas,
     sort_with_positions_polars,
 )
+from ._history_apply import apply_history
+from ._history_state import fit_history
 
 
 def _lag_name(col: str, lag: int) -> str:
@@ -44,6 +46,8 @@ def _polars_lag_exprs(
 
 def _apply_polars(X: Any, _y: Any, params: dict[str, Any]) -> tuple[Any, Any]:
     """Add lag features and filter X/y by the same null-or-NaN keep positions."""
+    if params.get("history_mode") == "carry":
+        return apply_history(X, _y, params, _apply_polars)
     columns: list[str] = params.get("columns", [])
     lags: list[int] = params.get("lags", [])
     if not columns or not lags:
@@ -54,7 +58,14 @@ def _apply_polars(X: Any, _y: Any, params: dict[str, Any]) -> tuple[Any, Any]:
     exprs = _polars_lag_exprs(columns, list(X_out.columns), lags, params.get("group_by") or None)
     if exprs:
         X_out = X_out.with_columns(exprs)
-    if params.get("drop_na") and X_out.columns:
+    if params.get("drop_na"):
+        return _drop_missing_polars(X_out, _y)
+    return X_out, _y
+
+
+def _drop_missing_polars(X_out: Any, _y: Any) -> tuple[Any, Any]:
+    """Drop incomplete observations while retaining their paired target positions."""
+    if X_out.columns:
         missing = [pl.col(c).is_null() for c in X_out.columns]
         missing.extend(pl.col(c).is_nan() for c, dtype in X_out.schema.items() if dtype.is_float())
         keep = X_out.select(~pl.any_horizontal(missing)).to_series().arg_true()
@@ -75,6 +86,8 @@ def _pandas_lag_column(df: Any, col: str, lags: list[int], group_by: list[str] |
 
 
 def _apply_pandas(X: Any, _y: Any, params: dict[str, Any]) -> tuple[Any, Any]:
+    if params.get("history_mode") == "carry":
+        return apply_history(X, _y, params, _apply_pandas)
     columns: list[str] = params.get("columns", [])
     lags: list[int] = params.get("lags", [])
     group_by: list[str] | None = params.get("group_by") or None
@@ -122,10 +135,10 @@ class LagFeaturesApplier(BaseApplier):
     learns_from_data=False,
 )
 class LagFeaturesCalculator(BaseCalculator):
-    """Save lag configuration, not training history.
+    """Save lag configuration and optional bounded training history.
 
-    Apply uses only rows in the supplied frame. Callers must supply correctly
-    ordered, prediction-time-available history and the appropriate entity groups.
+    Default batch mode uses only supplied rows. Explicit carry mode seeds future
+    batches from training observations, without mutating the artifact on apply.
     """
 
     def fit(
@@ -134,7 +147,7 @@ class LagFeaturesCalculator(BaseCalculator):
         config: dict[str, Any],
     ) -> LagFeaturesArtifact:
         """Record the columns, deduplicated positive lags, and sort/group/drop settings."""
-        return {
+        params: dict[str, Any] = {
             "type": "lag_features",
             "columns": config.get("columns", []),
             "lags": coerce_lags(config.get("lags", [1])),
@@ -142,6 +155,14 @@ class LagFeaturesCalculator(BaseCalculator):
             "sort_by": config.get("sort_by"),
             "drop_na": bool(config.get("drop_na", False)),
         }
+        return cast(
+            LagFeaturesArtifact, fit_history(df, config, params, max(params["lags"], default=0))
+        )
+
+    def fit_transform_train(self, df: Any, config: dict[str, Any]) -> tuple[Any, Any]:
+        """Save the training tail while computing training lags without future context."""
+        params = self.fit(df, config)
+        return params, LagFeaturesApplier().apply(df, dict(params) | {"_history_training": True})
 
     def infer_output_schema(
         self, input_schema: SkyulfSchema, config: dict[str, Any]

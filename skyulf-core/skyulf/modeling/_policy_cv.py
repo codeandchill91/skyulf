@@ -46,7 +46,7 @@ def perform_policy_cv(
     """Evaluate fixed parameters under the same verified boundaries as tuning."""
     if policy.cv_type == "nested_cv":
         return _fixed_nested(calculator, X, y, model_config, policy, preprocessing, log_callback)
-    X, y, metadata = prepare_policy_data(X, y, policy, calculator.problem_type)
+    X, y, metadata = prepare_policy_data(X, y, policy, calculator.problem_type, preprocessing)
     cv = policy_splitter(policy, calculator.problem_type, y, metadata)
     folds = []
     for index, (train, test) in enumerate(cv.split(X, y)):

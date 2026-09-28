@@ -14,6 +14,7 @@ from sklearn.model_selection import (
     TimeSeriesSplit,
 )
 
+from .history_policy import retain_history_metadata
 from .schemas import TuningConfig
 
 GROUP_METHODS = {"group_k_fold", "stratified_group_k_fold"}
@@ -82,17 +83,22 @@ def _drop_column(X: Any, column: str | None) -> Any:
 
 
 def prepare_policy_data(
-    X: Any, y: Any, config: TuningConfig, problem_type: str
+    X: Any,
+    y: Any,
+    config: TuningConfig,
+    problem_type: str,
+    preprocessing: Any = None,
 ) -> tuple[Any, Any, dict[str, np.ndarray]]:
     """Separate split metadata, stably align chronological rows, and retain raw labels."""
     method = effective_cv_type(config, problem_type)
     validate_policy(config, problem_type)
+    retain_time = retain_history_metadata(preprocessing, method, config.cv_time_column)
     if len(X) != len(y):
         raise ValueError("CV features and labels must have identical row counts.")
     if method == "time_series_split":
         times = _times(X, config.cv_time_column)
         order = np.argsort(times, kind="stable")
-        features = _drop_column(X, config.cv_time_column)
+        features = X if retain_time else _drop_column(X, config.cv_time_column)
         return take_rows(features, order), take_rows(y, order), {"times": times[order]}
     if method in GROUP_METHODS:
         groups = _column(X, config.cv_group_column, "group")

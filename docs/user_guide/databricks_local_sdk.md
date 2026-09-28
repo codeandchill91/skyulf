@@ -519,6 +519,68 @@ The target receipt is in the same Delta commit as the predictions. This
 protects participating writers only; changes outside the admission protocol
 must be handled explicitly.
 
+## Lag and rolling history across batches
+
+`LagFeatures` and `RollingAggregate` default to `history_mode="batch"`: only
+the supplied frame participates. Set `history_mode="carry"` in a preprocessing
+step to save a bounded training tail per entity. Put this step **after splitting**.
+For example:
+
+```python
+{"name": "recent_value", "transformer": "RollingAggregate",
+ "params": {"columns": ["value"], "window": 5,
+            "sort_by": "observation_time", "group_by": ["entity"],
+            "history_mode": "carry",
+            "history_max_rows": 1000, "history_max_bytes": 48000}}
+```
+
+Declare the observed value, clock and entity in `input_columns`. For the
+Databricks source contract, this clock must be distinct from the job's
+`event_column` and record keys. Drop or encode non-model columns after the
+temporal step. Inputs must be available at prediction time; target-history
+forecasting is not supported.
+The clock must be numeric or a typed datetime; parse JSON/string timestamps in
+an earlier preprocessing step before using them as temporal ordering keys.
+
+- The artifact seed stays fixed. Lag 3 retains three prior rows per entity;
+  rolling window 5 retains four. Window 1 retains one ordering marker.
+- Training never reads its own saved tail. Temporal holdout and each CV fold
+  use only their own training history. Carry mode requires Time Series CV
+  (or nested Time Series); skipped gap rows do not enter history.
+- Missing or tied entity/time keys and observations at or before the saved
+  entity time are rejected. New entities start with empty history. Returned
+  rows keep request order. `drop_na` is disallowed; use an imputer instead.
+- Each chained temporal step stores its own input context. Context rows do
+  not enter subsequent imputer/scaler/model fitting or returned predictions.
+- Limits apply across all entities per step: by default 10,000 rows and 1 MiB.
+  Exceeding a limit fails explicitly; inactive entities are not silently evicted.
+
+**Incremental Databricks scoring:** the initial complete source snapshot
+reconstructs history from that snapshot, without prepending the training seed.
+Later increments read `temporal_history` from the last prediction receipt.
+The new context, source watermark and predictions share one Delta commit.
+A failed write leaves the prior committed context; a retry reads the actual
+receipt, and a no-op makes no write. Receipts have a 64 KiB history budget.
+A changed model or a prior receipt without history requires a fresh target;
+contexts are never silently mixed across models. This is bounded local batch
+execution, not Spark worker or streaming state.
+
+**Period scoring:** `run_local_batch(..., history_state=...)` accepts an explicit
+earlier context. A successful result's manifest contains the next context.
+Period replacement does not automatically choose another period's history.
+Retry identity includes the supplied context, so conflicting retries fail.
+
+**Core and backend:** ordinary prediction uses the immutable artifact seed.
+For successive Core calls, wrap prediction in
+`TemporalHistorySession(immutable_model_id, previous_state)` from
+`skyulf.preprocessing.time_series.history`, then persist `session.state`
+alongside successful predictions. The backend `/deployment/predict` accepts
+`continue_history=true` for the first request and `history_state` thereafter;
+its response returns the next state. The caller owns durable storage and
+serialization of those requests. The backend does not keep a hidden mutable
+history in its model cache. Repeating a request with the same input state is
+deterministic. An HTTP error returns no next state.
+
 ## Real-data end-to-end example
 
 `skyulf-core/examples/databricks_local_real_taxi_job.py` is a one-time

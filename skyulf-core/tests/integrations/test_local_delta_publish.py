@@ -298,6 +298,93 @@ def test_incremental_local_batch_discovers_appends_without_period_inputs(local_d
     assert rows[2]["run_id"] != rows[1]["run_id"]
 
 
+def test_incremental_temporal_history_commits_with_predictions(
+    local_delta_case, tmp_path, monkeypatch
+):
+    """Failed publication must leave both predictions and temporal continuation unchanged."""
+    from skyulf.integrations.databricks import local_incremental
+
+    spark, source, target, prepared, _, _, admission = local_delta_case
+    spark.sql(f"DELETE FROM {target} WHERE id = 9")
+    spark.sql(f"ALTER TABLE {source} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
+    values = np.arange(20, dtype=float)
+    data = pd.DataFrame({"x": values, "target": pd.Series(values).rolling(2, min_periods=1).mean()})
+    artifact = fit_local_workflow(
+        {
+            "preprocessing": [
+                {
+                    "name": "rolling",
+                    "transformer": "RollingAggregate",
+                    "params": {
+                        "columns": ["x"],
+                        "sort_by": "x",
+                        "window": 2,
+                        "history_mode": "carry",
+                    },
+                },
+                {
+                    "name": "drop_x",
+                    "transformer": "DropMissingColumns",
+                    "params": {"columns": ["x"], "missing_threshold": None},
+                },
+            ],
+            "modeling": {"type": "linear_regression"},
+        },
+        SplitDataset(train=data[:16], test=data[16:]),
+        target_column="target",
+        artifact_path=tmp_path / "temporal",
+        max_rows=20,
+        max_bytes=10000,
+    )
+    config = prepared.config.model_copy(
+        update={
+            "source": InputSource(
+                kind="uc_table", table=source, read_mode="incremental", max_rows=10, max_bytes=10000
+            )
+        }
+    )
+    prepared = replace(
+        prepared,
+        artifact=artifact,
+        config=config,
+        preflight=replace(prepared.preflight, model_digest=artifact.manifest.pipeline_sha256),
+    )
+
+    def run():
+        """Exercise the production runner with the existing Delta fixture contracts."""
+        return local_incremental.run_incremental_local_batch(
+            spark,
+            prepared,
+            record_key_columns=("id",),
+            period_column="event_time",
+            admission=admission,
+        )
+
+    first = run()
+    spark.createDataFrame(
+        [(3, datetime(2026, 1, 8, tzinfo=UTC), 6.0)], "id long, event_time timestamp, x double"
+    ).write.format("delta").mode("append").saveAsTable(source)
+    before = spark.sql(f"DESCRIBE HISTORY {target}").first()
+
+    def failed_commit(*args, **kwargs):
+        """Simulate failure after preprocessing but before any publication."""
+        raise RuntimeError("injected write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(local_incremental, "_commit_increment", failed_commit)
+        with pytest.raises(RuntimeError, match="injected write failure"):
+            run()
+    assert spark.sql(f"DESCRIBE HISTORY {target}").first().version == before.version
+    second = run()
+    replay = run()
+    assert replay.noop and replay.commit_version == second.commit_version
+    assert "temporal_history" in first.manifest
+    assert next(iter(second.manifest["temporal_history"]["steps"].values()))[-1]["x"] == 6.0
+    np.testing.assert_allclose(
+        [row.prediction for row in spark.table(target).orderBy("id").collect()], [2.0, 3.0, 5.0]
+    )
+
+
 def test_incremental_single_writer_uses_receipts_without_control_table(local_delta_case):
     """A sole writer can replay Delta receipts without provisioning lock state."""
     from skyulf.integrations.databricks import run_incremental_local_batch

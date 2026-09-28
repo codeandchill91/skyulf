@@ -131,6 +131,7 @@ def perform_cross_validation(
     from ._tuning.cv_policy import (  # noqa: PLC0415 - avoid tuning import cycle
         uses_explicit_policy,
     )
+    from ._tuning.history_policy import has_temporal_history  # noqa: PLC0415 - tuning import cycle
 
     policy = policy_config(
         cv_type,
@@ -147,7 +148,7 @@ def perform_cross_validation(
             "inner_folds": inner_folds,
         },
     )
-    if uses_explicit_policy(policy):
+    if uses_explicit_policy(policy) or has_temporal_history(preprocessing):
         return perform_policy_cv(
             calculator, X, y, config, policy, preprocessing, log_callback, progress_callback
         )

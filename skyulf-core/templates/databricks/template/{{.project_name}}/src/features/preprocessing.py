@@ -16,4 +16,13 @@ def build_preprocessing():
         # {"name": "scale", "transformer": "StandardScaler",
         #  "params": {"columns": ["feature_value"]}},
         # frequency_encoding(columns=["category"]),
+        # Temporal history belongs here, after the training/holdout split.
+        # Use an observed clock in input_columns (distinct from the job's event_column).
+        # {"name": "recent_value", "transformer": "RollingAggregate",
+        #  "params": {"columns": ["feature_value"], "window": 5,
+        #             "sort_by": "observation_time", "group_by": ["entity"],
+        #             "history_mode": "carry", "history_max_rows": 1000,
+        #             "history_max_bytes": 48000}},
+        # {"name": "drop_clock", "transformer": "DropMissingColumns",
+        #  "params": {"columns": ["observation_time"], "missing_threshold": None}},
     ]

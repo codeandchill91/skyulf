@@ -281,6 +281,26 @@ class FeatureEngineerFoldAdapter:
         self._engineer = engineer
         return transformed
 
+    @property
+    def temporal_history_columns(self) -> set[str]:
+        """Report ordering/entity columns needed until carry features are computed."""
+        columns = set()
+        for step in self._steps_config:
+            params = step.get("params", {})
+            if params.get("history_mode") == "carry":
+                columns.update([params.get("sort_by"), *(params.get("group_by") or [])])
+        return columns - {None}
+
+    def retain_split_metadata(self, column: str) -> None:
+        """Drop retained split metadata after preprocessing, including during serving."""
+        step = {
+            "name": f"exclude_split_metadata_{column}",
+            "transformer": "DropMissingColumns",
+            "params": {"columns": [column], "missing_threshold": None},
+        }
+        if step not in self._steps_config:
+            self._steps_config = [*self._steps_config, step]
+
     def transform(self, X: Any, y: Any) -> tuple[Any, Any]:
         """Apply the engineer fitted by the last :meth:`fit_transform`.
 

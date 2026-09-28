@@ -46,6 +46,7 @@ from .cv_policy import (
 )
 from .fold_pipeline import FoldAwareModelStep
 from .grid_random import fit_and_score_candidate_fold, run_grid_or_random_search
+from .history_policy import has_temporal_history, uses_history_policy
 from .metrics import is_multiclass_target, resolve_metric, resolve_scorer
 from .nested import run_nested_search
 from .nested_threshold import remap_nested_thresholds
@@ -147,6 +148,8 @@ def _prepare_time_series_data(
     log_callback: Callable[[str], None] | None,
 ) -> tuple[Any, Any, tuple[Any, Any] | None, tuple[Any, Any] | None]:
     """Sort named time-series features and align validation columns without row sorting."""
+    if not tuning_config.cv_enabled and has_temporal_history(preprocessing):
+        return X, y, validation_data, validation_frames
     if tuning_config.cv_type == "time_series_split" and hasattr(X, "columns"):
         original_columns = list(X.columns)
         X, y = _sort_by_time(X, y, tuning_config.cv_time_column, log_callback, logger)
@@ -175,13 +178,13 @@ def _prepare_policy_inputs(
     preprocessing: Any,
 ) -> tuple[Any, Any, Any, Any, Any]:
     """Extract metadata before conversion and keep validation feature order aligned."""
-    if not uses_explicit_policy(config):
+    if not uses_explicit_policy(config) and not uses_history_policy(config, preprocessing):
         return X, y, validation_data, validation_frames, None
     raw_validation = validation_frames if validation_frames is not None else validation_data
     if raw_validation is not None:
         validate_holdout_metadata(X, raw_validation[0], config, problem_type)
     columns = list(X.columns)
-    X, y, metadata = prepare_policy_data(X, y, config, problem_type)
+    X, y, metadata = prepare_policy_data(X, y, config, problem_type, preprocessing)
     validation_data = _align_time_series_validation(
         validation_data,
         columns,
@@ -1156,9 +1159,11 @@ def _policy_search_data(
     metadata: Any,
 ) -> tuple[Any, Any, Any, Any]:
     """Prepare metadata once for direct tune calls or retain the fit-owned alignment."""
-    if metadata is None and uses_explicit_policy(config):
+    if metadata is None and (
+        uses_explicit_policy(config) or uses_history_policy(config, preprocessing)
+    ):
         raw_x, raw_y = frames if frames is not None else (X, y)
-        X, y, metadata = prepare_policy_data(raw_x, raw_y, config, problem_type)
+        X, y, metadata = prepare_policy_data(raw_x, raw_y, config, problem_type, preprocessing)
         frames = (X, y) if preprocessing is not None else None
     return X, y, frames, metadata
 

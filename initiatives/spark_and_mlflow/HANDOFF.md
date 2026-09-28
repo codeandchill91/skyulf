@@ -1,3 +1,25 @@
+# Active handoff: SM-36a, updated queue (2026-09-28)
+
+The user explicitly selected [OPEN_QUEUE_updated.md](OPEN_QUEUE_updated.md) as
+the working queue. Read that file for task order and added scopes; references
+to OPEN_QUEUE.md in the historical notes below are superseded for new work.
+
+Previous commit: `9cc81304` (saved project packages, organized src, inline custom
+steps, and expanded CV matrix). Final commit verification: 175 tests passed and
+all applicable pre-commit hooks passed. SM-36a remains PARTIAL. Temporal-history
+investigation and the implementation sequence are in
+[report103](103-sm36a-temporal-history-plan.md).
+
+Temporal history included in this delivery commit spans Core, temporal CV, backend
+explicit continuation, Databricks atomic prediction receipts and the Canvas
+selector. Live Delta/model acceptance passed; final validation evidence is in
+[report105](105-sm36a-temporal-history-delivery.md). Continue from that report;
+do not mark all SM-36a complete or repeat the earlier investigation. Next work:
+keyed scoring exclusions (record key + reason, explicit row-loss rules and atomic
+publication/retry tests). SM-36b waits for the remaining SM-36a scope.
+
+---
+
 # Current handoff: SM-36/SM-36f verified; follow-ups queued for next work
 
 2026-09-27 user direction: commit the completed work and queue the missing nested

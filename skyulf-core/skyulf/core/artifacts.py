@@ -620,7 +620,18 @@ class FeatureTargetSplitArtifact(TypedDict, total=False):
 # ── Time series ──────────────────────────────────────────────────────────────
 
 
-class LagFeaturesArtifact(TypedDict, total=False):
+class TemporalHistoryArtifact(TypedDict, total=False):
+    """Optional immutable context seed and bounded continuation contract."""
+
+    history_mode: str
+    history_rows: int
+    history_max_rows: int
+    history_max_bytes: int
+    history_seed: list[dict[str, Any]]
+    history_id: str
+
+
+class LagFeaturesArtifact(TemporalHistoryArtifact, total=False):
     """Lag-feature parameters (columns lagged, lag offsets and group/sort ordering)."""
 
     type: str
@@ -631,7 +642,7 @@ class LagFeaturesArtifact(TypedDict, total=False):
     drop_na: bool
 
 
-class RollingAggregateArtifact(TypedDict, total=False):
+class RollingAggregateArtifact(TemporalHistoryArtifact, total=False):
     """Rolling-aggregate parameters (window size, aggregation functions and group/sort ordering)."""
 
     type: str

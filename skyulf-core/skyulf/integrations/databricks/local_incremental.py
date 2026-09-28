@@ -17,6 +17,7 @@ from ._contracts import PREDICTION_METADATA_COLUMNS, column_name, table_name
 from .admission import BatchConflictError, PublishAdmission, validate_admission
 from .delta import DeltaPublishError, history, table_identity
 from .local_batch import _frame_bytes
+from .local_history import history_receipt, incremental_history
 from .local_publish import _check_target, _scalar
 from .local_sdk import LocalWorkflowConfig, PreparedLocalWorkflow
 
@@ -196,9 +197,10 @@ def run_incremental_local_batch(
         output_names = _check_target(
             spark, selected, target, record_key_columns, period_column, prepared
         )
-        bridge = _incremental_prediction_bridge(
-            spark, prepared, frame, inputs, output_names, record_key_columns, target
-        )
+        with incremental_history(prepared, previous) as temporal_session:
+            bridge = _incremental_prediction_bridge(
+                spark, prepared, frame, inputs, output_names, record_key_columns, target
+            )
         output = (
             bridge.join(
                 selected.select(*record_key_columns, period_column),
@@ -209,7 +211,13 @@ def run_incremental_local_batch(
             else bridge
         )
         run_input, digest, manifest = _incremental_manifest(
-            prepared, source_id, target_id, prior_version, upper_version, frame
+            prepared,
+            source_id,
+            target_id,
+            prior_version,
+            upper_version,
+            frame,
+            history_receipt(temporal_session),
         )
         output = _complete_incremental_output(output, target, config, digest, functions, frame)
         committed, recorded = _commit_increment(
@@ -397,6 +405,7 @@ def _incremental_manifest(
     prior_version: int | None,
     upper_version: int,
     frame: pd.DataFrame,
+    history_fields: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str, dict[str, Any]]:
     """Fingerprint the exact increment, concrete model and prediction row count."""
     config = prepared.config
@@ -413,6 +422,7 @@ def _incremental_manifest(
         "input_count": len(frame),
         "output_count": len(frame),
     }
+    run_input |= history_fields or {}
     digest = hashlib.sha256(
         json.dumps(run_input, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
