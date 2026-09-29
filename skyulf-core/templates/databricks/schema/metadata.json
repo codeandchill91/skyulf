@@ -1,0 +1,3 @@
+{
+  "welcome_message": "Create a Skyulf training project. Choose single_model for guided model setup or multi_target for independent targets configured in src/modeling/branches.py. Multi-target setup asks for shared data, output selection and deployment settings; each branch owns its target, features, model, tuning and split. Model and combined business rules live in src/features/scoring.py. Column names can be comma-separated. Initialization creates local files only. Use --config-file for advanced settings; see skyulf-core/templates/databricks/examples/ in the Skyulf checkout."
+}

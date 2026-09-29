@@ -94,68 +94,6 @@
         }
       }
     },
-    "model_set_name": {
-      "order": 98,
-      "type": "string",
-      "default": "",
-      "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*)?$",
-      "description": "6. Multi-model outputs | Registered MODEL SET name (not a table). Blank = <project_name>_set; enter your own name to override. Target catalog/metadata schema and dev suffix are added automatically",
-      "skip_prompt_if": {"properties": {"training_layout": {"const": "single_model"}}}
-    },
-    "model_set_promotion_policy": {
-      "order": 104,
-      "type": "string",
-      "default": "manual_approval",
-      "enum": ["manual_approval", "automatic"],
-      "description": "6. Model set lifecycle | manual_approval = review then approve; automatic = activate the complete set only when EVERY branch passes its saved quality_threshold, additional quality_gates and improvement over its counterpart in the current champion set. Configure metrics in branches.py. First sets require absolute thresholds. Score runs separately",
-      "skip_prompt_if": {"properties": {"training_layout": {"const": "single_model"}}}
-    },
-    "model_set_output_mode": {
-      "order": 99,
-      "type": "string",
-      "default": "all",
-      "enum": ["all", "combined_only", "separate_views"],
-      "description": "6. Multi-model outputs | all = save every model prediction and business result together; combined_only = run the models but save only combined business results plus keys/status/version (requires rules); separate_views = save all results once and expose model/business columns through separately named views, without duplicate tables",
-      "skip_prompt_if": {"properties": {"training_layout": {"const": "single_model"}}}
-    },
-    "model_set_table_name": {
-      "order": 100,
-      "type": "string",
-      "default": "",
-      "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*)?$",
-      "description": "6. Multi-model outputs | Physical result table name. Blank = <project_name>_set_scores. Target catalog/schema and dev suffix are added automatically",
-      "skip_prompt_if": {"properties": {"training_layout": {"const": "single_model"}}}
-    },
-    "model_view_prefix": {
-      "order": 101,
-      "type": "string",
-      "default": "",
-      "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*)?$",
-      "description": "6. Multi-model outputs | Prefix for each model view: <prefix>_<branch>. Blank = <project_name>_predictions. Customize individual names or select models in src/modeling/model_set.py",
-      "skip_prompt_if": {"anyOf": [
-        {"properties": {"training_layout": {"const": "single_model"}}},
-        {"properties": {"model_set_output_mode": {"enum": ["all", "combined_only"]}}}
-      ]}
-    },
-    "combined_view_name": {
-      "order": 102,
-      "type": "string",
-      "default": "",
-      "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*)?$",
-      "description": "6. Multi-model outputs | Combined business result view name. Blank = <project_name>_business_results. Created only when the saved set has combined rules",
-      "skip_prompt_if": {"anyOf": [
-        {"properties": {"training_layout": {"const": "single_model"}}},
-        {"properties": {"model_set_output_mode": {"enum": ["all", "combined_only"]}}}
-      ]}
-    },
-    "source_change_policy": {
-      "order": 103,
-      "type": "string",
-      "default": "reject",
-      "enum": ["reject", "rebuild_on_change"],
-      "description": "6. Multi-model outputs | If existing source rows are updated/deleted: reject = stop and keep previous results; rebuild_on_change = rescore the full current snapshot with the selected model set, rebuilding lag/rolling history. New inserts still append. Full data must fit row/byte limits. Independent of the model-change setting",
-      "skip_prompt_if": {"properties": {"training_layout": {"const": "single_model"}}}
-    },
     "record_key_columns": {
       "order": 9,
       "type": "string",
@@ -204,6 +142,510 @@
           }
         }
       }
+    },
+    "cv_enabled": {
+      "type": "string",
+      "default": "false",
+      "description": "1. Cross-validation | Use several training-only folds to score search candidates? No duplicate post-search CV report. With CV off, search uses a training-only validation split. Final test rows stay separate. Defaults: 5-fold K-fold, shuffle enabled, seed 42; the following questions select the fold policy before the data window.",
+      "enum": [
+        "false",
+        "true"
+      ],
+      "order": 13,
+      "skip_prompt_if": {
+        "properties": {
+          "training_layout": {
+            "const": "multi_target"
+          }
+        }
+      }
+    },
+    "cv_folds": {
+      "type": "string",
+      "default": "5",
+      "description": "1. Cross-validation | How many CV splits? 5 means five evaluations; more splits take longer (2-20)",
+      "pattern": "^(?:[2-9]|1[0-9]|20)$",
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "training_layout": {
+                "const": "multi_target"
+              }
+            }
+          },
+          {
+            "properties": {
+              "cv_enabled": {
+                "const": "false"
+              }
+            }
+          }
+        ]
+      },
+      "order": 14
+    },
+    "cv_type": {
+      "type": "string",
+      "default": "k_fold",
+      "description": "1. Cross-validation | Fold method: k_fold, stratified_k_fold, time_series_split, shuffle_split, group_k_fold, stratified_group_k_fold, or nested_cv. Nested CV repeats an independent inner search in every outer training fold, then runs a separate final search Temporal CV automatically selects a chronological final holdout; its clock/window questions follow.",
+      "enum": [
+        "k_fold",
+        "stratified_k_fold",
+        "time_series_split",
+        "shuffle_split",
+        "nested_cv",
+        "group_k_fold",
+        "stratified_group_k_fold"
+      ],
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "training_layout": {
+                "const": "multi_target"
+              }
+            }
+          },
+          {
+            "properties": {
+              "cv_enabled": {
+                "const": "false"
+              }
+            }
+          }
+        ]
+      },
+      "order": 15
+    },
+    "cv_inner_folds": {
+      "type": "string",
+      "default": "",
+      "description": "1. Cross-validation | Inner search folds for nested CV (2-20). Leave blank for the Core default. The strategy budget applies to every outer-fold search and the final search.",
+      "pattern": "^(?:|[2-9]|1[0-9]|20)$",
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "training_layout": {
+                "const": "multi_target"
+              }
+            }
+          },
+          {
+            "properties": {
+              "cv_enabled": {
+                "const": "false"
+              }
+            }
+          },
+          {
+            "not": {
+              "properties": {
+                "cv_type": {
+                  "const": "nested_cv"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "order": 16
+    },
+    "cv_nested_type": {
+      "type": "string",
+      "default": "auto",
+      "description": "1. Cross-validation | Policy at both nested levels; auto selects stratified classification or regression K-fold. Temporal requires a temporal final holdout and event_column.",
+      "order": 17,
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "training_layout": {
+                "const": "multi_target"
+              }
+            }
+          },
+          {
+            "properties": {
+              "cv_enabled": {
+                "const": "false"
+              }
+            }
+          },
+          {
+            "not": {
+              "properties": {
+                "cv_type": {
+                  "const": "nested_cv"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "enum": [
+        "auto",
+        "k_fold",
+        "stratified_k_fold",
+        "time_series_split",
+        "group_k_fold",
+        "stratified_group_k_fold"
+      ]
+    },
+    "cv_group_column": {
+      "type": "string",
+      "default": "",
+      "description": "1. Cross-validation | Group identity column, excluded from features. Final holdout isolates whole groups; disable holdout stratify.",
+      "order": 18,
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "training_layout": {
+                "const": "multi_target"
+              }
+            }
+          },
+          {
+            "properties": {
+              "cv_enabled": {
+                "const": "false"
+              }
+            }
+          },
+          {
+            "not": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "cv_type": {
+                      "enum": [
+                        "group_k_fold",
+                        "stratified_group_k_fold"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "cv_type": {
+                      "const": "nested_cv"
+                    },
+                    "cv_nested_type": {
+                      "enum": [
+                        "group_k_fold",
+                        "stratified_group_k_fold"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "pattern": "^(?:|[A-Za-z_][A-Za-z0-9_]*)$"
+    },
+    "cv_gap": {
+      "type": "string",
+      "default": "0",
+      "description": "1. Cross-validation | Rows excluded before each temporal validation window at both nested levels.",
+      "order": 19,
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "training_layout": {
+                "const": "multi_target"
+              }
+            }
+          },
+          {
+            "properties": {
+              "cv_enabled": {
+                "const": "false"
+              }
+            }
+          },
+          {
+            "not": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "cv_type": {
+                      "enum": [
+                        "time_series_split"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "cv_type": {
+                      "const": "nested_cv"
+                    },
+                    "cv_nested_type": {
+                      "enum": [
+                        "time_series_split"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "pattern": "^(?:0|[1-9][0-9]*)$"
+    },
+    "cv_test_size": {
+      "type": "string",
+      "default": "null",
+      "description": "1. Cross-validation | Temporal validation rows per fold; null uses the Core default.",
+      "order": 20,
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "training_layout": {
+                "const": "multi_target"
+              }
+            }
+          },
+          {
+            "properties": {
+              "cv_enabled": {
+                "const": "false"
+              }
+            }
+          },
+          {
+            "not": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "cv_type": {
+                      "enum": [
+                        "time_series_split"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "cv_type": {
+                      "const": "nested_cv"
+                    },
+                    "cv_nested_type": {
+                      "enum": [
+                        "time_series_split"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "pattern": "^(?:null|[1-9][0-9]*)$"
+    },
+    "cv_max_train_size": {
+      "type": "string",
+      "default": "null",
+      "description": "1. Cross-validation | Temporal training rows; null expands, an integer creates a rolling window.",
+      "order": 21,
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "training_layout": {
+                "const": "multi_target"
+              }
+            }
+          },
+          {
+            "properties": {
+              "cv_enabled": {
+                "const": "false"
+              }
+            }
+          },
+          {
+            "not": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "cv_type": {
+                      "enum": [
+                        "time_series_split"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "cv_type": {
+                      "const": "nested_cv"
+                    },
+                    "cv_nested_type": {
+                      "enum": [
+                        "time_series_split"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "pattern": "^(?:null|[1-9][0-9]*)$"
+    },
+    "cv_shuffle": {
+      "type": "string",
+      "default": "true",
+      "description": "1. Cross-validation | Shuffle rows for CV? Use false for time_series_split, true for shuffle_split",
+      "enum": [
+        "false",
+        "true"
+      ],
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "training_layout": {
+                "const": "multi_target"
+              }
+            }
+          },
+          {
+            "anyOf": [
+              {
+                "properties": {
+                  "cv_enabled": {
+                    "const": "false"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "cv_type": {
+                    "enum": [
+                      "time_series_split",
+                      "shuffle_split"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "properties": {
+              "cv_enabled": {
+                "const": "true"
+              }
+            },
+            "anyOf": [
+              {
+                "properties": {
+                  "cv_type": {
+                    "const": "time_series_split"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "cv_type": {
+                    "const": "nested_cv"
+                  },
+                  "cv_nested_type": {
+                    "const": "time_series_split"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "order": 22
+    },
+    "cv_random_state": {
+      "type": "string",
+      "default": "42",
+      "description": "1. Cross-validation | Seed for repeatable CV splits. Keep 42 unless you want different splits",
+      "pattern": "^(?:0|[1-9][0-9]*)$",
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "training_layout": {
+                "const": "multi_target"
+              }
+            }
+          },
+          {
+            "anyOf": [
+              {
+                "properties": {
+                  "cv_enabled": {
+                    "const": "false"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "cv_type": {
+                    "const": "time_series_split"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "cv_shuffle": {
+                    "const": "false"
+                  }
+                },
+                "not": {
+                  "properties": {
+                    "cv_type": {
+                      "const": "shuffle_split"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "properties": {
+              "cv_enabled": {
+                "const": "true"
+              }
+            },
+            "anyOf": [
+              {
+                "properties": {
+                  "cv_type": {
+                    "const": "time_series_split"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "cv_type": {
+                    "const": "nested_cv"
+                  },
+                  "cv_nested_type": {
+                    "const": "time_series_split"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "order": 23
     },
     "split_strategy": {
       "type": "string",
@@ -2219,366 +2661,6 @@
         ]
       }
     },
-    "cv_enabled": {
-      "type": "string",
-      "default": "false",
-      "description": "1. Cross-validation | Use several training-only folds to score search candidates? No duplicate post-search CV report. With CV off, search uses a training-only validation split. Final test rows stay separate. Defaults: 5-fold K-fold, shuffle enabled, seed 42; the following questions select the fold policy before the data window.",
-      "enum": [
-        "false",
-        "true"
-      ],
-      "order": 13,
-      "skip_prompt_if": {
-        "properties": {
-          "training_layout": {
-            "const": "multi_target"
-          }
-        }
-      }
-    },
-    "cv_folds": {
-      "type": "string",
-      "default": "5",
-      "description": "1. Cross-validation | How many CV splits? 5 means five evaluations; more splits take longer (2-20)",
-      "pattern": "^(?:[2-9]|1[0-9]|20)$",
-      "skip_prompt_if": {
-        "anyOf": [
-          {
-            "properties": {
-              "training_layout": {
-                "const": "multi_target"
-              }
-            }
-          },
-          {
-            "properties": {
-              "cv_enabled": {
-                "const": "false"
-              }
-            }
-          }
-        ]
-      },
-      "order": 14
-    },
-    "cv_type": {
-      "type": "string",
-      "default": "k_fold",
-      "description": "1. Cross-validation | Fold method: k_fold, stratified_k_fold, time_series_split, shuffle_split, group_k_fold, stratified_group_k_fold, or nested_cv. Nested CV repeats an independent inner search in every outer training fold, then runs a separate final search Temporal CV automatically selects a chronological final holdout; its clock/window questions follow.",
-      "enum": [
-        "k_fold",
-        "stratified_k_fold",
-        "time_series_split",
-        "shuffle_split",
-        "nested_cv",
-        "group_k_fold",
-        "stratified_group_k_fold"
-      ],
-      "skip_prompt_if": {
-        "anyOf": [
-          {
-            "properties": {
-              "training_layout": {
-                "const": "multi_target"
-              }
-            }
-          },
-          {
-            "properties": {
-              "cv_enabled": {
-                "const": "false"
-              }
-            }
-          }
-        ]
-      },
-      "order": 15
-    },
-    "cv_inner_folds": {
-      "type": "string",
-      "default": "",
-      "description": "1. Cross-validation | Inner search folds for nested CV (2-20). Leave blank for the Core default. The strategy budget applies to every outer-fold search and the final search.",
-      "pattern": "^(?:|[2-9]|1[0-9]|20)$",
-      "skip_prompt_if": {
-        "anyOf": [
-          {
-            "properties": {
-              "training_layout": {
-                "const": "multi_target"
-              }
-            }
-          },
-          {
-            "properties": {
-              "cv_enabled": {
-                "const": "false"
-              }
-            }
-          },
-          {
-            "not": {
-              "properties": {
-                "cv_type": {
-                  "const": "nested_cv"
-                }
-              }
-            }
-          }
-        ]
-      },
-      "order": 16
-    },
-    "cv_nested_type": {
-      "type": "string",
-      "default": "auto",
-      "description": "1. Cross-validation | Policy at both nested levels; auto selects stratified classification or regression K-fold. Temporal requires a temporal final holdout and event_column.",
-      "order": 17,
-      "skip_prompt_if": {
-        "anyOf": [
-          {
-            "properties": {
-              "training_layout": {
-                "const": "multi_target"
-              }
-            }
-          },
-          {
-            "properties": {
-              "cv_enabled": {
-                "const": "false"
-              }
-            }
-          },
-          {
-            "not": {
-              "properties": {
-                "cv_type": {
-                  "const": "nested_cv"
-                }
-              }
-            }
-          }
-        ]
-      },
-      "enum": [
-        "auto",
-        "k_fold",
-        "stratified_k_fold",
-        "time_series_split",
-        "group_k_fold",
-        "stratified_group_k_fold"
-      ]
-    },
-    "cv_group_column": {
-      "type": "string",
-      "default": "",
-      "description": "1. Cross-validation | Group identity column, excluded from features. Final holdout isolates whole groups; disable holdout stratify.",
-      "order": 18,
-      "skip_prompt_if": {
-        "anyOf": [
-          {
-            "properties": {
-              "training_layout": {
-                "const": "multi_target"
-              }
-            }
-          },
-          {
-            "properties": {
-              "cv_enabled": {
-                "const": "false"
-              }
-            }
-          },
-          {
-            "not": {
-              "anyOf": [
-                {
-                  "properties": {
-                    "cv_type": {
-                      "enum": [
-                        "group_k_fold",
-                        "stratified_group_k_fold"
-                      ]
-                    }
-                  }
-                },
-                {
-                  "properties": {
-                    "cv_type": {
-                      "const": "nested_cv"
-                    },
-                    "cv_nested_type": {
-                      "enum": [
-                        "group_k_fold",
-                        "stratified_group_k_fold"
-                      ]
-                    }
-                  }
-                }
-              ]
-            }
-          }
-        ]
-      },
-      "pattern": "^(?:|[A-Za-z_][A-Za-z0-9_]*)$"
-    },
-    "cv_gap": {
-      "type": "string",
-      "default": "0",
-      "description": "1. Cross-validation | Rows excluded before each temporal validation window at both nested levels.",
-      "order": 19,
-      "skip_prompt_if": {
-        "anyOf": [
-          {
-            "properties": {
-              "training_layout": {
-                "const": "multi_target"
-              }
-            }
-          },
-          {
-            "properties": {
-              "cv_enabled": {
-                "const": "false"
-              }
-            }
-          },
-          {
-            "not": {
-              "anyOf": [
-                {
-                  "properties": {
-                    "cv_type": {
-                      "enum": [
-                        "time_series_split"
-                      ]
-                    }
-                  }
-                },
-                {
-                  "properties": {
-                    "cv_type": {
-                      "const": "nested_cv"
-                    },
-                    "cv_nested_type": {
-                      "enum": [
-                        "time_series_split"
-                      ]
-                    }
-                  }
-                }
-              ]
-            }
-          }
-        ]
-      },
-      "pattern": "^(?:0|[1-9][0-9]*)$"
-    },
-    "cv_test_size": {
-      "type": "string",
-      "default": "null",
-      "description": "1. Cross-validation | Temporal validation rows per fold; null uses the Core default.",
-      "order": 20,
-      "skip_prompt_if": {
-        "anyOf": [
-          {
-            "properties": {
-              "training_layout": {
-                "const": "multi_target"
-              }
-            }
-          },
-          {
-            "properties": {
-              "cv_enabled": {
-                "const": "false"
-              }
-            }
-          },
-          {
-            "not": {
-              "anyOf": [
-                {
-                  "properties": {
-                    "cv_type": {
-                      "enum": [
-                        "time_series_split"
-                      ]
-                    }
-                  }
-                },
-                {
-                  "properties": {
-                    "cv_type": {
-                      "const": "nested_cv"
-                    },
-                    "cv_nested_type": {
-                      "enum": [
-                        "time_series_split"
-                      ]
-                    }
-                  }
-                }
-              ]
-            }
-          }
-        ]
-      },
-      "pattern": "^(?:null|[1-9][0-9]*)$"
-    },
-    "cv_max_train_size": {
-      "type": "string",
-      "default": "null",
-      "description": "1. Cross-validation | Temporal training rows; null expands, an integer creates a rolling window.",
-      "order": 21,
-      "skip_prompt_if": {
-        "anyOf": [
-          {
-            "properties": {
-              "training_layout": {
-                "const": "multi_target"
-              }
-            }
-          },
-          {
-            "properties": {
-              "cv_enabled": {
-                "const": "false"
-              }
-            }
-          },
-          {
-            "not": {
-              "anyOf": [
-                {
-                  "properties": {
-                    "cv_type": {
-                      "enum": [
-                        "time_series_split"
-                      ]
-                    }
-                  }
-                },
-                {
-                  "properties": {
-                    "cv_type": {
-                      "const": "nested_cv"
-                    },
-                    "cv_nested_type": {
-                      "enum": [
-                        "time_series_split"
-                      ]
-                    }
-                  }
-                }
-              ]
-            }
-          }
-        ]
-      },
-      "pattern": "^(?:null|[1-9][0-9]*)$"
-    },
     "search_tune_threshold": {
       "type": "string",
       "default": "false",
@@ -2618,150 +2700,6 @@
         "false",
         "true"
       ]
-    },
-    "cv_shuffle": {
-      "type": "string",
-      "default": "true",
-      "description": "1. Cross-validation | Shuffle rows for CV? Use false for time_series_split, true for shuffle_split",
-      "enum": [
-        "false",
-        "true"
-      ],
-      "skip_prompt_if": {
-        "anyOf": [
-          {
-            "properties": {
-              "training_layout": {
-                "const": "multi_target"
-              }
-            }
-          },
-          {
-            "anyOf": [
-              {
-                "properties": {
-                  "cv_enabled": {
-                    "const": "false"
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "cv_type": {
-                    "enum": [
-                      "time_series_split",
-                      "shuffle_split"
-                    ]
-                  }
-                }
-              }
-            ]
-          },
-          {
-            "properties": {
-              "cv_enabled": {
-                "const": "true"
-              }
-            },
-            "anyOf": [
-              {
-                "properties": {
-                  "cv_type": {
-                    "const": "time_series_split"
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "cv_type": {
-                    "const": "nested_cv"
-                  },
-                  "cv_nested_type": {
-                    "const": "time_series_split"
-                  }
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "order": 22
-    },
-    "cv_random_state": {
-      "type": "string",
-      "default": "42",
-      "description": "1. Cross-validation | Seed for repeatable CV splits. Keep 42 unless you want different splits",
-      "pattern": "^(?:0|[1-9][0-9]*)$",
-      "skip_prompt_if": {
-        "anyOf": [
-          {
-            "properties": {
-              "training_layout": {
-                "const": "multi_target"
-              }
-            }
-          },
-          {
-            "anyOf": [
-              {
-                "properties": {
-                  "cv_enabled": {
-                    "const": "false"
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "cv_type": {
-                    "const": "time_series_split"
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "cv_shuffle": {
-                    "const": "false"
-                  }
-                },
-                "not": {
-                  "properties": {
-                    "cv_type": {
-                      "const": "shuffle_split"
-                    }
-                  }
-                }
-              }
-            ]
-          },
-          {
-            "properties": {
-              "cv_enabled": {
-                "const": "true"
-              }
-            },
-            "anyOf": [
-              {
-                "properties": {
-                  "cv_type": {
-                    "const": "time_series_split"
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "cv_type": {
-                    "const": "nested_cv"
-                  },
-                  "cv_nested_type": {
-                    "const": "time_series_split"
-                  }
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "order": 23
     },
     "retraining_mode": {
       "order": 75,
@@ -3153,6 +3091,142 @@
         "properties": {
           "compute_mode": {
             "const": "serverless"
+          }
+        }
+      }
+    },
+    "model_set_name": {
+      "order": 98,
+      "type": "string",
+      "default": "",
+      "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*)?$",
+      "description": "6. Multi-model outputs | Registered MODEL SET name (not a table). Blank = <project_name>_set; enter your own name to override. Target catalog/metadata schema and dev suffix are added automatically",
+      "skip_prompt_if": {
+        "properties": {
+          "training_layout": {
+            "const": "single_model"
+          }
+        }
+      }
+    },
+    "model_set_output_mode": {
+      "order": 99,
+      "type": "string",
+      "default": "all",
+      "enum": [
+        "all",
+        "combined_only",
+        "separate_views"
+      ],
+      "description": "6. Multi-model outputs | all = save every model prediction and business result together; combined_only = run the models but save only combined business results plus keys/status/version (requires rules); separate_views = save all results once and expose model/business columns through separately named views, without duplicate tables",
+      "skip_prompt_if": {
+        "properties": {
+          "training_layout": {
+            "const": "single_model"
+          }
+        }
+      }
+    },
+    "model_set_table_name": {
+      "order": 100,
+      "type": "string",
+      "default": "",
+      "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*)?$",
+      "description": "6. Multi-model outputs | Physical result table name. Blank = <project_name>_set_scores. Target catalog/schema and dev suffix are added automatically",
+      "skip_prompt_if": {
+        "properties": {
+          "training_layout": {
+            "const": "single_model"
+          }
+        }
+      }
+    },
+    "model_view_prefix": {
+      "order": 101,
+      "type": "string",
+      "default": "",
+      "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*)?$",
+      "description": "6. Multi-model outputs | Prefix for each model view: <prefix>_<branch>. Blank = <project_name>_predictions. Customize individual names or select models in src/modeling/model_set.py",
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "training_layout": {
+                "const": "single_model"
+              }
+            }
+          },
+          {
+            "properties": {
+              "model_set_output_mode": {
+                "enum": [
+                  "all",
+                  "combined_only"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "combined_view_name": {
+      "order": 102,
+      "type": "string",
+      "default": "",
+      "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*)?$",
+      "description": "6. Multi-model outputs | Combined business result view name. Blank = <project_name>_business_results. Created only when the saved set has combined rules",
+      "skip_prompt_if": {
+        "anyOf": [
+          {
+            "properties": {
+              "training_layout": {
+                "const": "single_model"
+              }
+            }
+          },
+          {
+            "properties": {
+              "model_set_output_mode": {
+                "enum": [
+                  "all",
+                  "combined_only"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "source_change_policy": {
+      "order": 103,
+      "type": "string",
+      "default": "reject",
+      "enum": [
+        "reject",
+        "rebuild_on_change"
+      ],
+      "description": "6. Multi-model outputs | If existing source rows are updated/deleted: reject = stop and keep previous results; rebuild_on_change = rescore the full current snapshot with the selected model set, rebuilding lag/rolling history. New inserts still append. Full data must fit row/byte limits. Independent of the model-change setting",
+      "skip_prompt_if": {
+        "properties": {
+          "training_layout": {
+            "const": "single_model"
+          }
+        }
+      }
+    },
+    "model_set_promotion_policy": {
+      "order": 104,
+      "type": "string",
+      "default": "manual_approval",
+      "enum": [
+        "manual_approval",
+        "automatic"
+      ],
+      "description": "6. Model set lifecycle | manual_approval = review then approve; automatic = activate the complete set only when EVERY branch passes its saved quality_threshold, additional quality_gates and improvement over its counterpart in the current champion set. Configure metrics in branches.py. First sets require absolute thresholds. Score runs separately",
+      "skip_prompt_if": {
+        "properties": {
+          "training_layout": {
+            "const": "single_model"
           }
         }
       }
