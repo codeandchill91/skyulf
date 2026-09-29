@@ -190,6 +190,15 @@ def test_candidate_search_isolates_holdout_and_logs_selected_artifact(
     evidence = documents["tuning.json"]
     assert evidence["n_trials"] == 2
     assert evidence["best_params"]["n_estimators"] == 3
+    logged_params = {
+        key: value for call in run.log_params.call_args_list for key, value in call.args[0].items()
+    }
+    assert logged_params["tuning_requested_trials"] == 2
+    assert logged_params["tuning_random_state"] == 17
+    assert logged_params["tuning_requested_metric"] == pipeline["modeling"]["metric"]
+    assert logged_params["tuning_best_params.n_estimators"] == "3"
+    assert int(logged_params["tuning_best_params.max_depth"]) in (2, 4)
+    assert json.loads(logged_params["tuning_search_space"])["max_depth"] == [2, 4]
     assert "cross_validation.json" not in documents
     model = fitted.artifact.pipeline.model_estimator._unwrap_tuned_model()
     assert model.n_estimators == 3

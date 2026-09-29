@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from dataclasses import replace
 from typing import Any
@@ -13,7 +14,7 @@ import polars as pl
 from sklearn.model_selection import ShuffleSplit
 
 from ...inference.local_pipeline import LocalPipelineArtifact
-from ...modeling._tuning.schemas import TuningResult
+from ...modeling._tuning.schemas import TuningConfig, TuningResult
 from ...registry import NodeRegistry
 from .local_cv import LocalCVSpec, _validate_fold_membership, evaluate_training_cv
 
@@ -116,6 +117,46 @@ def tuning_evidence(artifact: LocalPipelineArtifact) -> dict[str, Any] | None:
             raise ValueError("search_python_source must be text.")
         evidence["source_code_sha256"] = hashlib.sha256(source.encode("utf-8")).hexdigest()
     return evidence
+
+
+def _parameter_preview(value: Any, section: str) -> str:
+    """Keep parameter previews small while preserving full values in tuning.json."""
+    encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
+    if len(encoded.encode("utf-8")) > 500:
+        return f"See tuning.json: {section} (value exceeds parameter preview limit)"
+    return encoded
+
+
+def tuning_run_params(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Expose effective search settings and final selected parameters in Experiments.
+
+    Requested trials are a configured budget; tuning_trials is the actual count
+    reported by Core. For nested CV, best_params belongs to the final search on
+    all training rows, while outer-fold selections remain in tuning.json.
+    """
+    modeling = evidence["modeling"]
+    defaults = TuningConfig()
+    params = {
+        "tuning_strategy": modeling["strategy"],
+        "tuning_metric": evidence["scoring_metric"],
+        "tuning_trials": evidence["n_trials"],
+        "tuning_model_type": modeling["base_model"]["type"],
+        "tuning_requested_metric": evidence["requested_metric"],
+        "tuning_requested_trials": modeling.get("n_trials", defaults.n_trials),
+    }
+    for name in ("timeout", "random_state", "n_jobs", "parallel_backend", "tune_threshold"):
+        params[f"tuning_{name}"] = modeling.get(name, getattr(defaults, name))
+    if "max_candidates" in modeling:
+        params["tuning_max_candidates"] = modeling["max_candidates"]
+    for name in ("strategy_params", "search_space"):
+        params[f"tuning_{name}"] = _parameter_preview(modeling.get(name, {}), f"modeling.{name}")
+    params["tuning_best_params"] = _parameter_preview(evidence["best_params"], "best_params")
+    for name, value in evidence["best_params"].items():
+        key = f"tuning_best_params.{name}"
+        # Long names remain available in the complete artifact and summary above.
+        if len(key) <= 250:
+            params[key] = _parameter_preview(value, f"best_params.{name}")
+    return params
 
 
 def post_selection_cv(

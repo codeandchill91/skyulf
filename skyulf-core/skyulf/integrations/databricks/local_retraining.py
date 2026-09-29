@@ -52,7 +52,12 @@ from .local_pre_split import (
     target_contract,
 )
 from .local_search import base_model_config, prepare_search_pipeline
-from .local_search_results import post_selection_cv, tuning_evidence, validate_search_membership
+from .local_search_results import (
+    post_selection_cv,
+    tuning_evidence,
+    tuning_run_params,
+    validate_search_membership,
+)
 from .local_training_evidence import build_training_evidence, evidence_digest
 from .training_dates import (
     TrainingDateSpec,
@@ -1688,11 +1693,5 @@ def _log_tuning_evidence(run: Any, artifact: Any, config: dict[str, Any]) -> Non
         if search_result is None:
             raise ValueError("Fitted search artifact lacks tuning evidence.")
         run.client.log_dict(run.run_id, search_result, "tuning.json")
-        run.log_params(
-            {
-                "tuning_strategy": search_result["modeling"]["strategy"],
-                "tuning_metric": search_result["scoring_metric"],
-                "tuning_trials": search_result["n_trials"],
-            }
-        )
+        run.log_params(tuning_run_params(search_result))
         run.log_metrics({"tuning_best_score": search_result["best_score"]})

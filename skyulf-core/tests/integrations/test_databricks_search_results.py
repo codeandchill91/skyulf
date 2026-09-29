@@ -16,6 +16,7 @@ from skyulf.integrations.databricks.local_cv import LocalCVSpec
 from skyulf.integrations.databricks.local_search_results import (
     post_selection_cv,
     tuning_evidence,
+    tuning_run_params,
     validate_search_membership,
 )
 from skyulf.pipeline import SkyulfPipeline
@@ -100,6 +101,87 @@ def test_tuning_evidence_records_real_score_and_selected_parameters(tmp_path) ->
     assert evidence["best_params"]["max_depth"] in (2, 3)
     assert evidence["n_trials"] == len(evidence["trials"])
     json.dumps(evidence, allow_nan=False)
+
+
+@pytest.mark.parametrize(
+    ("strategy", "settings"),
+    [
+        ("grid", {}),
+        ("random", {}),
+        ("optuna", {"sampler": "tpe", "pruner": "median"}),
+        ("halving_grid", {"factor": 2, "resource": "n_samples"}),
+        ("halving_random", {"factor": 3, "aggressive_elimination": True}),
+    ],
+)
+def test_run_params_distinguish_search_budget_results_and_strategy(strategy, settings) -> None:
+    """Run comparisons must expose the configured search separately from its outcome."""
+    modeling = _pipeline()["modeling"]
+    modeling.update(strategy=strategy, strategy_params=settings, n_trials=20, timeout=90)
+    evidence = {
+        "modeling": modeling,
+        "requested_metric": "mse",
+        "scoring_metric": "neg_mean_squared_error",
+        "n_trials": 2,
+        "best_params": {"max_depth": None, "forest__n_estimators": 3},
+    }
+    params = tuning_run_params(evidence)
+    assert params["tuning_strategy"] == strategy
+    assert json.loads(params["tuning_strategy_params"]) == settings
+    assert params["tuning_requested_trials"] == 20
+    assert params["tuning_trials"] == 2
+    assert params["tuning_timeout"] == 90
+    assert params["tuning_metric"] == "neg_mean_squared_error"
+    assert params["tuning_requested_metric"] == "mse"
+    assert params["tuning_best_params.max_depth"] == "null"
+    assert params["tuning_best_params.forest__n_estimators"] == "3"
+
+
+def test_run_params_preserve_large_spaces_in_artifact_without_oversized_previews() -> None:
+    """Parameter display limits must not reject or silently truncate a valid search recipe."""
+    modeling = _pipeline()["modeling"]
+    modeling["search_space"] = {"category": ["long category " * 50, "short"]}
+    long_name = "nested__" * 35
+    evidence = {
+        "modeling": modeling,
+        "requested_metric": "mse",
+        "scoring_metric": "neg_mean_squared_error",
+        "n_trials": 2,
+        "best_params": {long_name: "long value " * 100},
+    }
+    original = json.dumps(evidence, sort_keys=True)
+    params = tuning_run_params(evidence)
+    assert params["tuning_search_space"].startswith("See tuning.json: modeling.search_space")
+    assert params["tuning_best_params"].startswith("See tuning.json: best_params")
+    assert all(
+        len(key) <= 250 and len(str(value).encode("utf-8")) <= 500 for key, value in params.items()
+    )
+    assert json.dumps(evidence, sort_keys=True) == original
+
+
+def test_fitted_tuning_parameters_persist_in_mlflow_experiment(tmp_path) -> None:
+    """Parameters visible in Experiments must match the saved fitted result, not a mock."""
+    mlflow = pytest.importorskip("mlflow")
+    from skyulf.integrations.databricks.local_retraining import _log_tuning_evidence
+    from skyulf.integrations.mlflow.tracking import TrackingRun
+
+    artifact, _frame = _artifact(tmp_path)
+    client = mlflow.tracking.MlflowClient(tracking_uri=f"sqlite:///{tmp_path.as_posix()}/runs.db")
+    experiment = client.create_experiment("tuning-parameters", artifact_location=tmp_path.as_uri())
+    created = client.create_run(experiment)
+    run = TrackingRun(client=client, run_id=created.info.run_id, enabled=True)
+    _log_tuning_evidence(run, artifact, artifact.pipeline.config)
+    client.set_terminated(created.info.run_id)
+    stored = client.get_run(created.info.run_id).data
+    evidence = tuning_evidence(artifact)
+    assert evidence is not None
+    assert stored.params["tuning_strategy"] == "grid"
+    assert stored.params["tuning_requested_trials"] == "2"
+    assert stored.params["tuning_random_state"] == "42"
+    assert stored.params["tuning_model_type"] == "random_forest_regressor"
+    assert json.loads(stored.params["tuning_best_params"]) == evidence["best_params"]
+    assert json.loads(stored.params["tuning_search_space"]) == evidence["modeling"]["search_space"]
+    assert stored.metrics["tuning_best_score"] == evidence["best_score"]
+    assert "tuning.json" in {item.path for item in client.list_artifacts(created.info.run_id)}
 
 
 def test_nonfinite_trial_is_explicitly_failed_and_json_safe(tmp_path) -> None:
