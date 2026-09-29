@@ -419,6 +419,24 @@ compatible estimator and numeric resource limits. The resource cannot also be a
 searched parameter; generated spaces exclude it. Optuna requires optuna and
 optuna-integration; its timeout stops between fits, not during a running fit.
 
+After training, open the model's MLflow experiment run and select **Parameters**.
+Competition candidates and multi-target branches each record their own settings:
+
+| Parameter | Meaning |
+|---|---|
+| `tuning_strategy`, `tuning_model_type` | Search strategy and selected model family |
+| `tuning_requested_metric`, `tuning_metric` | Requested objective and resolved scorer |
+| `tuning_requested_trials`, `tuning_trials` | Configured trial budget and actual Core trial count |
+| `tuning_random_state`, `tuning_timeout`, `tuning_n_jobs` | Search seed, timeout and workers |
+| `tuning_strategy_params`, `tuning_search_space` | Strategy controls and effective search space |
+| `tuning_best_params.<name>` | Each parameter selected by the final search |
+
+Large parameter previews point to the complete `tuning.json` artifact. Existing
+`cv_*` parameters remain alongside these fields; `tuning_best_score` is a metric.
+With nested CV, Parameters shows the final search on all training rows; individual
+outer-fold selections remain in `tuning.json`. These fields appear on new training
+runs after updating the Core wheel; existing experiment runs are not backfilled.
+
 The top-level `cv_*` fields are the only fold settings. They score search
 candidates; `cv_enabled: false` uses an internal training-only validation split. There is
 no second post-search CV report. The search objective (`rmse`, `accuracy`, etc.)
