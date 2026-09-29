@@ -32,6 +32,7 @@ SHARED_FIELDS = {
     "retraining_pause_status",
     "model_set_output_mode",
     "model_set_name",
+    "model_set_promotion_policy",
     "source_change_policy",
     "model_change_mode",
     "model_set_table_name",

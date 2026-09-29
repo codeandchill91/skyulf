@@ -34,6 +34,7 @@ from .job_runtime import (
 )
 from .local_branches import BranchTrainingResult, TrainingBranch, branch_training_payload
 from .local_incremental import _bounded_frame, _latest, validate_source_change_policy
+from .local_search import base_model_config
 from .local_workflow import _bind_target_name, resolve_target_config
 from .model_set_output import publication_policy, publication_views
 from .workflow_config import validate_workflow_config
@@ -74,7 +75,13 @@ def load_project_model_set(
 def _validate_set_settings(settings: Any) -> None:
     """Separate editable destinations from rules captured only during training."""
     required = {"model_name", "prediction_table"}
-    optional = {"composition_config", "combined_rules_path", "publication", "source_change_policy"}
+    optional = {
+        "composition_config",
+        "combined_rules_path",
+        "publication",
+        "source_change_policy",
+        "promotion_policy",
+    }
     if not isinstance(settings, dict) or not required.issubset(settings):
         raise ValueError("Model set requires model_name and prediction_table.")
     if set(settings) - required - optional:
@@ -110,9 +117,14 @@ def _bind_publication(value: Any, bindings: dict[str, str]) -> dict[str, Any]:
 
 
 def _set_policy(bound: dict[str, Any]) -> None:
-    """Require serialized manual activation with no automatic scoring handoff."""
-    if bound["promotion_policy"] != "manual_approval" or bound["score_handoff"] != "disabled":
-        raise ValueError("Model sets require manual_approval and disabled score_handoff.")
+    """Allow gated activation while retaining the independently invoked score job."""
+    if (
+        bound["promotion_policy"] not in {"manual_approval", "automatic"}
+        or bound["score_handoff"] != "disabled"
+    ):
+        raise ValueError(
+            "Model sets require manual_approval or automatic and disabled score_handoff."
+        )
 
 
 def capture_set_composition(values: dict[str, str]) -> str:
@@ -243,6 +255,23 @@ def _registered_components(
     return components
 
 
+def _component_tags(
+    branches: tuple[TrainingBranch, ...], outcome: BranchTrainingResult
+) -> dict[str, str]:
+    """Describe each pinned component on the set version without reading mutable aliases."""
+    tags = {"model_set_model_count": str(len(branches))}
+    for branch in branches:
+        result = outcome.components[branch.name]
+        prefix = f"model_set_{branch.name}"
+        tags[f"{prefix}_version"] = result.model_version
+        tags[f"{prefix}_type"] = base_model_config(branch.pipeline)["type"]
+        # Validated registry names are ASCII. Keep every UC tag value <= 256 bytes.
+        for index, start in enumerate(range(0, len(result.model_name), 256), start=1):
+            suffix = "" if index == 1 else f"_{index}"
+            tags[f"{prefix}_name{suffix}"] = result.model_name[start : start + 256]
+    return tags
+
+
 def package_training_model_set(
     spark: Any,
     branches: tuple[TrainingBranch, ...],
@@ -268,6 +297,12 @@ def package_training_model_set(
             record_key_schema=keys,
             composition_source=composition_source,
             composition_config=config["composition_config"],
+            quality_evidence={
+                "expected_champion_version": config.get("expected_champion_version"),
+                "comparisons": {
+                    name: result.comparison_sha256 for name, result in outcome.components.items()
+                },
+            },
         )
         uri = log_model_set(
             path,
@@ -276,7 +311,11 @@ def package_training_model_set(
             tracking_uri=tracking_uri,
         )
         version = register_model(
-            uri, config["model_name"], tracking_uri=tracking_uri, registry_uri=registry_uri
+            uri,
+            config["model_name"],
+            tracking_uri=tracking_uri,
+            registry_uri=registry_uri,
+            tags=_component_tags(branches, outcome),
         )
     return resolve_model(
         config["model_name"],
@@ -311,8 +350,7 @@ def run_model_set_operator(
     spark: Any, values: dict[str, str], settings: dict[str, Any], options: dict[str, Any]
 ) -> dict[str, Any]:
     """Approve or roll back one complete saved set without reading editable recipes."""
-    from ..mlflow.model_set import load_registered_model_set  # noqa: PLC0415
-    from ..mlflow.model_set_lifecycle import approve_model_set, rollback_model_set  # noqa: PLC0415
+    from ..mlflow.model_set_lifecycle import rollback_model_set  # noqa: PLC0415
 
     action = values["lifecycle_action"]
     config = validate_workflow_config(_read_notebook_config(values), action=action)
@@ -328,26 +366,41 @@ def run_model_set_operator(
             admission=admission,
             **endpoints,
         )
-    elif action == "approve":
+    elif action in {"approve", "reject"}:
         if options.get("comparison_sha256"):
             raise ValueError(
-                "Model-set approval uses functional validation, not comparison_sha256."
+                "Model-set approval uses saved per-component comparisons; "
+                "do not pass a single comparison_sha256."
             )
         resolved = resolve_model(
             settings["model_name"], version=options["candidate_version"], **endpoints
         )
-        artifact = load_registered_model_set(resolved, **endpoints)
-        result = approve_model_set(
+        if action == "reject":
+            from ..mlflow.model_set_challenger import reject_model_set  # noqa: PLC0415
+
+            result = reject_model_set(
+                resolved,
+                reason=options["rejection_reason"],
+                expected_champion_version=options["expected_champion_version"],
+                admission=admission,
+                **endpoints,
+            )
+            return {
+                "action": action,
+                "model_set_name": settings["model_name"],
+                "receipt": asdict(result),
+            }
+        from .model_set_release import approve_project_model_set  # noqa: PLC0415
+
+        result = approve_project_model_set(
+            spark,
             resolved,
-            _approval_frame(spark, artifact, config),
+            config,
             expected_champion_version=options["expected_champion_version"],
-            admission=admission,
-            max_rows=config["max_rows"],
-            max_bytes=input_budget_bytes(config.get("max_input_mb")),
-            **endpoints,
+            policy="manual_approval",
         )
     else:
-        raise ValueError("Model sets support train, approve and rollback; reject is unsupported.")
+        raise ValueError("Model sets support train, approve, reject and rollback.")
     return {"action": action, "model_set_name": settings["model_name"], "receipt": asdict(result)}
 
 

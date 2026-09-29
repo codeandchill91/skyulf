@@ -2,6 +2,22 @@
 
 ## Latest follow-up: output selection and shared scoring rules
 
+Latest delivery: [Report113](113-model-set-quality-promotion.md) and
+[Report114](114-model-set-challenger-delivery.md) complete per-component quality
+checks for automatic/manual set activation, model inventory tags, controlled
+challenger/previous_challenger and explicit rejection with safe replay.
+Base: `90808117`; included in the signed delivery containing this handoff.
+Databricks run `119140789004450` and all three tasks are SUCCESS. Both pandas and
+Polars exercised real regression/classification/voting-ensemble Bundle entrypoints,
+manual initialization, automatic replacement, blocked ties/manual bypass, reject,
+replay, challenger displacement, stale guards, rollback and all output modes.
+226 cloud contract tests passed; six CLI-only skips passed locally (31 CLI/prompt
+checks). Full Ruff/format/Ty/CCN10 and commit hooks passed. Component aliases remain
+untouched. Final test set aliases intentionally show champion v1 after rollback,
+challenger v4 and previous_challenger v3 (explicitly rejected).
+Report113 includes the tag inventory; report114 and its JSON receipt contain final
+acceptance evidence. No push authorized. Next READY remains **SM-36d**.
+
 [Report111](111-model-set-source-corrections.md) adds opt-in source UPDATE/DELETE
 recovery through the existing full snapshot model-set scorer. Local targeted
 tests/static checks/actual CLI generation and strict Bundle validation passed.

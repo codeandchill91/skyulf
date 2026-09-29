@@ -146,12 +146,19 @@ def run_branch_training_notebook(
     if settings is not None:
         settings, source = capture_set_rules(values, settings)
     configs = load_training_branch_configs(values)
+    champion_versions = None
+    if settings is not None:
+        from .model_set_release import pin_model_set_baseline  # noqa: PLC0415
+
+        settings, champion_versions = pin_model_set_baseline(
+            settings, configs, _endpoints(next(iter(configs.values())))
+        )
     from .local_branches import (  # noqa: PLC0415 - load training services after preflight
         prepare_training_branches,
         train_local_branches,
     )
 
-    branches = prepare_training_branches(spark, configs)
+    branches = prepare_training_branches(spark, configs, champion_versions=champion_versions)
     base = next(iter(configs.values()))
     with tempfile.TemporaryDirectory(prefix="skyulf-branches-") as directory:
         outcome = train_local_branches(
@@ -176,11 +183,10 @@ def run_branch_training_notebook(
             "version": candidate.version,
             "digest": candidate.digest,
         }
-        payload["next_actions"] = [
-            "Review component comparisons and set outputs.",
-            "Run approve with candidate_version and expected_champion_version.",
-            "Run the score job after explicit approval.",
-        ]
+        from .model_set_release import automatic_model_set_release  # noqa: PLC0415
+
+        payload.update(automatic_model_set_release(spark, candidate, settings, base))
+        payload["next_actions"] = _set_next_actions(payload)
     return _notebook_output(
         payload,
         dbutils,
@@ -188,6 +194,22 @@ def run_branch_training_notebook(
         display_html=display_html,
         exit_notebook=exit_notebook,
     )
+
+
+def _set_next_actions(payload: dict) -> list[str]:
+    """Offer a valid next step without suggesting manual approval can bypass failed gates."""
+    if payload.get("alias_change") is not None:
+        return ["Run the score job using the approved model set."]
+    if payload.get("quality", {}).get("passed") is False:
+        return [
+            "Inspect failed component quality decisions; the champion is unchanged.",
+            "Adjust the models or quality policy and train a new candidate set.",
+        ]
+    return [
+        "Review component comparisons and set outputs.",
+        "Run approve with candidate_version and expected_champion_version.",
+        "Run the score job after explicit approval.",
+    ]
 
 
 def _set_operator_output(
@@ -205,8 +227,8 @@ def _set_operator_output(
         raise ValueError(
             "Multi-target entrypoint supports only train unless a model set is enabled."
         )
-    if values["lifecycle_action"] not in {"approve", "rollback"}:
-        raise ValueError("Model sets support train, approve and rollback; reject is unsupported.")
+    if values["lifecycle_action"] not in {"approve", "reject", "rollback"}:
+        raise ValueError("Model sets support train, approve, reject and rollback.")
     from .model_set_project import run_model_set_operator  # noqa: PLC0415
 
     payload = run_model_set_operator(spark, values, settings, options)

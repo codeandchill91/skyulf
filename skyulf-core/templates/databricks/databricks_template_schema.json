@@ -102,6 +102,14 @@
       "description": "6. Multi-model outputs | Registered MODEL SET name (not a table). Blank = <project_name>_set; enter your own name to override. Target catalog/metadata schema and dev suffix are added automatically",
       "skip_prompt_if": {"properties": {"training_layout": {"const": "single_model"}}}
     },
+    "model_set_promotion_policy": {
+      "order": 104,
+      "type": "string",
+      "default": "manual_approval",
+      "enum": ["manual_approval", "automatic"],
+      "description": "6. Model set lifecycle | manual_approval = review then approve; automatic = activate the complete set only when EVERY branch passes its saved quality_threshold, additional quality_gates and improvement over its counterpart in the current champion set. Configure metrics in branches.py. First sets require absolute thresholds. Score runs separately",
+      "skip_prompt_if": {"properties": {"training_layout": {"const": "single_model"}}}
+    },
     "model_set_output_mode": {
       "order": 99,
       "type": "string",

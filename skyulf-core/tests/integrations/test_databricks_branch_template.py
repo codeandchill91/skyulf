@@ -151,11 +151,17 @@ def test_branch_notebook_rejects_repairs_and_operator_actions(tmp_path, workflow
     not os.environ.get("SKYULF_BUNDLE_CLI_TEST_PROFILE"), reason="CLI generation opt-in required"
 )
 @pytest.mark.parametrize("compute", ["serverless", "policy_cluster"])
-def test_multi_target_cli_graph_has_same_two_jobs(tmp_path, compute):
+@pytest.mark.parametrize("policy", ["manual_approval", "automatic"])
+def test_multi_target_cli_graph_has_same_two_jobs(tmp_path, compute, policy):
     """Actual Go expansion must select one branch task with no alias or score handoff tasks."""
     from test_databricks_bundle_generation import _generate_project, _read_jobs, _synced_sources
 
-    project = _generate_project(tmp_path, training_layout="multi_target", compute_mode=compute)
+    project = _generate_project(
+        tmp_path,
+        training_layout="multi_target",
+        compute_mode=compute,
+        model_set_promotion_policy=policy,
+    )
     jobs = _read_jobs(project)
     assert set(jobs) == {"train", "score"}
     train = jobs["train"]
@@ -180,6 +186,7 @@ def test_multi_target_cli_graph_has_same_two_jobs(tmp_path, compute):
     assert factory.build_model_set()["model_name"].endswith("sm33_generated_set{resource_suffix}")
     assert factory.build_model_set()["combined_rules_path"] == "../features"
     assert factory.build_model_set()["publication"] == {"mode": "all"}
+    assert factory.build_model_set()["promotion_policy"] == policy
 
 
 def test_default_branch_factory_is_disabled():

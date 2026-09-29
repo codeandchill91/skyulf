@@ -72,7 +72,13 @@ class ModelSetManifest(BaseModel):
     output_schema: tuple[ColumnSpec, ...]
     composition_source_sha256: str = Field(pattern=_SHA)
     composition_config_json: str
+    quality_evidence_json: str | None = None
     set_sha256: str = Field(pattern=_SHA)
+
+    @property
+    def quality_evidence(self) -> dict | None:
+        """Detach saved comparison pins and the expected set baseline from callers."""
+        return json.loads(self.quality_evidence_json) if self.quality_evidence_json else None
 
     @property
     def composition_config(self) -> dict:
@@ -87,7 +93,33 @@ class ModelSetManifest(BaseModel):
 
 def manifest_digest(manifest: ModelSetManifest) -> str:
     """Hash the complete canonical contract, excluding the digest field itself."""
-    return checksum(canonical_json(manifest.model_dump(exclude={"set_sha256"})).encode())
+    payload = manifest.model_dump(exclude={"set_sha256"})
+    if manifest.quality_evidence_json is None:
+        payload.pop("quality_evidence_json")
+    return checksum(canonical_json(payload).encode())
+
+
+def quality_evidence_json(value: dict | None, branches: set[str]) -> str | None:
+    """Bind each branch's comparison digest and preserve legacy set identities."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"expected_champion_version", "comparisons"}:
+        raise ValueError("Model set quality evidence requires baseline and comparison pins.")
+    baseline = value["expected_champion_version"]
+    if baseline is not None and (
+        not isinstance(baseline, str) or not re.fullmatch(r"[1-9][0-9]*", baseline)
+    ):
+        raise ValueError("Model set quality baseline must be a concrete version or None.")
+    _validate_quality_pins(value["comparisons"], branches)
+    return canonical_json(value)
+
+
+def _validate_quality_pins(pins: object, branches: set[str]) -> None:
+    """Require one concrete comparison digest for every component."""
+    if not isinstance(pins, dict) or set(pins) != branches:
+        raise ValueError("Model set quality evidence must identify every component.")
+    if any(not isinstance(pin, str) or not re.fullmatch(_SHA, pin) for pin in pins.values()):
+        raise ValueError("Model set quality comparisons require SHA256 digests.")
 
 
 def validate_keys(keys: tuple[ColumnSpec, ...]) -> None:

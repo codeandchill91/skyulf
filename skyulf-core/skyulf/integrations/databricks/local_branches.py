@@ -235,7 +235,11 @@ def _resolve_champion(branch: TrainingBranch, config: dict[str, Any]) -> Trainin
 
 
 def prepare_training_branches(
-    spark: Any, configs: dict[str, dict[str, Any]], *, now: datetime | None = None
+    spark: Any,
+    configs: dict[str, dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    champion_versions: dict[str, str | None] | None = None,
 ) -> tuple[TrainingBranch, ...]:
     """Validate every branch offline, then pin one source version and each champion.
 
@@ -255,7 +259,25 @@ def prepare_training_branches(
     pinned = tuple(
         replace(branch, spec=replace(branch.spec, version=resolved.version)) for branch in branches
     )
+    if champion_versions is not None:
+        return _set_champion_pins(pinned, champion_versions)
     return tuple(_resolve_champion(branch, checked[branch.name]) for branch in pinned)
+
+
+def _set_champion_pins(
+    branches: tuple[TrainingBranch, ...], versions: dict
+) -> tuple[TrainingBranch, ...]:
+    """Use explicitly captured set counterparts without reading component aliases."""
+    if set(versions) != {branch.name for branch in branches}:
+        raise ValueError("Model set champion pins must identify every training branch.")
+    for branch in branches:
+        if branch.champion_version is not None and branch.champion_version != versions[branch.name]:
+            raise ValueError(
+                f"Branch {branch.name} champion_version differs from model-set baseline."
+            )
+    return _validated_branches(
+        tuple(replace(branch, champion_version=versions[branch.name]) for branch in branches)
+    )
 
 
 def _branch_payload(branch: TrainingBranch) -> dict[str, Any]:

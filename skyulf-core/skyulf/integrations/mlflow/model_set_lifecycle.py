@@ -1,7 +1,8 @@
 """Functional validation and explicitly approved coherent model-set releases.
 
-Representative predictions certify executability and exercised outputs, not
-statistical model quality. The caller supplies the approval decision explicitly.
+Representative predictions certify executability and exercised outputs. Sets
+with saved quality pins additionally require a policy-aware validator under the
+same admission. Legacy packages retain their explicit functional-only API.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import pandas as pd
 from ...inference.model_set import ModelSetArtifact
 from ...inference.model_set_scoring import model_set_output_schema, predict_model_set
 from .model_set import load_registered_model_set
+from .model_set_challenger import verify_model_set_challenger
 from .promotion import (
     AliasAdmission,
     AliasChangeReceipt,
@@ -51,11 +53,14 @@ def approve_model_set(
     max_bytes: int,
     tracking_uri: str | None = None,
     registry_uri: str | None = None,
+    quality_validator: Callable[[ModelSetArtifact], dict[str, Any]] | None = None,
 ) -> AliasChangeReceipt:
     """Validate a bounded representative frame and explicitly activate one complete set.
 
     At least one prediction from every component and every composition rule is
     required. Every writer must share the same non-expiring alias admission.
+    Packages with saved quality pins also require a passing quality validator;
+    representative predictions alone cannot approve those packages.
     """
     _admission(admission, registry_uri)
     _bounded_frame(validation_frame, max_rows, max_bytes)
@@ -71,6 +76,12 @@ def approve_model_set(
         )
         if current != expected_champion_version:
             raise AliasConflictError("Champion alias differs from expected version.")
+        verify_model_set_challenger(
+            client, resolved, required=artifact.manifest.quality_evidence is not None
+        )
+        quality = _quality_validation(artifact, expected_champion_version, quality_validator)
+        if quality is not None:
+            evidence["quality"] = quality
         if current == resolved.version:
             raise AliasConflictError("Model set is already the current champion.")
         _validate_set_roles(client, resolved.name, current)
@@ -78,14 +89,48 @@ def approve_model_set(
             _validated_version(client, resolved.name, current, tracking_uri, registry_uri)
         digest = _persist_evidence(client, resolved, evidence, tracking_uri)
         receipt, updates = _release_change(client, resolved, current, digest)
-        _commit_change(client, receipt, updates)
+        _commit_change(
+            client,
+            receipt,
+            updates,
+            version_tags={
+                "validation_status": "passed",
+                "validation_reason": "Set validation passed",
+            },
+        )
         return receipt
 
 
+def _quality_validation(
+    artifact: ModelSetArtifact, expected: str | None, validator: Callable | None
+) -> dict | None:
+    """Require policy-aware validation for quality-bound sets before any alias intent."""
+    saved = artifact.manifest.quality_evidence
+    if saved is not None and validator is None:
+        raise ValueError("Model set requires a quality validator for saved component policies.")
+    if validator is None:
+        return None
+    result = validator(artifact)
+    _validate_quality_result(result, artifact, expected)
+    return result
+
+
+def _validate_quality_result(result: Any, artifact: ModelSetArtifact, expected: str | None) -> None:
+    """Reject incomplete or contradictory aggregate decisions."""
+    branches = {c.branch for c in artifact.manifest.components}
+    if not isinstance(result, dict) or result.get("passed") is not True:
+        raise ValueError("Model set quality validation failed.")
+    if (
+        result.get("expected_champion_version") != expected
+        or set(result.get("components", {})) != branches
+    ):
+        raise ValueError("Model set quality validation differs from baseline or components.")
+    if any(value.get("passed") is not True for value in result["components"].values()):
+        raise ValueError("Model set component quality validation failed.")
+
+
 def _validate_set_roles(client: Any, name: str, current: str | None) -> None:
-    """Keep the set identity dedicated to its explicit champion lifecycle."""
-    if _read_optional_alias(client, name, "challenger") is not None:
-        raise AliasConflictError("Model set has an unexpected challenger alias.")
+    """Require champion history to match the previous committed set release."""
     previous = _read_optional_alias(client, name, "previous_champion")
     if current is None and previous is not None:
         raise AliasConflictError("Model set has a previous champion without a current champion.")
@@ -120,6 +165,8 @@ def _release_change(
     if current is not None:
         updates.append(("previous_champion", current, previous))
     updates.append(("champion", resolved.version, current))
+    if _read_optional_alias(client, resolved.name, "challenger") is not None:
+        updates.append(("challenger", None, resolved.version))
     return receipt, updates
 
 
@@ -136,7 +183,7 @@ def _bounded_frame(frame: pd.DataFrame, max_rows: int, max_bytes: int) -> None:
 def _artifact_identity(resolved: ResolvedModel, artifact: ModelSetArtifact) -> dict[str, Any]:
     """Describe the exact executable set without storing producer paths or source data."""
     source = artifact.directory / "composition.py"
-    return {
+    identity = {
         "kind": "model_set_functional_validation_v1",
         "model_name": resolved.name,
         "model_version": resolved.version,
@@ -152,6 +199,9 @@ def _artifact_identity(resolved: ResolvedModel, artifact: ModelSetArtifact) -> d
             source.read_bytes() if source.is_file() else b""
         ).hexdigest(),
     }
+    if artifact.manifest.quality_evidence is not None:
+        identity["quality_evidence"] = artifact.manifest.quality_evidence
+    return identity
 
 
 def _validation_evidence(
@@ -239,6 +289,17 @@ def _verify_set_evidence(
     expected = _artifact_identity(resolved, artifact)
     if any(evidence.get(key) != value for key, value in expected.items()):
         raise ValueError("Model set validation evidence differs from current package identity.")
+    if artifact.manifest.quality_evidence is not None:
+        _validate_quality_result(
+            evidence.get("quality"),
+            artifact,
+            artifact.manifest.quality_evidence["expected_champion_version"],
+        )
+    _verify_exercised_predictions(evidence)
+
+
+def _verify_exercised_predictions(evidence: dict[str, Any]) -> None:
+    """Require recorded representative rows and successful output execution counts."""
     counts = evidence.get("exercised_predictions", {})
     if not evidence.get("row_count") or not counts or any(value <= 0 for value in counts.values()):
         raise ValueError("Model set validation evidence has no exercised predictions.")

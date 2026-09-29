@@ -747,7 +747,9 @@ folds and keeps the final holdout separate.
 MLflow records a parent run and a linked run for each trained branch. The parent
 saves the exact branch plan and progress; child runs retain their fitted pipeline,
 CV/tuning evidence, holdout metrics, dependency pins and immutable model version.
-Every candidate comparison uses only that branch's own pinned champion and metric.
+With a model set enabled, every candidate is compared with its corresponding
+component in the one champion set pinned before training. Independent component
+aliases cannot change that baseline. Train-only branches retain their own pinned champions.
 
 All branches are required. If one fails, execution stops and the parent is failed;
 earlier immutable candidate versions remain available for inspection. A complete
@@ -755,13 +757,16 @@ result is written only after all branches succeed. Replaying a saved plan keeps
 the source version and split/sample settings; it is a new attempt and can create
 new model versions. It is not an exactly-once registration retry.
 
-Multi-target training requires `promotion_policy=manual_approval` and
-`score_handoff=disabled`. Newly generated projects enable
+Individual branches require `promotion_policy=manual_approval` and
+`score_handoff=disabled`; activation is controlled by the complete set's separate
+`promotion_policy`. Newly generated projects enable
 `src/modeling/model_set.py`: its `build_model_set()` factory declares the set's
 registered model name, prediction table, publication settings and shared rule path. Returning
 `None` disables set packaging; older projects without this file remain train only.
-The project still has two jobs. Training registers the complete set candidate
-without moving any component or set aliases. The multi-target score job uses
+The project still has two jobs. Training registers the complete set candidate;
+training nominates the complete set as `challenger`. Automatic set activation can
+move the set champion, while component aliases stay unchanged. A later candidate
+moves the displaced contender to `previous_challenger`. The multi-target score job uses
 `score_models.py` to select one complete saved set.
 
 ### Activate and score a coherent model set
@@ -771,6 +776,13 @@ model name, version and digest. It also captures `src/features/`, the combined r
 configuration and typed record keys. Scoring and approval load these saved assets;
 editing project files cannot change an existing set. Packaging changed rules
 creates a new set candidate and preserves earlier registered packages.
+
+Each newly registered Bundle set version exposes `model_set_model_count` and
+`model_set_<branch>_name`, `model_set_<branch>_version`, `model_set_<branch>_type`
+tags for quick inspection. The type identifies the selected estimator or ensemble,
+including when tuning was used. Long qualified names continue in `_name_2`,
+`_name_3`, etc. These tags are display metadata; the saved manifest remains the
+execution authority. Existing registered versions are not automatically backfilled.
 
 In `features/scoring.py`, `build_model_rules()` configures each model's eligibility
 and output rules, while `build_combined_rules()` configures calculations across
@@ -841,14 +853,77 @@ of predictions is published. Unrelated objects are never overwritten. Existing
 view definitions must match their recorded projection; use new names to change
 the source or columns. Removing configuration does not delete catalog objects.
 
-After reviewing component evaluation evidence, run the training job with
+### Per-component quality gates and automatic set activation
+
+Bundle initialization asks `model_set_promotion_policy` for multi-target projects.
+The default is `manual_approval`; `automatic` validates and activates a passing
+complete set after training. Existing projects can select this in the dictionary
+returned by `src/modeling/model_set.py`:
+
+```python
+"promotion_policy": "automatic",
+```
+
+In each branch's `workflow` dictionary in `src/modeling/branches.py`, define its
+own task-appropriate metric and limits. For example, a revenue regressor can use:
+
+```python
+"metric": "heldout_rmse",
+"quality_threshold": 10.0,       # RMSE must be <= 10.
+"quality_gates": {"heldout_r2": 0.8},  # R2 must also be >= 0.8.
+"min_improvement": 0.0,          # Replacements must strictly improve RMSE.
+```
+
+A classifier can instead use `metric="heldout_f1"` and `quality_threshold=0.8`.
+Ensembles use the same task-specific policy. These are illustrative limits, not
+recommended thresholds for every dataset. Every branch must have a primary
+`quality_threshold` for activation; automatic mode checks its presence before training.
+
+The first set must pass all absolute gates. A replacement must additionally
+improve **every** component over its counterpart in the pinned champion set by
+`min_improvement`; ties fail even when that value is zero. All models are
+evaluated on their saved heldout rows, separately for each target. Policies,
+comparison digests and the expected set champion are frozen into the package.
+Changing project files cannot relax an existing candidate's gates. Changed
+policies require training a new candidate. Set replacements require the same
+branch names and registered component names; use a new set for a changed layout.
+
+An automatic quality failure leaves the candidate available and the champion
+unchanged. The notebook result and `model_set_quality/.../decision.json` identify
+every failed component and its metrics. Execution, missing evidence and stale
+champion errors fail the job. Successful approval also requires each saved model
+and business rule to execute on representative scoring input. Scoring remains a
+separate job after activation.
+
+Manual approval enforces the same gates. After reviewing evidence, run the training job with
 `lifecycle_action=approve`, the set's `candidate_version`, and
 `expected_champion_version` (`none` for first activation). Approval runs every
 saved component and rule against one bounded scoring-source snapshot and requires
-each to produce at least one result. This validates execution, not predictive
-quality. Save the returned promotion receipt. To restore its complete prior set,
+each to produce at least one result, then rechecks saved holdout quality under the
+same alias admission. Save the returned promotion receipt. To restore its complete prior set,
 use `lifecycle_action=rollback`, `promotion_receipt_json` and the expected current
-champion version. Set rejection is currently unsupported and fails explicitly.
+champion version. Approval clears the promoted set's `challenger` alias and saves
+the former champion as `previous_champion`. `previous_challenger` records displaced
+candidates, not the former champion.
+
+To explicitly reject the current candidate, run the same training job with
+`lifecycle_action=reject`, `candidate_version`, `expected_champion_version`, and a
+nonempty `rejection_reason` (at most 256 UTF-8 bytes). Rejection uses the frozen set
+identity and controlled nomination receipt; it does not run training, scoring, or
+require passing quality gates. The rejected version remains `challenger` for
+inspection until a newer candidate replaces it. Its `approval_status=rejected`
+and `approval_reason` tags block later approval. An identical repeat returns the
+original rejection receipt; changed candidates, champions or reasons fail.
+
+Rollback restores the whole previous set while preserving an unrelated current
+challenger and its history. A stale or manually changed alias blocks the operation.
+
+Previously saved sets remain scoreable. Sets without saved quality evidence must
+be retrained and packaged before approval through this updated Bundle flow.
+The low-level SDK retains explicit functional-only approval for legacy packages;
+new quality-bound packages require controlled nomination and the quality validator.
+Rollback verifies the
+recorded successful evidence and restores the complete prior set.
 
 Run the score job after approval. It resolves the set champion once, or uses an
 explicit `score_model_version`, and joins component outcomes by unique non-null

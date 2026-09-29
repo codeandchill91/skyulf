@@ -54,14 +54,16 @@ Legacy zero-argument builders remain valid when selectors are omitted.
 
 All branches share one pinned input Delta version and one captured training
 clock. Each has independent labels, preprocessing, optional search/CV, registered
-candidate, and comparison against its own champion. Keep every known target
+candidate, and comparison against its counterpart in the pinned champion set.
+Train-only projects use each model's own champion. Keep every known target
 column out of all input feature lists. Missing labels are excluded separately
 per branch. The report exposes the parent run and every component result.
 
 Multi-target projects enable `src/modeling/model_set.py`. Training packages every
 completed component candidate under one model-set name/version/digest. It copies
-the frozen component artifacts and shared `src/features/` source into the set, leaving
-all aliases unchanged. Legacy projects without that factory remain train only.
+the frozen component artifacts and shared `src/features/` source into the set.
+Component aliases stay unchanged. The set's `promotion_policy` controls its
+activation; legacy projects without that factory remain train only.
 `src/features/scoring.py` contains both stages: `build_model_rules()` selects each
 model's eligibility and output rules; `build_combined_rules()` selects calculations
 that use several model results. The latter returns an empty list by default.
@@ -131,14 +133,51 @@ retraining. Old projects without the new setting retain `reject`. This option
 currently belongs to model-set scoring; the standalone single-model insert
 scorer keeps its existing source-change rejection contract.
 
-Use the `train` job's `lifecycle_action=approve`, the concrete set
+### Set quality and activation
+
+Bundle setup asks `model_set_promotion_policy` (default `manual_approval`). Edit
+`promotion_policy` in `src/modeling/model_set.py` to choose `automatic` later.
+The set policy is separate from individual branch policies, which stay manual.
+Set each branch's `metric`, `quality_threshold`, optional `quality_gates` and
+`min_improvement` in its `workflow` dictionary in `src/modeling/branches.py`.
+For example, RMSE with threshold 10 means RMSE <= 10; F1 with threshold 0.8
+means F1 >= 0.8. Use limits suitable for your task, including ensemble branches.
+
+The first set needs passing absolute thresholds for every branch. Replacements
+also require every model to strictly improve over the corresponding component
+in the pinned champion set; ties fail even with min_improvement=0. The quality
+policy and baseline are saved with the set and evaluated on saved holdout rows.
+Editing branches.py cannot change a previously registered set's policy.
+Branch names and registered component names must match the existing set layout.
+
+Automatic mode checks all gates after packaging. A failed gate leaves the current
+champion unchanged and reports the failed components. A complete passing set
+becomes champion. Missing evidence, changed baselines and execution errors fail
+the job. Scoring stays a separate job. Manual approval checks the same gates.
+
+For manual approval, use the `train` job's `lifecycle_action=approve`, the concrete set
 `candidate_version`, and `expected_champion_version` (`none` for first activation).
 Approval executes the saved complete set on a bounded scoring-source snapshot and
-requires each component and rule to produce at least one result. This verifies
-functional execution; review the component comparisons separately for model quality.
+requires each component and rule to produce at least one result, then verifies
+every saved component quality policy before changing the set alias.
+Old sets without quality pins remain scoreable but need retraining/packaging for
+approval through this Bundle flow.
 Save the returned promotion receipt. To restore its prior complete set, use
 `lifecycle_action=rollback`, `promotion_receipt_json`, and the expected current
-champion version. Set rejection is currently unsupported and fails explicitly.
+champion version.
+
+Every completed training candidate is nominated as the set's `challenger`. A new
+candidate moves the displaced contender to `previous_challenger`. Approval removes
+the promoted version's challenger alias and preserves the old champion as
+`previous_champion`. The individual component aliases remain unchanged.
+
+Use `lifecycle_action=reject` with the current set `candidate_version`,
+`expected_champion_version` and `rejection_reason` to record a manual rejection.
+The rejected set stays visible as challenger until a new candidate replaces it;
+its `approval_status=rejected` prevents later approval. Rejection does not run
+training or scoring, or require passing quality gates. An identical repeat reuses
+the original receipt. A changed reason, candidate or champion fails explicitly.
+Rollback restores the complete prior set and preserves unrelated challenger history.
 
 The same `score` job calls `score_models.py` for this layout. It pins the set
 champion once (or uses `score_model_version`) and publishes the full keyed result

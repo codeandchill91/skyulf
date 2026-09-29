@@ -117,7 +117,10 @@ def test_set_factory_rejects_escaping_names(tmp_path, workflow_config, name):
         load_project_model_set(values)
 
 
-def test_set_operator_never_loads_training_or_composition(tmp_path, workflow_config, monkeypatch):
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_set_operator_never_loads_training_or_composition(
+    tmp_path, workflow_config, monkeypatch, action
+):
     """Saved-set operations must work after editable training and rule source disappear."""
     from skyulf.integrations.databricks import model_set_project as module
     from skyulf.integrations.databricks.branch_notebook import run_branch_training_notebook
@@ -125,14 +128,14 @@ def test_set_operator_never_loads_training_or_composition(tmp_path, workflow_con
     values, _ = _project(tmp_path, workflow_config)
     _enable(tmp_path)
     Path(tmp_path / "src/modeling/branches.py").unlink()
-    values.update(
-        lifecycle_action="approve", candidate_version="2", expected_champion_version="none"
-    )
-    operation = Mock(return_value={"action": "approve", "model_set_version": "2"})
+    values.update(lifecycle_action=action, candidate_version="2", expected_champion_version="none")
+    if action == "reject":
+        values["rejection_reason"] = "Business review failed"
+    operation = Mock(return_value={"action": action, "model_set_version": "2"})
     monkeypatch.setattr(module, "run_model_set_operator", operation)
     dbutils = SimpleNamespace(widgets=SimpleNamespace(getAll=lambda: values), notebook=Mock())
     result = run_branch_training_notebook(None, dbutils, exit_notebook=False)
-    assert '"action": "approve"' in result
+    assert f'"action": "{action}"' in result
     assert operation.call_args.args[2]["model_name"] == "workspace.models.example_set_dev"
 
 
@@ -167,6 +170,35 @@ def test_approval_frame_pins_integer_version_and_saved_columns(monkeypatch):
     spark.read.option.assert_called_once_with("versionAsOf", 17)
     assert bounded.call_args.args[1:4] == (("id", "x"), ("id",), 80)
     assert result == "frame"
+
+
+@pytest.mark.parametrize(
+    "model_type", ["linear_regression", "logistic_regression", "voting_regressor"]
+)
+def test_component_tags_preserve_long_names_and_tuned_model_type(model_type):
+    """Inspection tags must preserve full model names and identify the tuned base estimator."""
+    from typing import Any, cast
+
+    from skyulf.integrations.databricks.model_set_project import _component_tags
+
+    name = "catalog." + "s" * 250 + ".revenue"
+    branch = SimpleNamespace(
+        name="revenue",
+        pipeline={
+            "modeling": {
+                "type": "hyperparameter_tuner",
+                "base_model": {"type": model_type},
+            }
+        },
+    )
+    outcome = SimpleNamespace(
+        components={"revenue": SimpleNamespace(model_name=name, model_version="7")}
+    )
+    tags = _component_tags(cast(Any, (branch,)), cast(Any, outcome))
+    assert tags["model_set_revenue_name"] + tags["model_set_revenue_name_2"] == name
+    assert tags["model_set_revenue_type"] == model_type
+    assert tags["model_set_revenue_version"] == "7"
+    assert all(len(value.encode()) <= 256 for value in tags.values())
 
 
 def test_completed_training_packages_original_registered_components(
@@ -213,6 +245,14 @@ def test_completed_training_packages_original_registered_components(
     with pytest.raises(ValueError, match="training plan"):
         package_training_model_set(spark, changed, outcome, settings, **options)
     resolved = package_training_model_set(spark, branches, outcome, settings, **options)
+    tags = client.get_model_version(resolved.name, resolved.version).tags
+    assert tags["model_set_model_count"] == "2"
+    for branch in branches:
+        result = outcome.components[branch.name]
+        assert tags[f"model_set_{branch.name}_name"] == result.model_name
+        assert tags[f"model_set_{branch.name}_version"] == result.model_version
+    assert tags["model_set_amount_type"] == "linear_regression"
+    assert tags["model_set_category_type"] == "logistic_regression"
     saved = load_registered_model_set(resolved, tracking_uri=store, registry_uri=store)
     for name, result in outcome.components.items():
         original = tmp_path / "fit" / name / "pipeline.pkl"
@@ -246,6 +286,7 @@ def test_completed_training_packages_original_registered_components(
         "    return pd.DataFrame({'amount_value': predictions['amount__prediction']})\n",
     }
     newer = package_training_model_set(spark, branches, outcome, revised, **revised_options)
+    assert client.get_model_version(newer.name, newer.version).tags == tags
     assert newer.digest != resolved.digest
     original_again = load_registered_model_set(resolved, tracking_uri=store, registry_uri=store)
     replay = predict_model_set(_data()[["id", "x"]], original_again)

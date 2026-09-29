@@ -23,6 +23,7 @@ from ._model_set_manifest import (
     canonical_json,
     combined_schemas,
     manifest_digest,
+    quality_evidence_json,
     validate_branch,
     validate_components,
     validate_keys,
@@ -124,6 +125,7 @@ def _new_manifest(
     keys: tuple[ColumnSpec, ...],
     source: bytes,
     config: str,
+    quality_evidence: dict | None = None,
 ) -> ModelSetManifest:
     """Build canonical schemas and immutable metadata independently of source paths."""
     from .model_set_scoring import (  # noqa: PLC0415 - avoid runtime inference import cycle
@@ -145,6 +147,9 @@ def _new_manifest(
         output_schema=outputs,
         composition_source_sha256=checksum(source),
         composition_config_json=_configuration(rules),
+        quality_evidence_json=quality_evidence_json(
+            quality_evidence, {c.branch for c in components}
+        ),
         set_sha256="0" * 64,
     )
     return manifest.model_copy(update={"set_sha256": manifest_digest(manifest)})
@@ -157,6 +162,7 @@ def save_model_set(
     record_key_schema: tuple[ColumnSpec, ...],
     composition_source: str = "",
     composition_config: dict | None = None,
+    quality_evidence: dict | None = None,
 ) -> ModelSetArtifact:
     """Copy validated trusted component files into a new atomic offline package."""
     destination = _safe_directory(Path(path))
@@ -171,8 +177,8 @@ def save_model_set(
         _component(Path(directory), branch, reference)
         for branch, (reference, directory) in sorted(components.items())
     )
-    manifest = _new_manifest(records, record_key_schema, source, config)
-    metadata = manifest.model_dump_json().encode()
+    manifest = _new_manifest(records, record_key_schema, source, config, quality_evidence)
+    metadata = manifest.model_dump_json(exclude_none=True).encode()
     if len(metadata) > _MAX_MANIFEST_BYTES:
         raise ValueError("Model set manifest exceeds the size limit.")
     _check_total_size(components, len(source) + len(metadata))
@@ -271,7 +277,11 @@ def load_model_set(path: str | Path) -> ModelSetArtifact:
         for record in manifest.components
     )
     expected = _new_manifest(
-        records, manifest.record_key_schema, code, _configuration(manifest.composition_config)
+        records,
+        manifest.record_key_schema,
+        code,
+        _configuration(manifest.composition_config),
+        manifest.quality_evidence,
     )
     if expected != manifest:
         raise ValueError("Model set manifest disagrees with component schemas or configuration.")

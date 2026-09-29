@@ -38,6 +38,83 @@ def test_unloaded_model_set_fails_without_context() -> None:
         SkyulfModelSetPythonModel().predict(None, pd.DataFrame())
 
 
+def test_set_challenger_history_rejection_and_approval(registered_sets):
+    """Displaced and rejected contenders remain inspectable without partial set activation."""
+    from skyulf.integrations.mlflow.model_set_challenger import (
+        nominate_model_set,
+        reject_model_set,
+    )
+
+    client, uri, versions, query, admission = registered_sets
+    options = {"admission": admission, "tracking_uri": uri, "registry_uri": uri}
+    nominate_model_set(versions[0], expected_champion_version=None, **options)
+    assert str(client.get_model_version_by_alias("coherent", "challenger").version) == "1"
+    nominate_model_set(versions[1], expected_champion_version=None, **options)
+    aliases = client.get_registered_model("coherent").aliases
+    assert {key: str(value) for key, value in aliases.items()} == {
+        "challenger": "2",
+        "previous_challenger": "1",
+    }
+    with pytest.raises(AliasConflictError, match="[Cc]hallenger"):
+        approve_model_set(
+            versions[0],
+            query,
+            expected_champion_version=None,
+            max_rows=10,
+            max_bytes=10000,
+            **options,
+        )
+    receipt = reject_model_set(
+        versions[1], reason="Business review failed", expected_champion_version=None, **options
+    )
+    assert (
+        reject_model_set(
+            versions[1], reason="Business review failed", expected_champion_version=None, **options
+        )
+        == receipt
+    )
+    with pytest.raises(AliasConflictError, match="reason"):
+        reject_model_set(
+            versions[1], reason="Changed reason", expected_champion_version=None, **options
+        )
+    with pytest.raises(AliasConflictError, match="rejected"):
+        approve_model_set(
+            versions[1],
+            query,
+            expected_champion_version=None,
+            max_rows=10,
+            max_bytes=10000,
+            **options,
+        )
+    assert client.get_registered_model("coherent").aliases == aliases
+    assert client.get_model_version("coherent", "2").tags["approval_status"] == "rejected"
+
+
+def test_set_nomination_is_cleared_on_activation_and_rollback_preserves_new_candidate(
+    registered_sets,
+):
+    """Champion activation removes its challenger alias and rollback preserves unrelated contenders."""
+    from skyulf.integrations.mlflow.model_set_challenger import nominate_model_set
+
+    client, uri, versions, query, admission = registered_sets
+    options = {"admission": admission, "tracking_uri": uri, "registry_uri": uri}
+    nominate_model_set(versions[0], expected_champion_version=None, **options)
+    approve_model_set(
+        versions[0], query, expected_champion_version=None, max_rows=10, max_bytes=10000, **options
+    )
+    assert "challenger" not in client.get_registered_model("coherent").aliases
+    with pytest.raises(AliasConflictError, match="[Cc]hampion"):
+        nominate_model_set(versions[1], expected_champion_version=None, **options)
+    nominate_model_set(versions[1], expected_champion_version="1", **options)
+    receipt = approve_model_set(
+        versions[1], query, expected_champion_version="1", max_rows=10, max_bytes=10000, **options
+    )
+    assert "challenger" not in client.get_registered_model("coherent").aliases
+    result = rollback_model_set(receipt, expected_current_version="2", **options)
+    assert result.new_version == "1"
+    assert str(client.get_model_version_by_alias("coherent", "champion").version) == "1"
+
+
 def test_cached_set_is_not_serialized() -> None:
     """Only saved context assets may determine the set restored in another process."""
     model = SkyulfModelSetPythonModel()
@@ -207,7 +284,7 @@ def test_explicit_set_activation_replacement_and_rollback(registered_sets) -> No
         component = resolve_model(branch, version="1", tracking_uri=uri, registry_uri=uri)
         with pytest.raises(ValueError, match="kind"):
             load_registered_model_set(component, tracking_uri=uri, registry_uri=uri)
-    options = {
+    options: dict[str, Any] = {
         "admission": admission,
         "max_rows": 10,
         "max_bytes": 10000,
@@ -270,7 +347,7 @@ def test_unknown_alias_write_blocks_retry(registered_sets, monkeypatch) -> None:
         raise ConnectionError("response lost")
 
     monkeypatch.setattr(mlflow.MlflowClient, "set_registered_model_alias", lose_response)
-    options = {
+    options: dict[str, Any] = {
         "admission": admission,
         "max_rows": 10,
         "max_bytes": 10000,
@@ -306,7 +383,7 @@ def test_uncontrolled_alias_cannot_be_adopted(registered_sets) -> None:
 def test_rollback_requires_prior_validation_evidence(registered_sets) -> None:
     """Missing prior-version validation must fail before rollback changes any alias."""
     client, uri, versions, query, admission = registered_sets
-    options = {
+    options: dict[str, Any] = {
         "admission": admission,
         "max_rows": 10,
         "max_bytes": 10000,
@@ -330,7 +407,7 @@ def test_rollback_requires_prior_validation_evidence(registered_sets) -> None:
 def test_external_previous_alias_blocks_activation(registered_sets) -> None:
     """Unexpected history aliases must be detected before another release replaces them."""
     client, uri, versions, query, admission = registered_sets
-    options = {
+    options: dict[str, Any] = {
         "admission": admission,
         "max_rows": 10,
         "max_bytes": 10000,

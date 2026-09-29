@@ -81,6 +81,19 @@ def test_set_replays_exact_component_bytes_after_source_deletion(tmp_path, compo
     ]
 
 
+def test_legacy_manifest_keeps_original_shape_and_digest(tmp_path, components):
+    """Packages without quality pins must remain readable with their original digest."""
+    artifact = _save(tmp_path, components)
+    payload = json.loads((artifact.directory / "manifest.json").read_text())
+    assert "quality_evidence_json" not in payload
+    expected = payload.pop("set_sha256")
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    assert hashlib.sha256(canonical.encode()).hexdigest() == expected
+    restored = _api().load_model_set(artifact.directory)
+    assert restored.manifest.set_sha256 == expected
+    assert restored.manifest.quality_evidence is None
+
+
 def test_composition_config_is_defensively_captured(tmp_path, components):
     """Caller mutations must never change the rules covered by the set digest."""
     config = {
