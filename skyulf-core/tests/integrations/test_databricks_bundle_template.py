@@ -232,6 +232,12 @@ def _render_default_config(record_key="entity_id", risk_category=""):
         content[content.index("{\n") :]
         .replace("{{$window}}", "full_snapshot")
         .replace("{{$split}}", "random")
+        .replace("{{$cv_enabled}}", "false")
+    )
+    content = content.replace(
+        '{{if $competition}}  "competition_max_trials": {{.competition_max_trials}},\n'
+        '  "competition_max_candidates": 8,\n{{end}}',
+        "",
     )
     content = content.replace(
         '{{if or (eq .cv_type "time_series_split") '

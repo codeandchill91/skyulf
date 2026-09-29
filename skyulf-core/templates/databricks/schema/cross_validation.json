@@ -2,7 +2,7 @@
   "cv_enabled": {
     "type": "string",
     "default": "false",
-    "description": "1. Cross-validation | Use several training-only folds to score search candidates? No duplicate post-search CV report. With CV off, search uses a training-only validation split. Final test rows stay separate. Defaults: 5-fold K-fold, shuffle enabled, seed 42; the following questions select the fold policy before the data window.",
+    "description": "1. Cross-validation | Use several training-only folds to score search candidates? No duplicate post-search CV report. With CV off, search uses a training-only validation split. Final test rows stay separate. Defaults: 5-fold K-fold, shuffle enabled, seed 42; the following questions select the fold policy before the data window. Model competition always enables the shared CV policy.",
     "enum": [
       "false",
       "true"
@@ -11,7 +11,10 @@
     "skip_prompt_if": {
       "properties": {
         "training_layout": {
-          "const": "multi_target"
+          "enum": [
+            "multi_target",
+            "model_competition"
+          ]
         }
       }
     }
@@ -34,6 +37,12 @@
           "properties": {
             "cv_enabled": {
               "const": "false"
+            },
+            "training_layout": {
+              "enum": [
+                "single_model",
+                "multi_target"
+              ]
             }
           }
         }
@@ -67,6 +76,12 @@
           "properties": {
             "cv_enabled": {
               "const": "false"
+            },
+            "training_layout": {
+              "enum": [
+                "single_model",
+                "multi_target"
+              ]
             }
           }
         }
@@ -92,6 +107,12 @@
           "properties": {
             "cv_enabled": {
               "const": "false"
+            },
+            "training_layout": {
+              "enum": [
+                "single_model",
+                "multi_target"
+              ]
             }
           }
         },
@@ -126,6 +147,12 @@
           "properties": {
             "cv_enabled": {
               "const": "false"
+            },
+            "training_layout": {
+              "enum": [
+                "single_model",
+                "multi_target"
+              ]
             }
           }
         },
@@ -167,6 +194,12 @@
           "properties": {
             "cv_enabled": {
               "const": "false"
+            },
+            "training_layout": {
+              "enum": [
+                "single_model",
+                "multi_target"
+              ]
             }
           }
         },
@@ -221,6 +254,12 @@
           "properties": {
             "cv_enabled": {
               "const": "false"
+            },
+            "training_layout": {
+              "enum": [
+                "single_model",
+                "multi_target"
+              ]
             }
           }
         },
@@ -273,6 +312,12 @@
           "properties": {
             "cv_enabled": {
               "const": "false"
+            },
+            "training_layout": {
+              "enum": [
+                "single_model",
+                "multi_target"
+              ]
             }
           }
         },
@@ -325,6 +370,12 @@
           "properties": {
             "cv_enabled": {
               "const": "false"
+            },
+            "training_layout": {
+              "enum": [
+                "single_model",
+                "multi_target"
+              ]
             }
           }
         },
@@ -382,6 +433,12 @@
               "properties": {
                 "cv_enabled": {
                   "const": "false"
+                },
+                "training_layout": {
+                  "enum": [
+                    "single_model",
+                    "multi_target"
+                  ]
                 }
               }
             },
@@ -398,11 +455,6 @@
           ]
         },
         {
-          "properties": {
-            "cv_enabled": {
-              "const": "true"
-            }
-          },
           "anyOf": [
             {
               "properties": {
@@ -420,6 +472,26 @@
                   "const": "time_series_split"
                 }
               }
+            }
+          ],
+          "allOf": [
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "cv_enabled": {
+                      "const": "true"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "training_layout": {
+                      "const": "model_competition"
+                    }
+                  }
+                }
+              ]
             }
           ]
         }
@@ -447,6 +519,12 @@
               "properties": {
                 "cv_enabled": {
                   "const": "false"
+                },
+                "training_layout": {
+                  "enum": [
+                    "single_model",
+                    "multi_target"
+                  ]
                 }
               }
             },
@@ -474,11 +552,6 @@
           ]
         },
         {
-          "properties": {
-            "cv_enabled": {
-              "const": "true"
-            }
-          },
           "anyOf": [
             {
               "properties": {
@@ -496,6 +569,26 @@
                   "const": "time_series_split"
                 }
               }
+            }
+          ],
+          "allOf": [
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "cv_enabled": {
+                      "const": "true"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "training_layout": {
+                      "const": "model_competition"
+                    }
+                  }
+                }
+              ]
             }
           ]
         }

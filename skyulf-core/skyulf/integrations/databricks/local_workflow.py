@@ -656,6 +656,12 @@ def _run_rollback_action(
     )
 
 
+def _validate_action_layout(config: dict[str, Any], action: str) -> None:
+    """Keep single-call training from silently ignoring competition candidates."""
+    if action == "train" and config.get("training_layout") == "model_competition":
+        raise ValueError("Model competition training requires the phased lifecycle job.")
+
+
 def run_action(
     spark: Any,
     config: dict[str, Any],
@@ -671,6 +677,7 @@ def run_action(
     promotion_receipt: AliasChangeReceipt | None = None,
 ) -> Any:
     """Delegate training, scoring and explicit lifecycle actions to existing Core services."""
+    _validate_action_layout(config, action)
     tracking_uri = config.get("tracking_uri", "databricks")
     registry_uri = config.get("registry_uri", "databricks-uc")
     selection, policy = _workflow_policies(config)

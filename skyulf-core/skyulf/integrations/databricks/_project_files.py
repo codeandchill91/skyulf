@@ -146,3 +146,11 @@ def project_source(path: Path) -> str:
 def modeling_hook(path: Path, name: str) -> Path:
     """Resolve organized feature packages beside modeling, or legacy sibling hooks."""
     return path.parent / "modeling" / name if path.is_dir() else path.with_name(name)
+
+
+def renamed_modeling_hook(path: Path, legacy_name: str) -> Path:
+    """Accept a legacy filename only when it cannot compete with its replacement."""
+    legacy = path.with_name(legacy_name)
+    if path.exists() and legacy.exists():
+        raise ValueError(f"Ambiguous modeling files: {path.name} and {legacy_name}; keep only one.")
+    return legacy if legacy.is_file() else path

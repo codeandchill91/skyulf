@@ -21,6 +21,34 @@ scoring/promotion policies and job settings. Serverless is the default. Reviewab
 noninteractive examples are in `skyulf-core/templates/databricks/examples/`. The generated
 project has its own `databricks.yml`; Skyulf's root has no Bundle config.
 
+Choose the training layout, then edit its generated model file:
+
+| Layout | Model settings |
+| --- | --- |
+| `single_model` | `src/modeling/single_model.py`: `MODELING` owns model parameters and tuning/search space |
+| `model_competition` | `src/modeling/model_competition.py`: `MODELS` compares candidates for one shared target |
+| `multi_target` | `src/modeling/multi_model.py`: `MODELS` defines independent targets, models, training/CV, preprocessing and quality limits |
+
+For multiple targets, `src/modeling/model_set.py` separately defines the coherent
+release: registered set name, promotion policy and scoring table/view destinations.
+For example, define revenue and cost models in `multi_model.py`, then configure
+`model_set.py` to approve them together and publish their predictions under one
+set version. Define the profit calculation (`revenue - cost`) in
+`src/features/scoring.py`.
+
+The model files contain plain editable Python dictionaries. Library helpers run
+at initialization to populate settings from your choices; afterward edit the
+generated values directly using Python `True`, `False` and `None`. Keep
+`config/workflow.json` for shared data, validation/CV, size limits and lifecycle
+settings. For `single_model`, its `pipeline.modeling` stays empty; the loader
+supplies the selected model definition. Other layouts retain an internal task
+placeholder there and load the actual model definitions from their Python file.
+
+Legacy compatibility: existing projects can retain inline `pipeline.modeling`
+in `workflow.json`, `src/modeling/candidates.py` or `src/modeling/branches.py`.
+When migrating, remove the old definition: both old and new filenames, or a
+single-model file alongside a nonempty inline model, fail validation.
+
 Regression starts with Core `linear_regression` and `heldout_rmse`;
 classification starts with `logistic_regression` and `heldout_accuracy`.
 The pipeline remains editable: add registered Core preprocessing nodes and
@@ -230,7 +258,7 @@ and post-prediction business rules remain separate work.
 | --- | --- |
 | `src/jobs/` | Databricks notebook entrypoints, referenced by the two job YAMLs |
 | `src/features/` | Saved pre-split and preprocessing recipes, custom pairs/helpers |
-| `src/modeling/` | Optional standalone `tuning.py` and `ensemble.py` settings hooks |
+| `src/modeling/` | Generated single-model, competition and multi-model settings plus model-set policies |
 | `src/tools/` | Offline `preview.py` CLI |
 
 Existing single-file projects and their saved models remain supported. To migrate,
@@ -238,7 +266,8 @@ move your builders into the two feature recipe files, move custom pairs into
 `features/custom/`, and add relative imports. Pass the `src/features` directory
 to `load_project_workflow`; update `initialize_run.py` to use
 `preprocessing_path="../src/features"` (relative to the configuration directory).
-Move tuning/ensemble hooks into `src/modeling/`, update YAML notebook paths to
+If retaining legacy tuning/ensemble hooks, move them into `src/modeling/`. New
+projects keep those settings in each model definition. Update YAML notebook paths to
 `../src/jobs/<name>.py` and sync the new directories. Run the new preview command
 before deploying. Keep only one active copy of each builder. Newly trained models
 capture the new package; older model versions retain their original snapshot.
@@ -422,7 +451,7 @@ strings; generated workflow JSON stores numbers and booleans.
 
 The initializer selects a task, its model (including voting/stacking ensembles),
 then a tuning strategy and default or custom strategy settings. There is no
-Basic/Advanced mode flag. The generated `config/workflow.json` uses Core's
+Basic/Advanced mode flag. The generated model definition uses Core's
 `hyperparameter_tuner` with the selected `base_model`.
 
 | Strategy | Budget and custom settings |
@@ -433,12 +462,20 @@ Basic/Advanced mode flag. The generated `config/workflow.json` uses Core's
 | `halving_random` | Sampled candidate limit and the same halving controls |
 | `optuna` | Trial limit, sampler, pruner, pruning and optional soft timeout |
 
-Search spaces come from Core's model/strategy catalog or ensemble builder.
-Override them in `src/modeling/tuning.py::build_search_space(model_type, strategy, params)`;
-return `None` to preserve an explicit JSON space or use Core defaults. A returned
-dictionary of finite candidate lists takes precedence over the JSON space.
-The resolved space and exact Python source are saved with the trained artifact.
-Changing the file affects future training; scoring uses the saved fitted model.
+Search spaces come from Core's model/strategy catalog or ensemble builder. Bundle
+initialization writes editable finite lists into each model's `search_space`.
+For a single model, edit `MODELING` in `src/modeling/single_model.py`; for competition,
+edit the candidate's `modeling` in `MODELS` in `src/modeling/model_competition.py`;
+for multiple targets, edit the branch's `workflow.pipeline.modeling` in `MODELS`
+in `src/modeling/multi_model.py`. Each definition owns its model params, strategy,
+trial budget and search space. The generated lists are editable snapshots of
+initialization defaults. Set `search_space` to `{}` to use the installed Core's
+current automatic defaults. Changing the definition affects future training;
+scoring uses the saved fitted model and captured recipe.
+
+Legacy `src/modeling/tuning.py::build_search_space(model_type, strategy, params)`
+hooks remain supported: `None` preserves the configured space, while returned finite
+lists override it. New projects do not generate this hook.
 Fixed scalar model parameters remain fixed during search. Ensemble structural
 settings stay on the base model. Estimator-specific value compatibility is checked
 when Core fits the model; offline preview validates structure and budgets.
@@ -447,7 +484,7 @@ Training is sequential (`n_jobs=1`). Grid admission fails if the full space exce
 the configured limit; it does not truncate it. Optuna requires its optional sklearn
 integration. Its timeout is a soft search deadline and cannot interrupt an active
 model fit. Nested binary search can select a decision threshold from training-only
-inner out-of-fold predictions with `pipeline.modeling.tune_threshold: true`.
+inner out-of-fold predictions with `"tune_threshold": True` in the model definition.
 
 Edit shared CV settings in the generated configuration:
 
@@ -504,7 +541,7 @@ supported; their CV evaluates independent fixed-parameter models.
   this final split. A temporal final holdout must also have disjoint groups.
   Missing group identities, insufficient groups and missing classes fail before
   fitting. Row filtering and staged Parquet retain aligned group/time metadata.
-- Nested binary classification supports `pipeline.modeling.tune_threshold: true`
+- Nested binary classification supports `"tune_threshold": True` in the model definition
   (initializer: `search_tune_threshold: "true"`). Each selected recipe generates
   inner out-of-fold probabilities for its threshold. Outer labels and final
   holdout labels never select thresholds. Ranking/probability scores still use
@@ -544,8 +581,8 @@ results or an explicit unavailable reason. Limits are 200 samples, 50 transforme
 features and 50 displayed samples; explanations are disabled when this field is absent.
 
 To enable SHAP in a generated project, add this entry inside the existing
-`pipeline` object in `config/workflow.json` (alongside `modeling` and
-`preprocessing`):
+`pipeline` object in `config/workflow.json` (alongside the empty `modeling` and
+`preprocessing` entries):
 
 ```json
 "explainability": {
@@ -574,12 +611,11 @@ explicit `unavailable` reason.
 ### Ensemble recipes
 
 Select `voting_classifier`, `stacking_classifier`, `voting_regressor` or
-`stacking_regressor` for your task. Edit the generated **`src/modeling/ensemble.py`** to
-choose the component models and their settings. Set `USE_EXAMPLES = True` to
-activate its four example recipes, then edit the recipe for your selected model.
-Returning `None` keeps the parameters already configured in JSON and Core defaults.
-Returned keys override matching `pipeline.modeling.base_model.params` keys before
-`src/modeling/tuning.py` resolves the search space. Both recipes are pinned for future replay.
+`stacking_regressor` for your task. Bundle asks for that ensemble's base models,
+weights, stacking and calibration settings and writes them to its own
+`modeling.base_model.params`. Competition candidates and model-set branches each
+receive independent settings. No separate `ensemble.py` or activation flag is needed.
+Legacy ensemble hooks remain supported for existing projects.
 
 | Setting from Canvas | Bundle ensemble recipe |
 | --- | --- |
@@ -590,8 +626,8 @@ Returned keys override matching `pipeline.modeling.base_model.params` keys befor
 | Calibrate base models | Classification `calibrate_base_models`, `calibration_method`, `calibration_cv` |
 | Stacking meta-learner | `final_estimator`, `final_estimator_params`, `passthrough` |
 | Stacking OOF folds | Ensemble `cv`, independent of the shared search `cv_*` settings |
-| Tune component hyperparameters | Defaults to `true` for all four ensembles in Bundle search; `false` opts out of automatic component spaces |
-| Search strategy / search CV | Existing workflow settings and optional `src/modeling/tuning.py`; no second tuning engine |
+| Tune component hyperparameters | `tune_base_models` defaults to `True` for all four ensembles in Bundle search; `False` opts out of automatic component spaces |
+| Search strategy / search CV | Each model's tuning definition and its workflow's `cv_*` settings |
 
 Use task-compatible member keys from Core; optional XGBoost/LightGBM require the
 corresponding runtime dependency. Invalid members, duplicates, weights, parameter
@@ -599,10 +635,11 @@ names and inapplicable family settings fail explicitly. Fixed component paramete
 remain fixed even with automatic component tuning. Conflicting manual search axes
 are rejected. Search and estimator workers remain sequential.
 
-With an empty `search_space`, the selected component models determine the automatic
-search axes, including when `USE_EXAMPLES = False`. That flag only controls the
-example overrides. Explicit nonempty search spaces remain user-owned. Grid searches
-still enforce the configured candidate limit when combining component spaces.
+Generated search spaces contain the selected components' nested parameter keys.
+After changing component models or calibration, update those keys or clear
+`search_space` to `{}` to rebuild automatic axes from the new composition.
+Explicit nonempty search spaces remain user-owned. Grid searches still enforce
+the configured candidate limit when combining component spaces.
 
 Soft voting predicts probabilities. Hard voting predicts class labels only;
 use label-based metrics such as accuracy/F1. Probability metrics and probability
@@ -878,9 +915,10 @@ remain supported: score delegates to the score entrypoint, while lifecycle keeps
 its sequential behavior and does not acquire durable phase/retry semantics.
 `run_bundle_action`, `run_action` and `train_local_candidate` retain their APIs.
 
-Edit preprocessing in `src/features/preprocessing.py` and model/workflow settings in
-`config/workflow.json`. These remain project choices; common workflow fixes ship in the
-Skyulf wheel instead of requiring edits to every generated notebook.
+Edit preprocessing in `src/features/preprocessing.py`, model settings in the
+selected `src/modeling/` file, and shared workflow settings in `config/workflow.json`.
+These remain project choices; common workflow fixes ship in the Skyulf wheel
+instead of requiring edits to every generated notebook.
 
 ### Independent scoring and promotion policies
 
@@ -1243,8 +1281,9 @@ WHERE customer_id = 'C123';
 ## First run
 
 Build and place the matching Skyulf wheel in the generated project's `dist/`,
-then edit `config/workflow.json` for real source columns, model, split policy
-and size limits, and `src/features/preprocessing.py` for feature engineering.
+then edit `config/workflow.json` for real source columns, split policy and size
+limits, the selected `src/modeling/` file for model settings, and
+`src/features/preprocessing.py` for feature engineering.
 The JSON values are an example, not a dataset.
 Enable Change Data Feed on the scoring source before later inserts arrive.
 

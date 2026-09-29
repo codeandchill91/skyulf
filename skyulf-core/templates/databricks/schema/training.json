@@ -18,11 +18,6 @@
           }
         },
         {
-          "properties": {
-            "cv_enabled": {
-              "const": "true"
-            }
-          },
           "anyOf": [
             {
               "properties": {
@@ -40,6 +35,26 @@
                   "const": "time_series_split"
                 }
               }
+            }
+          ],
+          "allOf": [
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "cv_enabled": {
+                      "const": "true"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "training_layout": {
+                      "const": "model_competition"
+                    }
+                  }
+                }
+              ]
             }
           ]
         }
@@ -130,11 +145,6 @@
                 }
               },
               "not": {
-                "properties": {
-                  "cv_enabled": {
-                    "const": "true"
-                  }
-                },
                 "anyOf": [
                   {
                     "properties": {
@@ -152,6 +162,26 @@
                         "const": "time_series_split"
                       }
                     }
+                  }
+                ],
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "properties": {
+                          "cv_enabled": {
+                            "const": "true"
+                          }
+                        }
+                      },
+                      {
+                        "properties": {
+                          "training_layout": {
+                            "const": "model_competition"
+                          }
+                        }
+                      }
+                    ]
                   }
                 ]
               }
@@ -206,11 +236,6 @@
                 }
               },
               "not": {
-                "properties": {
-                  "cv_enabled": {
-                    "const": "true"
-                  }
-                },
                 "anyOf": [
                   {
                     "properties": {
@@ -228,6 +253,26 @@
                         "const": "time_series_split"
                       }
                     }
+                  }
+                ],
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "properties": {
+                          "cv_enabled": {
+                            "const": "true"
+                          }
+                        }
+                      },
+                      {
+                        "properties": {
+                          "training_layout": {
+                            "const": "model_competition"
+                          }
+                        }
+                      }
+                    ]
                   }
                 ]
               }
@@ -259,11 +304,6 @@
             }
           },
           "not": {
-            "properties": {
-              "cv_enabled": {
-                "const": "true"
-              }
-            },
             "anyOf": [
               {
                 "properties": {
@@ -281,6 +321,26 @@
                     "const": "time_series_split"
                   }
                 }
+              }
+            ],
+            "allOf": [
+              {
+                "anyOf": [
+                  {
+                    "properties": {
+                      "cv_enabled": {
+                        "const": "true"
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "training_layout": {
+                        "const": "model_competition"
+                      }
+                    }
+                  }
+                ]
               }
             ]
           }
@@ -361,11 +421,6 @@
             }
           },
           "not": {
-            "properties": {
-              "cv_enabled": {
-                "const": "true"
-              }
-            },
             "anyOf": [
               {
                 "properties": {
@@ -383,6 +438,26 @@
                     "const": "time_series_split"
                   }
                 }
+              }
+            ],
+            "allOf": [
+              {
+                "anyOf": [
+                  {
+                    "properties": {
+                      "cv_enabled": {
+                        "const": "true"
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "training_layout": {
+                        "const": "model_competition"
+                      }
+                    }
+                  }
+                ]
               }
             ]
           }

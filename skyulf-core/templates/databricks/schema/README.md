@@ -24,6 +24,10 @@ not copied into generated projects.
 | `time_columns.json` | Event-time column parsing and timezone |
 | `label_availability.json` | Label availability and its timestamp parsing |
 | `models.json` | Classification/regression model selection and parameters |
+| `competition.json` | Competition candidate count, models, recipe and budget |
+| `competition_ensemble.json` | Shared prototype for single, candidate and branch ensemble questions |
+| `branch_count.json` | Number of independent model-set branches |
+| `branches.json` | Per-branch targets, models, recipes, search, CV and quality policies |
 | `tuning.json` | Search strategy, space, metric, resources and threshold tuning |
 | `cross_validation.json` | Ordinary/nested folds, group/time splits and seed |
 | `scheduling.json` | Training and scoring schedules |
@@ -52,4 +56,22 @@ the same meaning in the merged schema. Duplicate names within or between files
 fail instead of overwriting a definition. To add a topic, create another JSON
 file here; no list in the builder needs editing.
 
-The large root JSON is generated output. Make future edits here, not there.
+`competition_ensemble.json` is a repeated question group: `SLOT` marks a
+candidate number in field names, descriptions and conditions. The builder expands
+it for candidates 1-8 and rebases the same questions for a single ensemble and
+branches 1-8. `branches.json` uses zero-based local orders and `branch_SLOT_`
+fields, expanded into separate branch groups with their own ensemble questions.
+Edit each prototype once. The committed root schema contains only ordinary CLI
+properties, with no placeholders. Keep absolute question orders unique.
+
+The same build command also regenerates `library/model_search_space.tmpl` from
+Core's hyperparameter registry through `build_model_spaces.py`. Its `--check`
+mode checks both artifacts. `library/modeling.tmpl` renders each model's params
+and search settings; generated projects have no shared tuning or ensemble hook.
+Keep Core as the source of default search ranges instead of editing the generated
+catalog by hand.
+
+The root JSON is generated with one compact line per prompt, including its nested
+conditions, to keep the expanded artifact manageable. Values and question order
+are unchanged by this formatting. Make future edits in the readable topic files
+here, then regenerate the root schema.

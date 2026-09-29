@@ -159,6 +159,7 @@ def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
     ]
     sections = [f"<h2>{_text(titles.get(phase, phase))}</h2>", _table(("Result", "Value"), rows)]
     _append_training_output(sections, payload)
+    _append_competition_output(sections, payload)
     candidate = payload.get("candidate", payload)
     if "candidate" in payload:
         sections.append(
@@ -178,6 +179,36 @@ def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
     return '<div style="font-family:system-ui;line-height:1.5">' + "".join(sections) + "</div>"
 
 
+def _append_competition_output(sections: list[str], payload: dict[str, Any]) -> None:
+    """Display measured training-side ranks separately from champion approval."""
+    competition = payload.get("competition", payload)
+    rows = competition.get("leaderboard")
+    if not isinstance(rows, list):
+        return
+    sections.append(f"<h3>Model competition: {_text(competition['selection_metric'])}</h3>")
+    sections.append(
+        _table(
+            ("Candidate", "Model", "Search", "CV mean", "CV std", "Evaluation", "Training run"),
+            [
+                (
+                    row["candidate"],
+                    row.get("model_type", ""),
+                    row.get("strategy", ""),
+                    row["mean"],
+                    row["std"],
+                    row["evaluation_mode"],
+                    row["run_id"],
+                )
+                for row in rows
+            ],
+        )
+    )
+    sections.append(
+        f"<p>Selected model: <strong>{_text(competition['winner'])}</strong>. "
+        "Holdout quality checks and champion approval are separate steps.</p>"
+    )
+
+
 def render_bundle_output(payload: dict[str, Any]) -> str:
     """Present lifecycle, comparison, scoring and next steps with raw JSON in a disclosure.
 
@@ -190,6 +221,7 @@ def render_bundle_output(payload: dict[str, Any]) -> str:
     candidate = result.get("candidate", result)
     receipt = result.get("alias_change") or result
     sections = [f"<h2>{_text(action.replace('_', ' ').title())} completed</h2>"]
+    _append_competition_output(sections, payload)
     sections.extend(_receipt_summary(receipt))
     name = candidate.get("model_name") or receipt.get("model_name")
     if name:

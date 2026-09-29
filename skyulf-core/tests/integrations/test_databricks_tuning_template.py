@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 from jsonschema import Draft7Validator
 
 TEMPLATE_ROOT = Path(__file__).resolve().parents[2] / "templates/databricks"
@@ -103,15 +104,50 @@ def test_search_questions_follow_strategy_and_keep_cv_single():
     )
 
 
-def test_model_parameters_are_guided_for_ensembles_and_editable_for_others():
-    """Ensemble selection needs a composition prompt; ordinary models retain JSON overrides."""
+def test_ordinary_model_hides_ensemble_and_raw_parameter_prompts():
+    """Ordinary training should not ask for unrelated composition or raw JSON settings."""
     properties = _properties()
     values = {name: item["default"] for name, item in properties.items()}
     assert not _visible(properties, "model_params", values)
-    values["regression_model"] = "voting_regressor"
-    assert _visible(properties, "model_params", values)
-    values.update(task="classification", classification_model="stacking_classifier")
-    assert _visible(properties, "model_params", values)
+    assert all(
+        not _visible(properties, name, values)
+        for name in properties
+        if name.startswith("single_ensemble_")
+    )
+
+
+@pytest.mark.parametrize(
+    ("task", "model", "controls"),
+    [
+        ("regression", "voting_regressor", {"regression_weight_1", "regression_weight_2"}),
+        ("regression", "stacking_regressor", {"regression_final", "cv", "passthrough"}),
+        (
+            "classification",
+            "voting_classifier",
+            {"classification_weight_1", "classification_weight_2", "voting", "calibrate"},
+        ),
+        (
+            "classification",
+            "stacking_classifier",
+            {"classification_final", "cv", "passthrough", "calibrate"},
+        ),
+    ],
+)
+def test_single_ensemble_prompts_follow_selected_model(task, model, controls):
+    """Each ensemble needs its own base menus and controls without the other task's prompts."""
+    properties = _properties()
+    values = {name: item["default"] for name, item in properties.items()}
+    values.update(training_layout="single_model", task=task)
+    values[f"{task}_model"] = model
+    expected = controls | {f"{task}_base_count", f"{task}_base_1", f"{task}_base_2"}
+    visible = {
+        name.removeprefix("single_ensemble_")
+        for name in properties
+        if name.startswith("single_ensemble_") and _visible(properties, name, values)
+    }
+    assert visible == expected
+    assert not _visible(properties, "model_params", values)
+    assert Draft7Validator(properties["model_params"]).is_valid('{"n_jobs": 1}')
 
 
 def test_search_budget_and_seed_inputs_are_bounded():
@@ -178,12 +214,18 @@ def test_search_example_names_compatible_model_axis():
     assert "search_space" not in example
 
 
-def test_tuning_hook_is_synced_with_generated_bundle():
-    """The project hook must reach the workspace where the training notebook imports it."""
-    source = TEMPLATE_ROOT / "template/{{.project_name}}/src/modeling/tuning.py"
-    bundle = TEMPLATE_ROOT / "template/{{.project_name}}/databricks.yml.tmpl"
-    assert source.is_file()
-    assert "    - src/modeling/**/*.py" in bundle.read_text()
-    assert source in list(
-        (TEMPLATE_ROOT / "template/{{.project_name}}/src/modeling").glob("**/*.py")
-    )
+def test_model_definitions_are_synced_with_generated_bundle(tmp_path):
+    """Inline model and search settings must reach the training workspace together."""
+    template = TEMPLATE_ROOT / "template/{{.project_name}}"
+    bundle = (template / "databricks.yml.tmpl").read_text(encoding="utf-8")
+    sync = yaml.safe_load(bundle.split("sync:\n", 1)[1].split("\nvariables:", 1)[0])
+    modeling = tmp_path / "src/modeling"
+    modeling.mkdir(parents=True)
+    definitions = set()
+    for name in ("model_set.py", "model_competition.py", "multi_model.py", "single_model.py"):
+        assert (template / "src/modeling" / f"{name}.tmpl").is_file()
+        generated = modeling / name
+        generated.write_text("# Generated model definition\n", encoding="utf-8")
+        definitions.add(generated)
+    synced = {path for pattern in sync["include"] for path in tmp_path.glob(pattern)}
+    assert definitions <= synced

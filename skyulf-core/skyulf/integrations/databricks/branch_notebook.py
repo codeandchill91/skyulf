@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ...inference.project_code import load_project_module
-from ._project_files import read_source
+from ._project_files import read_source, renamed_modeling_hook
 from .job_runtime import (
     _lifecycle_widget_context,
     _notebook_output,
@@ -41,10 +41,10 @@ def _branch_entries(path: Path) -> dict[str, Any]:
     module = load_project_module(read_source(path))
     factory = getattr(module, "build_training_branches", None)
     if not callable(factory):
-        raise ValueError("branches.py must define build_training_branches().")
+        raise ValueError(f"{path.name} must define build_training_branches().")
     entries = factory()
     if not isinstance(entries, dict) or not entries:
-        raise ValueError("Configure a nonempty branch mapping in src/modeling/branches.py.")
+        raise ValueError(f"Configure a nonempty branch mapping in src/modeling/{path.name}.")
     return entries
 
 
@@ -62,6 +62,7 @@ def _branch_config(
     if not isinstance(overlay, dict):
         raise ValueError("Each branch workflow must be a configuration overlay.")
     config = {**deepcopy(base), **deepcopy(overlay)}
+    config["training_layout"] = "multi_target"
     _training_only(config)
     bindings = {
         name: values[name]
@@ -100,7 +101,9 @@ def load_training_branch_configs(values: dict[str, str]) -> dict[str, dict[str, 
     modeling = Path(values["config_path"]).parent.parent / "src/modeling"
     return {
         name: _branch_config(base, entry, values, modeling)
-        for name, entry in _branch_entries(modeling / "branches.py").items()
+        for name, entry in _branch_entries(
+            renamed_modeling_hook(modeling / "multi_model.py", "branches.py")
+        ).items()
     }
 
 

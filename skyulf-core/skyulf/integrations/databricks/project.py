@@ -12,30 +12,52 @@ from ...inference.project_code import (
     project_source_digest,
 )
 from ...inference.project_scoring import validate_scoring_config
-from ._project_files import modeling_hook, project_source
+from ._project_files import modeling_hook, project_source, read_source
 from ._project_recipes import bind_recipe_source, recipe_steps
 from .local_ensemble import ENSEMBLE_MODELS
 from .local_search import _bounded_space
 
 
-def _strict_json_value(value: Any) -> Any:
+def _strict_json_value(value: Any, filename: str = "ensemble.py") -> Any:
     """Copy only finite JSON values from trusted project hook output."""
     if type(value) is dict:
-        return _strict_json_object(value)
+        return _strict_json_object(value, filename)
     if type(value) is list:
-        return [_strict_json_value(item) for item in value]
+        return [_strict_json_value(item, filename) for item in value]
     if value is None or type(value) in {str, bool, int}:
         return value
     if type(value) is float and math.isfinite(value):
         return value
-    raise ValueError("ensemble.py must return finite JSON values.")
+    raise ValueError(f"{filename} must return finite JSON values.")
 
 
-def _strict_json_object(value: dict[Any, Any]) -> dict[str, Any]:
+def _strict_json_object(value: dict[Any, Any], filename: str = "ensemble.py") -> dict[str, Any]:
     """Copy nested hook mappings while rejecting non-string JSON keys."""
     if any(type(key) is not str for key in value):
-        raise ValueError("ensemble.py must return a JSON object with string keys.")
-    return {key: _strict_json_value(item) for key, item in value.items()}
+        raise ValueError(f"{filename} must return a JSON object with string keys.")
+    return {key: _strict_json_value(item, filename) for key, item in value.items()}
+
+
+def _load_single_model(config: dict[str, Any], path: Path) -> dict[str, Any]:
+    """Resolve editable model parameters once, keeping saved pipelines self-contained."""
+    if config.get("training_layout", "single_model") != "single_model":
+        return config
+    hook = modeling_hook(path, "single_model.py")
+    if not hook.is_file():
+        return config
+    if config["pipeline"].get("modeling") != {}:
+        raise ValueError("Configure modeling in single_model.py; leave pipeline.modeling empty.")
+    factory = getattr(load_project_module(read_source(hook)), "build_modeling", None)
+    if not callable(factory):
+        raise ValueError("single_model.py must define build_modeling().")
+    modeling = _strict_json_value(factory(), hook.name)
+    if type(modeling) is not dict:
+        raise ValueError("single_model.py build_modeling() must return a JSON object.")
+    if len(json.dumps(modeling, allow_nan=False).encode("utf-8")) > MAX_PROJECT_SOURCE_BYTES:
+        raise ValueError("single_model.py returned more than 64 KiB of parameters.")
+    result = deepcopy(config)
+    result["pipeline"]["modeling"] = modeling
+    return result
 
 
 def _load_ensemble_hook(result: dict[str, Any], preprocessing_path: Path) -> None:
@@ -122,13 +144,48 @@ def load_project_workflow(
     Named selections call the corresponding builder with ``recipe=...`` and
     remain bound into saved source for artifact and training-plan replay.
     ``None`` preserves the original zero-argument builder contract.
+    Single-model projects may provide ``single_model.py:build_modeling()`` with
+    an empty JSON modeling object. Resolved parameters persist in the existing
+    pipeline configuration; saved plans replay that configuration directly.
     """
+    if config.get("training_layout") == "model_competition":
+        from .competition_project import load_competition_project  # noqa: PLC0415
+
+        if preprocessing_recipe is not None or pre_split_recipe is not None:
+            raise ValueError(
+                "Competition selects candidate preprocessing and shared default pre-split."
+            )
+        return load_competition_project(config, path)
+    _validate_project_steps(config)
+    config = _load_single_model(config, Path(path))
+    return _resolve_project_workflow(
+        config,
+        path,
+        project_source(Path(path)),
+        preprocessing_recipe=preprocessing_recipe,
+        pre_split_recipe=pre_split_recipe,
+    )
+
+
+def _validate_project_steps(config: dict[str, Any]) -> None:
+    """Reject JSON step chains before reading source that would replace them."""
     if config.get("pipeline", {}).get("preprocessing"):
         raise ValueError("Configure preprocessing in the Python file; leave the JSON list empty.")
     if config.get("pre_split_steps"):
         raise ValueError("Configure pre_split_steps in the Python file; leave the JSON list empty.")
+
+
+def _resolve_project_workflow(
+    config: dict[str, Any],
+    path: str | Path,
+    source: str,
+    *,
+    preprocessing_recipe: str | None = None,
+    pre_split_recipe: str | None = None,
+) -> dict[str, Any]:
+    """Resolve an already captured source snapshot through the existing project hooks."""
     source = bind_recipe_source(
-        project_source(Path(path)),
+        source,
         {"preprocessing_recipe": preprocessing_recipe, "pre_split_recipe": pre_split_recipe},
     )
     module = load_project_module(source)

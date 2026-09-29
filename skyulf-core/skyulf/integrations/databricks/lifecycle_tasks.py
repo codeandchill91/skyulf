@@ -25,6 +25,7 @@ from . import _lifecycle_data as data_stages
 from . import local_retraining as training
 from . import local_workflow as workflow
 from ._lifecycle_state import _PREDECESSORS, LifecycleContext, LifecyclePhaseResult, _PhaseStore
+from .local_competition import prepare_competition, selected_request, validate_competition_budget
 from .local_cv import LocalCVSpec
 from .local_training_evidence import evidence_digest, validate_training_evidence
 
@@ -70,6 +71,11 @@ def _prepare_training_request(
     """Pin source, champion and effective recipe before creating a lifecycle run."""
     if options:
         raise ValueError("Training cannot accept operator options.")
+    if config.get("training_layout") == "model_competition" or "competition" in config:
+        from .competition_project import validate_competition_config  # noqa: PLC0415
+
+        validate_competition_config(config)
+        validate_competition_budget(config)
     spec, cv, champion = workflow._prepare_training(spark, config, policy=policy, now=now)
     if config.get("champion_version") is not None and str(config["champion_version"]) != champion:
         raise ValueError("champion_version does not match the current champion.")
@@ -90,6 +96,8 @@ def _prepare_training_request(
         champion_version=champion,
         effective_config=effective,
     )
+    if "competition" in config:
+        request["competition"] = prepare_competition(config, spec, champion)
 
 
 def _prepared_output(
@@ -198,23 +206,21 @@ def _prepare(
 def _train(spark: Any, store: _PhaseStore) -> dict[str, Any]:
     """Run the SDK's shared fitting computation and upload its fitted package."""
     request = store.request
-    config = request["config"]
+    config: dict[str, Any] = request["config"]
     source = config["pipeline"].get("project_python_source")
     spec = _spec(request["spec"], source)
+    selection = None
     with TemporaryDirectory(prefix="skyulf-phase-fit-") as directory:
         path = Path(directory) / "artifact"
-        fitted = training._fit_candidate(
-            spark,
-            spec,
-            config["pipeline"],
-            run=store.run,
-            pipeline_config=request["effective_config"],
-            artifact_path=path,
-            engine=config["engine"],
-            cv=LocalCVSpec.from_workflow(config),
-            risk_category=config.get("risk_category"),
-            **_prepared_fit_options(store),
-        )
+        if "competition" in request:
+            from .competition_training import fit_competition  # noqa: PLC0415
+
+            fitted, pipeline, path, selection = fit_competition(
+                spark, store, spec, Path(directory), **_prepared_fit_options(store)
+            )
+            config = {**config, "pipeline": pipeline}
+        else:
+            fitted = _fit_single_candidate(spark, store, spec, path)
         training._log_fitted_candidate(
             store.run,
             fitted,
@@ -222,10 +228,12 @@ def _train(spark: Any, store: _PhaseStore) -> dict[str, Any]:
             engine=config["engine"],
             risk_category=config.get("risk_category"),
         )
+        if selection is not None:
+            fitted.tags["competition_winner"] = selection["winner"]
         model_uri = training._log_local_model(
             path, run_id=store.run_id, tracking_uri=config["tracking_uri"]
         )
-    return {
+    output = {
         "model_uri": model_uri,
         "model_digest": fitted.artifact.manifest.pipeline_sha256,
         "project_source_sha256": fitted.artifact.manifest.project_source_sha256,
@@ -234,8 +242,28 @@ def _train(spark: Any, store: _PhaseStore) -> dict[str, Any]:
         "holdout_rows": fitted.holdout_rows,
         "unavailable_labels": fitted.unavailable_labels,
         "tags": fitted.tags,
-        **_training_summary(store, fitted.artifact),
+        **_training_summary(store, fitted.artifact, config=config),
     }
+    if selection is not None:
+        output.update(competition=selection, competition_sha256=evidence_digest(selection))
+    return output
+
+
+def _fit_single_candidate(spark: Any, store: _PhaseStore, spec: Any, path: Path) -> Any:
+    """Keep the original single-model fit path independent from competition orchestration."""
+    config = store.request["config"]
+    return training._fit_candidate(
+        spark,
+        spec,
+        config["pipeline"],
+        run=store.run,
+        pipeline_config=store.request["effective_config"],
+        artifact_path=path,
+        engine=config["engine"],
+        cv=LocalCVSpec.from_workflow(config),
+        risk_category=config.get("risk_category"),
+        **_prepared_fit_options(store),
+    )
 
 
 def _prepared_fit_options(store: _PhaseStore) -> dict[str, Any]:
@@ -258,8 +286,15 @@ def _prepare_dataset(spark: Any, store: _PhaseStore) -> dict[str, Any]:
 
 
 def _select_best_model(spark: Any, store: _PhaseStore) -> dict[str, Any]:
-    """Describe the sole verified candidate without implying multi-model competition."""
+    """Verify the selected fitted candidate and expose its training-side leaderboard."""
     verified = _load_training_evidence(store)
+    if "competition" in store.request:
+        return {
+            **verified.fitted["competition"],
+            "selection_mode": "model_competition",
+            "model_uri": verified.fitted["model_uri"],
+            "model_digest": verified.fitted["model_digest"],
+        }
     return {
         "candidate_count": 1,
         "selection_mode": "single_candidate",
@@ -286,7 +321,7 @@ def _validate_pinned_spec(fitted_spec: dict[str, Any], pinned_spec: dict[str, An
 def _load_training_evidence(store: _PhaseStore) -> _ReplayEvidence:
     """Verify saved fit, invocation and filter evidence before any source replay."""
     fitted = store.receipt("train")["output"]
-    config = store.request["config"]
+    config, effective_config = selected_request(store)
     if fitted["model_uri"] != f"runs:/{store.run_id}/model":
         raise ValueError("Fitted model source differs from lifecycle invocation.")
     artifact = load_run_local_pipeline(
@@ -298,7 +333,7 @@ def _load_training_evidence(store: _PhaseStore) -> _ReplayEvidence:
         artifact.manifest.fitted_engine != config["engine"]
         or artifact.manifest.project_source_sha256 != source_sha
         or fitted["project_source_sha256"] != source_sha
-        or artifact.pipeline.config != store.request["effective_config"]
+        or artifact.pipeline.config != effective_config
     ):
         raise ValueError(
             "Fitted model engine, configuration or project source differs from invocation."
@@ -418,9 +453,12 @@ def _evaluate_register(spark: Any, store: _PhaseStore) -> dict[str, Any]:
     return output | _training_summary(store, verified.artifact)
 
 
-def _training_summary(store: _PhaseStore, artifact: Any) -> dict[str, Any]:
+def _training_summary(
+    store: _PhaseStore, artifact: Any, *, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Expose the same fitted search and explanation evidence in training and registry reports."""
-    config = store.request["config"]
+    if config is None:
+        config, _ = selected_request(store)
     output: dict[str, Any] = {}
     if config["pipeline"]["modeling"]["type"] == "hyperparameter_tuner":
         evidence = training.tuning_evidence(artifact)
@@ -556,7 +594,11 @@ def _result(store: _PhaseStore) -> dict[str, Any]:
         )
     else:
         outcome = AliasChangeReceipt(**store.receipt("operator")["output"]["result"])
-    return asdict(workflow.build_bundle_result(request["config"], request["action"], outcome))
+    result = asdict(workflow.build_bundle_result(request["config"], request["action"], outcome))
+    if request["action"] == "train" and "competition" in request:
+        selected_request(store)
+        result["competition"] = store.receipt("train")["output"]["competition"]
+    return result
 
 
 def _complete_invocation(

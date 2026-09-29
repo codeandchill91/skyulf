@@ -1,6 +1,6 @@
 {
   "search_strategy": {
-    "order": 57,
+    "order": 697,
     "type": "string",
     "default": "random",
     "description": "3. Validation and search | Choose grid, random, halving_grid, halving_random, or optional Optuna. Core supplies a model-appropriate default search space; grid strategies evaluate its full Cartesian product",
@@ -16,7 +16,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -27,7 +29,7 @@
     }
   },
   "search_settings": {
-    "order": 58,
+    "order": 698,
     "type": "string",
     "default": "default",
     "description": "3. Validation and search | Use Core defaults for this strategy, or customize its controls below",
@@ -40,7 +42,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -51,7 +55,7 @@
     }
   },
   "search_max_candidates": {
-    "order": 59,
+    "order": 699,
     "type": "string",
     "default": "1000",
     "description": "3. Validation and search | Maximum full-grid combinations to admit (1-10000). Grid and halving_grid run every combination, so preflight rejects a larger space",
@@ -61,7 +65,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -81,7 +87,7 @@
     }
   },
   "search_space": {
-    "order": 60,
+    "order": 700,
     "type": "string",
     "default": "{}",
     "description": "3. Validation and search | Optional init-file override: JSON object mapping model parameters to finite candidate lists. {} uses the selected model's Core default search space",
@@ -89,7 +95,7 @@
     "skip_prompt_if": {}
   },
   "regression_search_metric": {
-    "order": 61,
+    "order": 701,
     "type": "string",
     "default": "rmse",
     "description": "3. Validation and search | Objective for choosing regression parameters on training folds; separate from the heldout lifecycle metric",
@@ -104,7 +110,10 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target",
+                "model_competition"
+              ]
             }
           }
         },
@@ -119,7 +128,7 @@
     }
   },
   "classification_search_metric": {
-    "order": 62,
+    "order": 702,
     "type": "string",
     "default": "accuracy",
     "description": "3. Validation and search | Objective for choosing classification parameters on training folds; separate from the heldout lifecycle metric",
@@ -137,7 +146,10 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target",
+                "model_competition"
+              ]
             }
           }
         },
@@ -152,7 +164,7 @@
     }
   },
   "search_n_trials": {
-    "order": 63,
+    "order": 703,
     "type": "string",
     "default": "10",
     "description": "3. Validation and search | Trials or initial sampled candidates for random, halving_random and Optuna (1-1000)",
@@ -162,7 +174,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -180,7 +194,7 @@
     }
   },
   "search_timeout": {
-    "order": 64,
+    "order": 704,
     "type": "string",
     "default": "null",
     "description": "3. Validation and search | Optional Optuna soft stop in positive seconds; null disables it. A running estimator fit is not interrupted",
@@ -190,7 +204,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -214,7 +230,7 @@
     }
   },
   "search_random_state": {
-    "order": 65,
+    "order": 705,
     "type": "string",
     "default": "42",
     "description": "3. Validation and search | Seed for sampled parameter choices, separate from the heldout split seed and CV fold seed",
@@ -224,7 +240,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -235,7 +253,7 @@
     }
   },
   "search_factor": {
-    "order": 66,
+    "order": 706,
     "type": "string",
     "default": "3",
     "description": "3. Validation and search | Successive halving keeps roughly one in this many candidates per round (integer 2 or more)",
@@ -245,7 +263,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -272,7 +292,7 @@
     }
   },
   "search_resource": {
-    "order": 67,
+    "order": 707,
     "type": "string",
     "default": "n_samples",
     "description": "3. Validation and search | Halving budget resource: training rows or estimator n_estimators. n_estimators requires explicit max_resources and a compatible model",
@@ -285,7 +305,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -312,7 +334,7 @@
     }
   },
   "search_min_resources": {
-    "order": 68,
+    "order": 708,
     "type": "string",
     "default": "exhaust",
     "description": "3. Validation and search | Halving starting budget: exhaust, smallest, or a positive integer",
@@ -322,7 +344,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -356,7 +380,7 @@
     }
   },
   "search_estimator_min_resources": {
-    "order": 69,
+    "order": 709,
     "type": "string",
     "default": "10",
     "description": "3. Validation and search | Starting estimator budget for n_estimators halving (integer 2 or more; must not exceed max_resources)",
@@ -366,7 +390,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -402,7 +428,7 @@
     }
   },
   "search_max_resources": {
-    "order": 70,
+    "order": 710,
     "type": "string",
     "default": "null",
     "description": "3. Validation and search | Maximum estimator resource count for n_estimators halving; enter a positive integer compatible with the selected model",
@@ -412,7 +438,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -448,7 +476,7 @@
     }
   },
   "search_sampler": {
-    "order": 71,
+    "order": 711,
     "type": "string",
     "default": "tpe",
     "description": "3. Validation and search | Optuna sampler: TPE, random or CMA-ES; CMA-ES samples categorical axes randomly",
@@ -462,7 +490,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -486,7 +516,7 @@
     }
   },
   "search_pruner": {
-    "order": 72,
+    "order": 712,
     "type": "string",
     "default": "median",
     "description": "3. Validation and search | Optuna trial pruner; Core checks whether the selected model and validation method support early stopping. none disables pruning",
@@ -500,7 +530,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -524,7 +556,7 @@
     }
   },
   "search_pruning": {
-    "order": 73,
+    "order": 713,
     "type": "string",
     "default": "true",
     "description": "3. Validation and search | Allow Optuna pruning when model and validation settings support it",
@@ -537,7 +569,9 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -564,13 +598,15 @@
     "type": "string",
     "default": "false",
     "description": "3. Cross-validation | Select a binary decision threshold from inner out-of-fold predictions. Requires probability output; final holdout stays untouched.",
-    "order": 74,
+    "order": 714,
     "skip_prompt_if": {
       "anyOf": [
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target"
+              ]
             }
           }
         },
@@ -578,6 +614,9 @@
           "properties": {
             "cv_enabled": {
               "const": "false"
+            },
+            "training_layout": {
+              "const": "single_model"
             }
           }
         },

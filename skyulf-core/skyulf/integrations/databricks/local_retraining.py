@@ -798,6 +798,36 @@ def _candidate_config(
     return pipeline_config
 
 
+def _candidate_cv(
+    frame: Any,
+    pipeline: dict[str, Any],
+    cv: LocalCVSpec,
+    spec: LocalTrainingSpec,
+    *,
+    search: bool,
+    evaluate_cv: bool,
+) -> dict[str, Any] | None:
+    """Validate search membership or run the optional fixed-model diagnostics.
+
+    Competitions evaluate their shared objective separately, avoiding duplicate
+    fixed-model diagnostics while retaining all search membership checks.
+    """
+    if search:
+        validate_search_membership(
+            frame, pipeline, cv, target_column=spec.target_column, event_column=spec.event_column
+        )
+        return None
+    if evaluate_cv:
+        return evaluate_training_cv(
+            frame,
+            pipeline,
+            cv,
+            target_column=spec.target_column,
+            event_column=spec.event_column if cv.temporal else None,
+        )
+    return None
+
+
 def _fit_candidate(
     spark: Any,
     spec: LocalTrainingSpec,
@@ -810,6 +840,7 @@ def _fit_candidate(
     cv: LocalCVSpec,
     risk_category: str | None,
     prepared_data: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, int] | None = None,
+    evaluate_cv: bool = True,
 ) -> _FittedCandidate:
     """Fit CV and final training rows, persisting selection and provenance evidence."""
     run.log_config(pipeline_config, artifact_file="pipeline_config.json")
@@ -828,23 +859,9 @@ def _fit_candidate(
     native_train = pl.from_pandas(train_frame) if engine == "polars" else train_frame
     native_holdout = pl.from_pandas(holdout) if engine == "polars" else holdout
     search = pipeline_config["modeling"]["type"] == "hyperparameter_tuner"
-    cv_results = None
-    if search:
-        validate_search_membership(
-            native_train,
-            pipeline_config,
-            cv,
-            target_column=spec.target_column,
-            event_column=spec.event_column,
-        )
-    else:
-        cv_results = evaluate_training_cv(
-            native_train,
-            pipeline_config,
-            cv,
-            target_column=spec.target_column,
-            event_column=spec.event_column if temporal_cv else None,
-        )
+    cv_results = _candidate_cv(
+        native_train, pipeline_config, cv, spec, search=search, evaluate_cv=evaluate_cv
+    )
     native_train = _final_fit_frame(native_train, spec, temporal_cv, search)
     artifact = fit_local_workflow(
         pipeline_config,
@@ -854,7 +871,7 @@ def _fit_candidate(
         max_rows=spec.max_rows,
         max_bytes=spec.max_bytes,
     )
-    if search:
+    if search and evaluate_cv:
         cv_results = post_selection_cv(
             native_train,
             artifact,

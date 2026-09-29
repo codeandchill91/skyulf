@@ -179,7 +179,7 @@ def test_multi_target_cli_graph_has_same_two_jobs(tmp_path, compute, policy):
         jobs["score"]["tasks"][0]["notebook_task"]["notebook_path"] == "../src/jobs/score_models.py"
     )
     bundle = yaml.safe_load((project / "databricks.yml").read_text())
-    assert "src/modeling/branches.py" in _synced_sources(project, bundle)
+    assert "src/modeling/multi_model.py" in _synced_sources(project, bundle)
     from skyulf.inference.project_code import load_project_module
 
     factory = load_project_module((project / "src/modeling/model_set.py").read_text())
@@ -189,20 +189,18 @@ def test_multi_target_cli_graph_has_same_two_jobs(tmp_path, compute, policy):
     assert factory.build_model_set()["promotion_policy"] == policy
 
 
-def test_default_branch_factory_is_disabled():
-    """Choosing a multi-target layout must still require explicit branch configuration."""
-    from skyulf.inference.project_code import load_project_module
-
-    module = load_project_module((TEMPLATE / "src/modeling/branches.py").read_text())
-    assert module.build_training_branches() == {}
+def test_branch_factory_is_generated_from_initializer_answers():
+    """The former disabled sample must be replaced by an executable generated declaration."""
+    assert not (TEMPLATE / "src/modeling/branches.py").exists()
+    assert (TEMPLATE / "src/modeling/multi_model.py.tmpl").is_file()
 
 
 @pytest.mark.skipif(
     not os.environ.get("SKYULF_BUNDLE_CLI_TEST_PROFILE"), reason="CLI generation opt-in required"
 )
 @pytest.mark.parametrize("task", ["regression", "classification"])
-def test_commented_branch_example_validates_with_either_base_task(tmp_path, workflow_config, task):
-    """Copied branches must clear inherited policies and validate ordinary and ensemble models."""
+def test_generated_branches_validate_with_either_base_task(tmp_path, workflow_config, task):
+    """Selected branches must clear inherited policies and validate ordinary and ensemble models."""
     from test_databricks_bundle_generation import _generate_project
 
     from skyulf.integrations.databricks.branch_notebook import load_training_branch_configs
@@ -216,11 +214,22 @@ def test_commented_branch_example_validates_with_either_base_task(tmp_path, work
         stratify="true" if task == "classification" else "false",
         cv_enabled="true",
         cv_type="stratified_k_fold" if task == "classification" else "k_fold",
+        branch_count="4",
+        branch_1_name="revenue",
+        branch_1_target_column="revenue_target",
+        branch_1_cv_enabled="false",
+        branch_2_name="cost",
+        branch_2_target_column="cost_target",
+        branch_2_cv_enabled="false",
+        branch_3_name="churn",
+        branch_3_task="classification",
+        branch_3_target_column="churn_target",
+        branch_3_cv_enabled="false",
+        branch_4_name="demand_ensemble",
+        branch_4_target_column="demand_target",
+        branch_4_regression_model="voting_regressor",
+        branch_4_cv_enabled="false",
     )
-    source = (project / "src/modeling/branches.py").read_text()
-    sample = source[source.index("    # return {") : source.index("    return {}")]
-    executable = "def build_training_branches():\n" + sample.replace("    # ", "    ")
-    (project / "src/modeling/branches.py").write_text(executable)
     values["config_path"] = str(project / "config/workflow.json")
     configs = load_training_branch_configs(values)
     checked = {
@@ -233,10 +242,10 @@ def test_commented_branch_example_validates_with_either_base_task(tmp_path, work
         "churn_target",
         "demand_target",
     }
-    ensemble = checked["demand_ensemble"]["pipeline"]["modeling"]
+    ensemble = checked["demand_ensemble"]["pipeline"]["modeling"]["base_model"]
     assert ensemble["type"] == "voting_regressor"
     assert ensemble["params"]["base_estimators"] == ["linear_regression", "ridge"]
-    assert ensemble["params"]["weights"] == {"linear_regression": 1.0, "ridge": 2.0}
+    assert ensemble["params"]["weights"] == [1, 1]
     assert all(
         config["cv_enabled"] is False and config["stratify"] is False for config in checked.values()
     )

@@ -103,8 +103,8 @@ def test_multi_target_output_selection_renders_custom_destinations(tmp_path, mod
     assert not (project / "src/composition").exists()
 
 
-def test_cli_multi_target_setup_needs_only_shared_inputs(tmp_path):
-    """Shared inputs alone must initialize a valid base config for branch overlays."""
+def test_cli_multi_target_setup_defaults_omitted_branch_settings(tmp_path):
+    """Explicit target selections must initialize model settings from their branch defaults."""
     from test_databricks_layout_prompts import SHARED_FIELDS
 
     root = Path(__file__).resolve().parents[2] / "templates/databricks"
@@ -112,7 +112,11 @@ def test_cli_multi_target_setup_needs_only_shared_inputs(tmp_path):
     project = _generate_project(
         tmp_path,
         training_layout="multi_target",
-        omit_fields=set(properties) - SHARED_FIELDS,
+        omit_fields={
+            name
+            for name in properties
+            if name not in SHARED_FIELDS and not name.startswith("branch_")
+        },
     )
     config = _read_validated_config(project, action="train")
     assert config["task"] == "regression"
@@ -292,6 +296,21 @@ def test_cli_rejects_invalid_limits_and_column_text(tmp_path, field, value):
     assert field in generated.stderr
 
 
+def _read_modeling(project):
+    """Resolve the generated Python settings through the actual project loader."""
+    from skyulf.integrations.databricks.project import load_project_workflow
+
+    config = json.loads((project / "config/workflow.json").read_text())
+    return load_project_workflow(config, project / "src/features")["pipeline"]["modeling"]
+
+
+def _load_project_config(project, config):
+    """Resolve the model file before checking the training contract, as notebooks do."""
+    from skyulf.integrations.databricks.project import load_project_workflow
+
+    return load_project_workflow(config, project / "src/features")
+
+
 def _read_validated_config(project, *, action="score"):
     """Check generated settings against the same preflight used by the notebook."""
     from skyulf.integrations.databricks.local_workflow import resolve_target_config
@@ -308,7 +327,10 @@ def _read_validated_config(project, *, action="score"):
             "resource_suffix": "_dev",
         },
     )
-    validate_workflow_config(resolved, action=action)
+    from skyulf.integrations.databricks.project import load_project_workflow
+
+    loaded = load_project_workflow(resolved, project / "src/features")
+    validate_workflow_config(loaded, action=action)
     return config
 
 
@@ -412,10 +434,10 @@ def test_cli_plain_column_lists_preserve_order_and_empty_preprocessing(tmp_path)
     assert config["record_key_columns"] == ["customer_id", "observation_id"]
     assert config["input_columns"] == ["income", "age", "balance"]
     assert config["pipeline"]["preprocessing"] == []
-    modeling = config["pipeline"]["modeling"]
+    modeling = _read_modeling(project)
     assert modeling["type"] == "hyperparameter_tuner"
     assert modeling["base_model"] == {"type": "random_forest_regressor", "params": {}}
-    assert modeling["search_space"] == {}
+    assert modeling["search_space"]
     assert config["metric"] == "heldout_mae"
 
 
@@ -503,7 +525,7 @@ def test_cli_guided_pipeline_cv_and_offline_preview(tmp_path, engine, task):
             if "notebook_task" in entry:
                 assert entry["max_retries"] == 0
                 assert entry["disable_auto_optimization"] is True
-    modeling = config["pipeline"]["modeling"]
+    modeling = _read_modeling(project)
     assert modeling["type"] == "hyperparameter_tuner"
     assert modeling["base_model"] == {"type": model, "params": {}}
     assert modeling["n_trials"] == 2
@@ -611,8 +633,8 @@ def test_cli_initializes_task_without_stale_training_inputs(tmp_path, task, mode
     config = _read_validated_config(project)
     assert config["config_version"] == 1
     assert config["task"] == task
-    assert config["pipeline"]["modeling"]["type"] == "hyperparameter_tuner"
-    assert config["pipeline"]["modeling"]["base_model"] == {"type": model, "params": {}}
+    assert _read_modeling(project)["type"] == "hyperparameter_tuner"
+    assert _read_modeling(project)["base_model"] == {"type": model, "params": {}}
     assert config["metric"] == metric
     assert config["training_version"] is None
     assert all(config[key] is None for key in ("start", "holdout_start", "cutoff"))
@@ -834,7 +856,7 @@ def test_cli_generates_date_free_training_contract(tmp_path, engine, task, avail
             "resource_suffix": "",
         },
     )
-    validate_workflow_config(resolved, action="train")
+    validate_workflow_config(_load_project_config(project, resolved), action="train")
     assert config["split_strategy"] == "random"
     assert config["training_window_mode"] == "full_snapshot"
     assert config["window_timezone"] is None
@@ -871,7 +893,7 @@ def test_cli_preserves_conflicting_fields_for_preflight_rejection(tmp_path):
         },
     )
     with pytest.raises(ValueError, match="event_column|[Rr]andom"):
-        validate_workflow_config(resolved, action="train")
+        validate_workflow_config(_load_project_config(project, resolved), action="train")
 
 
 @pytest.mark.parametrize(
@@ -907,7 +929,7 @@ def test_cli_training_examples_pass_manual_preflight(tmp_path, filename):
             "resource_suffix": "",
         },
     )
-    checked = validate_workflow_config(resolved, action="train")
+    checked = validate_workflow_config(_load_project_config(project, resolved), action="train")
     assert checked["training_version"] == json.loads(inputs.get("training_version", "null"))
     assert checked["split_strategy"] == inputs.get("split_strategy", "random")
     if inputs.get("start"):
@@ -931,6 +953,7 @@ def test_generated_nested_search_preserves_separate_inner_folds(tmp_path):
     from skyulf.integrations.databricks.local_cv import LocalCVSpec
     from skyulf.integrations.databricks.local_search import prepare_search_pipeline
 
+    config = _load_project_config(project, config)
     cv = LocalCVSpec.from_workflow(config)
     recipe = prepare_search_pipeline(
         config["pipeline"], cv, target_column=config["target_column"], event_column=None
@@ -983,6 +1006,7 @@ def test_generated_nested_policies_preserve_controls_and_two_jobs(tmp_path, poli
         )
     project = _generate_project(tmp_path, **settings)
     config = _read_validated_config(project)
+    config = _load_project_config(project, config)
     cv = LocalCVSpec.from_workflow(config)
     recipe = prepare_search_pipeline(
         config["pipeline"],

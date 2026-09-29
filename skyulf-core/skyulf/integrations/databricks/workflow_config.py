@@ -22,6 +22,10 @@ from .training_dates import training_date_spec
 
 _ACTIONS = {"train", "score", "approve", "reject", "rollback"}
 _FIELDS = {
+    "training_layout",
+    "competition",
+    "competition_max_trials",
+    "competition_max_candidates",
     "pre_split_steps",
     *CV_FIELDS,
     "training_sample_rows",
@@ -229,22 +233,33 @@ def _validate_workflow_quality(config: dict[str, Any], task: str, policy: str) -
         raise ValueError("Automatic promotion requires quality_threshold.")
 
 
-def _validate_workflow_pipeline(config: dict[str, Any], task: str) -> None:
+def _validate_workflow_pipeline(
+    config: dict[str, Any], task: str, *, allow_empty_model: bool = False
+) -> None:
     """Check the model task and preprocessing types against the Core registry."""
     pipeline = config.get("pipeline")
     if not isinstance(pipeline, dict):
         raise ValueError("pipeline must be a Core pipeline configuration object.")
     validate_pipeline_config(pipeline)
+    _validate_pipeline_model(pipeline, task, allow_empty_model=allow_empty_model)
+    for step in pipeline.get("preprocessing", []):
+        if issubclass(NodeRegistry.get_calculator(step["transformer"]), BaseModelCalculator):
+            raise ValueError("pipeline.preprocessing cannot contain a model calculator.")
+    validate_explanation_config(pipeline)
+
+
+def _validate_pipeline_model(
+    pipeline: dict[str, Any], task: str, *, allow_empty_model: bool
+) -> None:
+    """Validate declared models, permitting only an explicit empty saved-model declaration."""
     model = pipeline.get("modeling")
+    if allow_empty_model and type(model) is dict and not model:
+        return
     if not isinstance(model, dict) or not isinstance(model.get("type"), str):
         raise ValueError("pipeline.modeling.type must identify a registered Core model.")
     calculator = NodeRegistry.get_calculator(base_model_config(pipeline)["type"])
     if not issubclass(calculator, BaseModelCalculator) or calculator().problem_type != task:
         raise ValueError("Configured model does not match the declared task.")
-    for step in pipeline.get("preprocessing", []):
-        if issubclass(NodeRegistry.get_calculator(step["transformer"]), BaseModelCalculator):
-            raise ValueError("pipeline.preprocessing cannot contain a model calculator.")
-    validate_explanation_config(pipeline)
 
 
 def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str, Any]:
@@ -255,6 +270,7 @@ def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str
     actions use their own pinned data.
     """
     _validate_workflow_fields(config, action)
+    _validate_layout(config, action)
     task = _choice(config, "task", {"regression", "classification"})
     _choice(config, "engine", {"pandas", "polars"})
     selection = _choice(config, "score_model_selection", {"champion", "pinned_version"})
@@ -264,7 +280,13 @@ def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str
     _validate_workflow_sources(config)
     _validate_workflow_model_selection(config, selection)
     _validate_workflow_quality(config, task, policy)
-    _validate_workflow_pipeline(config, task)
+    _validate_workflow_pipeline(
+        config,
+        task,
+        allow_empty_model=(
+            action != "train" and config.get("training_layout", "single_model") == "single_model"
+        ),
+    )
     _training_contract(config, action)
     cv = LocalCVSpec.from_workflow(config)
     if action == "train":
@@ -276,6 +298,21 @@ def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str
             event_column=config.get("event_column"),
         )
     return deepcopy(config)
+
+
+def _validate_layout(config: dict[str, Any], action: str) -> None:
+    """Admit explicit layouts and verify resolved competition before remote work."""
+    layout = config.get("training_layout", "single_model")
+    if layout not in {"single_model", "multi_target", "model_competition"}:
+        raise ValueError("Unknown training_layout.")
+    if "competition" in config and layout != "model_competition":
+        raise ValueError("Competition candidates require training_layout=model_competition.")
+    if layout == "model_competition" and action == "train":
+        from .competition_project import validate_competition_config  # noqa: PLC0415
+        from .local_competition import validate_competition_budget  # noqa: PLC0415
+
+        validate_competition_config(config)
+        validate_competition_budget(config)
 
 
 def _validate_bundle_cv_holdout(config: dict[str, Any], cv: LocalCVSpec) -> None:

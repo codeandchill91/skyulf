@@ -1,7 +1,6 @@
 """Project ensemble recipes must be bounded, optional and pinned before search."""
 
 import hashlib
-import runpy
 from pathlib import Path
 
 import pytest
@@ -131,35 +130,12 @@ def test_ensemble_output_is_bounded(tmp_path):
         load_project_workflow(config, source)
 
 
-def test_generated_ensemble_recipes_cover_each_supervised_ensemble(tmp_path):
-    """The editable examples must cover voting and stacking for both tasks."""
-    from skyulf.integrations.databricks.local_ensemble import prepare_ensemble_model
-    from skyulf.registry import NodeRegistry
-
+@pytest.mark.parametrize("hook_name", ["ensemble.py", "tuning.py"])
+def test_new_template_omits_shared_modeling_hooks(hook_name):
+    """Fresh projects must keep model settings in their own model definitions."""
     template = (
         Path(__file__).resolve().parents[2] / "templates/databricks/template/{{.project_name}}"
     )
-    source = template / "src/modeling/ensemble.py"
-    assert source.is_file()
-    bundle = (template / "databricks.yml.tmpl").read_text(encoding="utf-8")
-    assert "    - src/modeling/ensemble.py" in bundle
-    example = tmp_path / "ensemble.py"
-    example.write_text(
-        source.read_text(encoding="utf-8").replace("USE_EXAMPLES = False", "USE_EXAMPLES = True"),
-        encoding="utf-8",
-    )
-    factory = runpy.run_path(str(example))["build_ensemble_params"]
-    for model_type in (
-        "voting_classifier",
-        "stacking_classifier",
-        "voting_regressor",
-        "stacking_regressor",
-    ):
-        params = factory(model_type)
-        assert len(params["base_estimators"]) >= 2
-        assert params["n_jobs"] == 1
-        assert params["tune_base_models"] is True
-        selected = {"type": model_type, "params": params}
-        prepare_ensemble_model(selected, NodeRegistry.get_calculator(model_type)())
-    assert factory("voting_classifier")["calibrate_base_models"] is True
-    assert factory("voting_regressor")["tune_base_models"] is True
+    source = template / "src/modeling" / hook_name
+    assert not source.exists()
+    assert not source.with_suffix(".py.tmpl").exists()

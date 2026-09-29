@@ -46,12 +46,39 @@ def source_project_requirements(source: str) -> tuple[str, ...]:
     Legacy single-file source and old package snapshots have no declared pins.
     Generated packages use a literal ``requirements`` keyword on their installer.
     """
-    for statement in ast.parse(source).body:
+    statements = ast.parse(source).body
+    common = _common_source(statements)
+    if common is not None:
+        statements = ast.parse(common).body
+        if _common_source(statements) is not None:
+            raise ValueError("Saved common project source cannot contain another shared snapshot.")
+    for statement in statements:
         if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
             call = statement.value
             if isinstance(call.func, ast.Name) and call.func.id == "install_project_package":
                 return _call_requirements(call)
     return ()
+
+
+def _common_source(statements: list[ast.stmt]) -> str | None:
+    """Read only the bounded literal common snapshot emitted by competition composition."""
+    from .project_code import project_source_digest  # noqa: PLC0415 - source/package import cycle
+
+    captured = [
+        ast.literal_eval(statement.value)
+        for statement in statements
+        if isinstance(statement, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "__skyulf_common_source__"
+            for target in statement.targets
+        )
+    ]
+    if not captured:
+        return None
+    if len(captured) != 1:
+        raise ValueError("Saved common project source must have one literal snapshot.")
+    project_source_digest(captured[0])
+    return captured[0]
 
 
 def _call_requirements(call: ast.Call) -> tuple[str, ...]:

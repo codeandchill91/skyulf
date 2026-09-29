@@ -23,10 +23,10 @@ repos:
   - repo: local
     hooks:
       - id: databricks-template-schema
-        name: Databricks template schema is up to date
+        name: Databricks template schema and model catalog are up to date
         entry: uv run --no-sync python skyulf-core/templates/databricks/build_schema.py --check
         language: system
-        files: ^skyulf-core/templates/databricks/(schema/.*\.json|build_schema\.py|databricks_template_schema\.json)$
+        files: ^skyulf-core/(templates/databricks/(schema/.*\.json|build_(schema|model_spaces)\.py|databricks_template_schema\.json|library/model_search_space\.tmpl)|skyulf/modeling/hyperparameters/.*\.py)$
         pass_filenames: false
       - id: trailing-whitespace
         name: trim trailing whitespace

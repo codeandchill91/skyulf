@@ -1,7 +1,7 @@
 """Configure feature transformations fitted separately within each training fold.
 
 Single-model training calls the default recipe. For multi-target training,
-branches.py selects preprocessing_recipe independently for every model.
+multi_model.py selects preprocessing_recipe independently for every model.
 Available starters: default, none, frequency_only, imputer_only, combined.
 Adapt their columns or add your own named function to the mapping below.
 Core and custom steps run in list order. Only the selected recipe runs.

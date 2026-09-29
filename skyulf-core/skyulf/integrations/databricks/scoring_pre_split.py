@@ -6,7 +6,7 @@ from typing import Any
 import pandas as pd
 import polars as pl
 
-from ...inference.project_code import is_registered_project_step
+from ...inference.project_code import is_registered_project_step, load_project_module
 from .local_pre_split import FIXED_TYPES, projected_fixed_steps
 
 
@@ -103,13 +103,29 @@ def validate_pre_split_scoring(config: Any, module: Any) -> None:
 def _register_saved_filters(steps: list[dict[str, Any]], module: Any) -> None:
     """Restore project class registrations while keeping saved parameters authoritative."""
     custom = [step for step in steps if "pre_split" in step]
+    owner = _saved_filter_owner(module, custom)
     if custom and not all(is_registered_project_step(step["transformer"]) for step in custom):
         factory = getattr(module, "build_pre_split_steps", None)
         if not callable(factory):
             raise ValueError("Saved project must define build_pre_split_steps for custom filters.")
         factory()
-    if any(not step["transformer"].startswith(module.__name__ + ".") for step in custom):
+    if any(not step["transformer"].startswith(owner.__name__ + ".") for step in custom):
         raise ValueError("Scoring filters must belong to the saved project package.")
+
+
+def _saved_filter_owner(module: Any, custom: list[dict[str, Any]]) -> Any:
+    """Admit canonical shared filters only when their exact builder and steps are captured."""
+    source = getattr(module, "__skyulf_common_source__", None)
+    if source is None or not custom:
+        return module
+    owner = load_project_module(source)
+    factory = getattr(owner, "build_pre_split_steps", None)
+    if not callable(factory) or factory is not getattr(module, "build_pre_split_steps", None):
+        raise ValueError("Shared scoring filters require the captured canonical builder.")
+    expected = factory()
+    if not isinstance(expected, list) or any(step not in expected for step in custom):
+        raise ValueError("Shared scoring filters differ from the captured canonical recipe.")
+    return owner
 
 
 def pre_split_exclusion_reasons(frame: pd.DataFrame, config: dict[str, Any]) -> pd.Series:

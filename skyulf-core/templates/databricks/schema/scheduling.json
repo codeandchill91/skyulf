@@ -1,6 +1,6 @@
 {
   "retraining_mode": {
-    "order": 75,
+    "order": 715,
     "type": "string",
     "default": "manual",
     "description": "4. Lifecycle | Start training yourself, or enable automatic training on your cron schedule after deployment",
@@ -10,7 +10,7 @@
     ]
   },
   "retraining_cron_expression": {
-    "order": 76,
+    "order": 716,
     "type": "string",
     "default": "0 0 3 3 * ?",
     "description": "4. Lifecycle | When to train (Quartz cron)? 0 0 3 3 * ? = monthly on day 3 at 03:00; 0 0 3 1 1,7 ? = Jan 1 and Jul 1 at 03:00. Does not set the data window",
@@ -24,7 +24,7 @@
     }
   },
   "retraining_timezone_id": {
-    "order": 77,
+    "order": 717,
     "type": "string",
     "default": "UTC",
     "description": "4. Lifecycle | Timezone for the job clock: Europe/Copenhagen means 03:00 Copenhagen time. UTC means 03:00 UTC. This does not change dates in your data",
@@ -52,7 +52,7 @@
         }
       }
     },
-    "order": 78
+    "order": 718
   },
   "scoring_mode": {
     "type": "string",
@@ -62,7 +62,7 @@
       "scheduled"
     ],
     "description": "4. Lifecycle | Start scoring yourself, or schedule it independently of training?",
-    "order": 79,
+    "order": 719,
     "skip_prompt_if": {
       "properties": {
         "training_layout": {
@@ -94,7 +94,7 @@
         }
       ]
     },
-    "order": 80
+    "order": 720
   },
   "scoring_timezone_id": {
     "type": "string",
@@ -119,7 +119,7 @@
         }
       ]
     },
-    "order": 81
+    "order": 721
   },
   "scoring_pause_status": {
     "type": "string",
@@ -147,6 +147,6 @@
         }
       ]
     },
-    "order": 82
+    "order": 722
   }
 }

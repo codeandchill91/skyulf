@@ -1,6 +1,6 @@
 """Configure fixed cleanup and training eligibility before splitting.
 
-branches.py selects pre_split_recipe independently of preprocessing_recipe.
+multi_model.py selects pre_split_recipe independently of preprocessing_recipe.
 Available starters: default, none, complete_inputs. Adapt columns below.
 Single-model training uses default; uncomment steps there when needed.
 Custom pre-split steps cannot learn statistics or change survivor values.

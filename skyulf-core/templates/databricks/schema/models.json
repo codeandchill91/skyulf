@@ -1,6 +1,6 @@
 {
   "regression_model": {
-    "order": 54,
+    "order": 594,
     "type": "string",
     "default": "linear_regression",
     "description": "2. Model | Choose a regression model. It starts with its default settings; README explains how to change them",
@@ -27,7 +27,10 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target",
+                "model_competition"
+              ]
             }
           }
         },
@@ -42,7 +45,7 @@
     }
   },
   "classification_model": {
-    "order": 55,
+    "order": 595,
     "type": "string",
     "default": "logistic_regression",
     "description": "2. Model | Choose a classification model. It starts with its default settings; README explains how to change them",
@@ -71,7 +74,10 @@
         {
           "properties": {
             "training_layout": {
-              "const": "multi_target"
+              "enum": [
+                "multi_target",
+                "model_competition"
+              ]
             }
           }
         },
@@ -86,53 +92,11 @@
     }
   },
   "model_params": {
-    "order": 56,
+    "order": 696,
     "type": "string",
     "default": "{}",
-    "description": "2. Model | Optional JSON object of fixed model parameters. For voting/stacking, include base_estimators and any base_estimator_params or final_estimator to define the ensemble. Other models can set this in an init file or generated config",
+    "description": "Optional init-file fixed model params. For custom fixed params, Core resolves the automatic search space; otherwise generated model settings include editable search lists.",
     "pattern": "^\\{.*\\}$",
-    "skip_prompt_if": {
-      "anyOf": [
-        {
-          "properties": {
-            "training_layout": {
-              "const": "multi_target"
-            }
-          }
-        },
-        {
-          "not": {
-            "anyOf": [
-              {
-                "properties": {
-                  "task": {
-                    "const": "regression"
-                  },
-                  "regression_model": {
-                    "enum": [
-                      "voting_regressor",
-                      "stacking_regressor"
-                    ]
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "task": {
-                    "const": "classification"
-                  },
-                  "classification_model": {
-                    "enum": [
-                      "voting_classifier",
-                      "stacking_classifier"
-                    ]
-                  }
-                }
-              }
-            ]
-          }
-        }
-      ]
-    }
+    "skip_prompt_if": {}
   }
 }

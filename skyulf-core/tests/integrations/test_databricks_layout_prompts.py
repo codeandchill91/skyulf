@@ -64,8 +64,8 @@ SHARED_FIELDS = {
         },
     ],
 )
-def test_multi_target_only_prompts_for_shared_setup(settings):
-    """Branch recipes own model and split settings, even when advanced defaults are supplied."""
+def test_multi_target_prompts_for_shared_setup_and_independent_branches(settings):
+    """Model-set setup must collect per-branch settings without unrelated root-model prompts."""
     properties = json.loads(SCHEMA.read_text())["properties"]
     values = {name: field["default"] for name, field in properties.items()}
     values.update(settings, training_layout="multi_target")
@@ -74,7 +74,9 @@ def test_multi_target_only_prompts_for_shared_setup(settings):
         for name, field in properties.items()
         if not Draft7Validator(field.get("skip_prompt_if", False)).is_valid(values)
     }
-    assert visible <= SHARED_FIELDS
+    branch_fields = {name for name in properties if name.startswith("branch_")}
+    assert visible <= SHARED_FIELDS | branch_fields
+    assert {"branch_count", "branch_1_name", "branch_2_target_column"} <= visible
     assert {
         "project_name",
         "engine",

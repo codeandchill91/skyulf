@@ -8,7 +8,7 @@
 > Databricks run `119140789004450`: all tasks SUCCESS; 226 contracts passed and
 > real pandas/Polars mixed-model lifecycle/scoring checks passed. Six CLI-only
 > cloud skips were checked locally. Included in the signed delivery based on
-> `90808117`; next READY remains SM-36d. Tag inventory is in report113.
+> `90808117`; SM-36d is PARKED by user. Tag inventory is in report113.
 > SM-36a is DONE for its approved scope. Project packages/custom steps:
 > `9cc81304`; temporal history: `84a7dcb4` ([report105](105-sm36a-temporal-history-delivery.md)).
 > Keyed scoring outcomes, assets/pins and output rules are implemented and verified
@@ -26,7 +26,31 @@
 > 20 real Delta tests passed; four CLI-only skips passed locally. Model/strategy,
 > CV/ensemble, nested policy and real UC/project pipelines verified. Nested-halving
 > bug fixed; final 176-test replay with the g_score dependency fix passed on Databricks.
-> Next READY: SM-36d (segmentation).
+> Latest: SM-54 single-target model competition is DONE. Model-set
+> nesting is outside this delivery; SM-36d remains PARKED. Both-engine live
+> regression/classification lifecycle passed in run `837376719969902`; final
+> wheel contracts 134/134 plus custom-filter/ensemble scoring passed in run
+> `845512547977070`. [Delivery116](116-sm54-model-competition-delivery.md).
+> Follow-up: Bundle now guides candidate count/model selection, shared search and
+> per-candidate ensemble menus/settings, then generates editable candidates.py.
+> 218 related tests, generated-recipe training and strict Bundle validation passed
+> locally; this prompt follow-up did not run a new cloud job (report116).
+> Model-owned settings follow-up: single models, candidates and generated branches
+> now own ensemble/tuning settings and populated Core-derived search spaces.
+> Legacy hooks remain supported. 273 local tests and three strict Bundle validations
+> passed; no new cloud run. Uncommitted [evidence117](117-model-owned-settings-plan.md).
+> Readable model layout: generated single_model.py, model_competition.py and
+> multi_model.py now contain editable Python dictionaries; model_set.py retains
+> joint promotion/publication policy. Compact schema preserves prompt semantics.
+> Saved-action isolation and legacy compatibility are covered in
+> [follow-up118](118-model-layout-plan.md): final 356-test regression passed,
+> three strict Bundle validations and static gates passed at that checkpoint.
+> Final live acceptance [119](119-model-layout-live-delivery.md) supersedes the
+> earlier cloud-pending notes: 419 local tests, 511 installed-wheel cloud tests
+> (zero skips), six strict CLI validations, and both-engine single/competition/
+> multi-model scenarios passed. Regression/classification lifecycle, saved custom
+> scoring, set quality rejection/promotion, and source UPDATE/DELETE rebuilds
+> passed. Included in the signed SM-54/model-layout delivery; no push requested.
 > [Recipe follow-up108](108-sm36b-named-recipes.md): independent preprocessing/pre-split selectors,
 > inline asset help and shared-only setup; eight models passed the full cloud pipeline.
 > This file replaces the removed historical `OPEN_QUEUE.md` as the active queue.
@@ -185,7 +209,7 @@ on an existing candidate without retraining or reuploading the model.
 | SM-36g | Nested temporal cross-validation | SM-36f | DONE | Temporal inner/outer/final search, strict clock and holdout boundaries, row gap/expanding/rolling windows; all layers connected. Final local 291 tests; frontend134; cloud16/16 +384 replay rows; independent persisted audit passed. Included in the nested-policy delivery commit. [Evidence and limits](101-sm36ghi-nested-policy-acceptance.md) |
 | SM-36h | Nested group cross-validation | SM-36f | DONE | Group/stratified-group policies preserve metadata and isolate inner/outer/final holdouts; split identifiers excluded from features. Final local 291 tests; frontend134; cloud16/16 +384 replay rows; independent persisted audit passed. Included in the nested-policy delivery commit. [Evidence and limits](101-sm36ghi-nested-policy-acceptance.md) |
 | SM-36i | Nested decision-threshold tuning | SM-36f | DONE | Binary training-only inner OOF thresholds, threshold-aware outer scoring, separate final threshold and persisted provenance/artifact parity. Final local 291 tests; frontend134; cloud16/16 +384 replay rows; independent persisted audit passed. Included in the nested-policy delivery commit. [Evidence and limits](101-sm36ghi-nested-policy-acceptance.md) |
-| SM-54 | Single-job candidate competition and one champion | SM-35, SM-36f | READY | Select task-compatible standalone and ensemble candidates together; shared snapshot/folds, per-candidate tuning and MLflow runs, deterministic winner selection, winner-only registration and existing promotion/rollback policy. See acceptance below. |
+| SM-54 | Single-job candidate competition and one champion | SM-35, SM-36f | DONE | Single target only; shared snapshot/folds, candidate tuning/recipes/runs, deterministic CV winner, winner-only registration and existing lifecycle. Guided model-owned Python settings verified on both engines: 419 local + 511 final-wheel cloud tests and real single/competition/multi-model lifecycle/scoring acceptance. Signed delivery includes reports115-119. [Final evidence119](119-model-layout-live-delivery.md), [Delivery116](116-sm54-model-competition-delivery.md), [Plan115](115-sm54-model-competition-plan.md). |
 | SM-37 | Production identities and enforced writer ownership | SM-32, SM-33 | WAIT | Per-target run_as/permissions/hosts/roots; one lifecycle writer; scoring cannot move aliases; actual denial and lifecycle queue evidence; report93 additions: optional UC `registered_models`/`schemas` grants, experiment permissions, operator `CAN_MANAGE_RUN`, optional per-target host/catalog prompts; shared non-home `root_path` for syst/prod (today `~/<project>/<target>`, so the experiment lands in the deployer's home) ([report93](93-dbml-reference-recomparison.md)) |
 | SM-38 | Operational limits, retry/recovery and run summaries | SM-34, SM-37 | WAIT | Configurable timeouts/retries/notifications; source/model/count/no-op summaries; score-only recovery and no blind alias retry; report93 additions: email/webhook notifications, `health.rules` duration limits, task `timeout_seconds` ([report93](93-dbml-reference-recomparison.md)) |
 | SM-39 | Reproducible packaging and per-target compute | SM-33 | WAIT | Central compatible wheel/runtime pins, clean install/load, configurable policy/worker/cost settings and strict target validation; report93 additions: DAB `artifacts:` wheel build, one Skyulf/MLflow version variable, automatic Optuna dependencies, serverless `budget_policy_id` and job tags ([report93](93-dbml-reference-recomparison.md)) |
@@ -202,10 +226,15 @@ status. Existing explicit live authorizations retain their original scope.
 
 ## SM-54 - Single-job candidate competition (2026-09-28)
 
-User-approved scope; planning only, not implemented. One lifecycle job trains
+Implemented and verified locally and on Databricks; included in the signed delivery
+documented in report119. One lifecycle job trains
 several candidates for the same supervised task and target, then selects one
 winner. This is separate from SM-36b/36c, which retain and compose multiple
 models rather than select one champion.
+
+Delivery: [report116](116-sm54-model-competition-delivery.md). The first delivery
+executes candidates sequentially and requires all requested candidates to finish.
+Model-set nesting remains outside the user-approved single-target scope.
 
 Acceptance:
 
@@ -331,7 +360,7 @@ scheduled clocks and company acceptance remain separate.
 
 ## Custom feature engineering and multi-model follow-up
 
-### SM-36a/b/c complete; next SM-36d
+### SM-36a/b/c complete; SM-36d parked
 
 User follow-up: generated scoring.py offers pre_split/custom/combined modes
 and an independent target-filter-skip switch. Pre-split reuse passed 285 local

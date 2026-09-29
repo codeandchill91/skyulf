@@ -12,6 +12,18 @@ from skyulf.inference.project_code import load_project_module, project_source_di
 from skyulf.integrations.databricks._project_files import project_source
 
 
+def test_competition_captured_source_retains_pins_without_executing_code():
+    """Composed competition source must retain literal wheel pins during metadata inspection."""
+    from skyulf.inference.project_dependencies import source_project_requirements
+
+    common = (
+        "raise RuntimeError('must not execute')\n"
+        "install_project_package(__name__, {}, requirements=('numpy==1.2.3',))\n"
+    )
+    source = f"__skyulf_common_source__ = {common!r}\nexec(__skyulf_common_source__)\n"
+    assert source_project_requirements(source) == ("numpy==1.2.3",)
+
+
 def _package(tmp_path):
     """Create a small asset consumer whose relative helper imports need saved data."""
     root = tmp_path / "features"
