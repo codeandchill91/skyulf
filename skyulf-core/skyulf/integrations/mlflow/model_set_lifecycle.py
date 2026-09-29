@@ -1,0 +1,304 @@
+"""Functional validation and explicitly approved coherent model-set releases.
+
+Representative predictions certify executability and exercised outputs, not
+statistical model quality. The caller supplies the approval decision explicitly.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import tempfile
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+import pandas as pd
+
+from ...inference.model_set import ModelSetArtifact
+from ...inference.model_set_scoring import model_set_output_schema, predict_model_set
+from .model_set import load_registered_model_set
+from .promotion import (
+    AliasAdmission,
+    AliasChangeReceipt,
+    AliasConflictError,
+    _active_marker,
+    _admission,
+    _assert_not_rejected,
+    _commit_change,
+    _event_tag,
+    _read_event,
+    _read_optional_alias,
+    alias_resource_id,
+    controlled_champion_version,
+    rollback_promotion,
+)
+from .registry import ResolvedModel, _make_client, _require_mlflow, resolve_model
+
+_PROOF_TAG = "model_set_validation_sha256"
+_PATH_TAG = "model_set_validation_artifact"
+
+
+def approve_model_set(
+    resolved: ResolvedModel,
+    validation_frame: pd.DataFrame,
+    *,
+    expected_champion_version: str | None,
+    admission: AliasAdmission,
+    max_rows: int,
+    max_bytes: int,
+    tracking_uri: str | None = None,
+    registry_uri: str | None = None,
+) -> AliasChangeReceipt:
+    """Validate a bounded representative frame and explicitly activate one complete set.
+
+    At least one prediction from every component and every composition rule is
+    required. Every writer must share the same non-expiring alias admission.
+    """
+    _admission(admission, registry_uri)
+    _bounded_frame(validation_frame, max_rows, max_bytes)
+    artifact = load_registered_model_set(
+        resolved, tracking_uri=tracking_uri, registry_uri=registry_uri
+    )
+    evidence = _validation_evidence(resolved, artifact, validation_frame, max_bytes)
+    client = _make_client(_require_mlflow(), tracking_uri, registry_uri)
+    with admission.hold(alias_resource_id(resolved.name)):
+        _assert_not_rejected(client, resolved.name, resolved.version)
+        current = controlled_champion_version(
+            resolved.name, tracking_uri=tracking_uri, registry_uri=registry_uri
+        )
+        if current != expected_champion_version:
+            raise AliasConflictError("Champion alias differs from expected version.")
+        if current == resolved.version:
+            raise AliasConflictError("Model set is already the current champion.")
+        _validate_set_roles(client, resolved.name, current)
+        if current is not None:
+            _validated_version(client, resolved.name, current, tracking_uri, registry_uri)
+        digest = _persist_evidence(client, resolved, evidence, tracking_uri)
+        receipt, updates = _release_change(client, resolved, current, digest)
+        _commit_change(client, receipt, updates)
+        return receipt
+
+
+def _validate_set_roles(client: Any, name: str, current: str | None) -> None:
+    """Keep the set identity dedicated to its explicit champion lifecycle."""
+    if _read_optional_alias(client, name, "challenger") is not None:
+        raise AliasConflictError("Model set has an unexpected challenger alias.")
+    previous = _read_optional_alias(client, name, "previous_champion")
+    if current is None and previous is not None:
+        raise AliasConflictError("Model set has a previous champion without a current champion.")
+    if current is not None:
+        event_id = _active_marker(client, name, current)
+        tags = client.get_model_version(name, current).tags or {}
+        event = _read_event(tags.get(_event_tag(str(event_id))))
+        expected = event.get("p") if event["k"] == "promotion" else event.get("o")
+        if previous != expected:
+            raise AliasConflictError(
+                "Model set previous champion differs from its committed receipt."
+            )
+
+
+def _release_change(
+    client: Any, resolved: ResolvedModel, current: str | None, digest: str
+) -> tuple[AliasChangeReceipt, list[tuple[str, str | None, str | None]]]:
+    """Plan one complete-set activation using the shared durable receipt format."""
+    previous = _read_optional_alias(client, resolved.name, "previous_champion")
+    receipt = AliasChangeReceipt(
+        event_id=uuid4().hex,
+        kind="initial" if current is None else "promotion",
+        model_name=resolved.name,
+        alias="champion",
+        prior_version=current,
+        new_version=resolved.version,
+        comparison_sha256=digest,
+        parent_event_id=_active_marker(client, resolved.name, current) if current else None,
+        previous_champion_version=previous,
+    )
+    updates: list[tuple[str, str | None, str | None]] = []
+    if current is not None:
+        updates.append(("previous_champion", current, previous))
+    updates.append(("champion", resolved.version, current))
+    return receipt, updates
+
+
+def _bounded_frame(frame: pd.DataFrame, max_rows: int, max_bytes: int) -> None:
+    """Reject empty or oversized validation data before any model is loaded."""
+    if type(max_rows) is not int or type(max_bytes) is not int or min(max_rows, max_bytes) <= 0:
+        raise ValueError("Validation max_rows and max_bytes must be positive integers.")
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        raise ValueError("Model set validation requires a nonempty pandas DataFrame.")
+    if len(frame) > max_rows or int(frame.memory_usage(index=True, deep=True).sum()) > max_bytes:
+        raise ValueError("Model set validation frame exceeds its explicit bounds.")
+
+
+def _artifact_identity(resolved: ResolvedModel, artifact: ModelSetArtifact) -> dict[str, Any]:
+    """Describe the exact executable set without storing producer paths or source data."""
+    source = artifact.directory / "composition.py"
+    return {
+        "kind": "model_set_functional_validation_v1",
+        "model_name": resolved.name,
+        "model_version": resolved.version,
+        "set_sha256": artifact.manifest.set_sha256,
+        "components": [
+            {"branch": c.branch, "reference": c.reference.model_dump()}
+            for c in artifact.manifest.components
+        ],
+        "input_schema": [c.model_dump() for c in artifact.manifest.input_schema],
+        "output_schema": [c.model_dump() for c in model_set_output_schema(artifact)],
+        "composition_config": artifact.manifest.composition_config,
+        "composition_source_sha256": hashlib.sha256(
+            source.read_bytes() if source.is_file() else b""
+        ).hexdigest(),
+    }
+
+
+def _validation_evidence(
+    resolved: ResolvedModel, artifact: ModelSetArtifact, frame: pd.DataFrame, max_bytes: int
+) -> dict[str, Any]:
+    """Exercise every output path and bind success to frame and executable identities."""
+    result = predict_model_set(frame, artifact, max_rows=len(frame), max_bytes=max_bytes)
+    if int(result.memory_usage(index=True, deep=True).sum()) > max_bytes:
+        raise ValueError("Model set validation output exceeds its explicit byte bound.")
+    branches = [component.branch for component in artifact.manifest.components]
+    rules = [rule["name"] for rule in artifact.manifest.composition_config["outputs"]]
+    exercised = {}
+    for name in [*branches, *rules]:
+        count = int((result[f"{name}__scoring_status"] == "predicted").sum())
+        if count == 0:
+            raise ValueError(f"Validation data did not exercise model set output {name}.")
+        exercised[name] = count
+    return {
+        **_artifact_identity(resolved, artifact),
+        "row_count": len(frame),
+        "dataset_sha256": _frame_digest(frame),
+        "output_sha256": _frame_digest(result),
+        "exercised_predictions": exercised,
+    }
+
+
+def _frame_digest(frame: pd.DataFrame) -> str:
+    """Hash ordered values, columns and dtypes without persisting representative rows."""
+    schema = json.dumps(list(zip(frame.columns, map(str, frame.dtypes), strict=True))).encode()
+    values = pd.util.hash_pandas_object(frame, index=False).to_numpy().tobytes()
+    return hashlib.sha256(schema + values).hexdigest()
+
+
+def _evidence_bytes(evidence: dict[str, Any]) -> bytes:
+    """Serialize deterministic JSON for artifact integrity checks."""
+    return json.dumps(evidence, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def _persist_evidence(
+    client: Any, resolved: ResolvedModel, evidence: dict[str, Any], tracking_uri: str | None
+) -> str:
+    """Upload and read back durable validation before writing any alias intent."""
+    version = client.get_model_version(resolved.name, resolved.version)
+    if not version.run_id:
+        raise ValueError("Model set validation requires a producing run ID.")
+    content = _evidence_bytes(evidence)
+    digest = hashlib.sha256(content).hexdigest()
+    folder = f"model_set_validation/{resolved.version}/{digest}"
+    with tempfile.TemporaryDirectory(prefix="skyulf-set-validation-") as directory:
+        path = Path(directory) / "validation.json"
+        path.write_bytes(content)
+        client.log_artifact(version.run_id, str(path), artifact_path=folder)
+    artifact_uri = f"runs:/{version.run_id}/{folder}/validation.json"
+    _download_evidence(artifact_uri, digest, tracking_uri)
+    client.set_model_version_tag(resolved.name, resolved.version, _PROOF_TAG, digest)
+    client.set_model_version_tag(resolved.name, resolved.version, _PATH_TAG, artifact_uri)
+    tags = client.get_model_version(resolved.name, resolved.version).tags or {}
+    if tags.get(_PROOF_TAG) != digest or tags.get(_PATH_TAG) != artifact_uri:
+        raise ValueError("Model set validation evidence tags could not be verified.")
+    return digest
+
+
+def _download_evidence(uri: str, digest: str, tracking_uri: str | None) -> dict[str, Any]:
+    """Read evidence only when its complete stored bytes match the recorded digest."""
+    path = _require_mlflow().artifacts.download_artifacts(
+        artifact_uri=uri, tracking_uri=tracking_uri
+    )
+    content = Path(path).read_bytes()
+    if hashlib.sha256(content).hexdigest() != digest:
+        raise ValueError("Model set validation evidence digest differs from recorded proof.")
+    result = json.loads(content)
+    if not isinstance(result, dict):
+        raise ValueError("Model set validation evidence must be an object.")
+    return result
+
+
+def _verify_set_evidence(
+    client: Any, resolved: ResolvedModel, artifact: ModelSetArtifact, tracking_uri: str | None
+) -> None:
+    """Require durable successful validation bound to this complete package identity."""
+    tags = client.get_model_version(resolved.name, resolved.version).tags or {}
+    if not tags.get(_PROOF_TAG) or not tags.get(_PATH_TAG):
+        raise ValueError("Model set version has no durable validation evidence.")
+    evidence = _download_evidence(tags[_PATH_TAG], tags[_PROOF_TAG], tracking_uri)
+    expected = _artifact_identity(resolved, artifact)
+    if any(evidence.get(key) != value for key, value in expected.items()):
+        raise ValueError("Model set validation evidence differs from current package identity.")
+    counts = evidence.get("exercised_predictions", {})
+    if not evidence.get("row_count") or not counts or any(value <= 0 for value in counts.values()):
+        raise ValueError("Model set validation evidence has no exercised predictions.")
+
+
+def _validated_version(
+    client: Any, name: str, version: str, tracking_uri: str | None, registry_uri: str | None
+) -> None:
+    """Verify the set kind, complete bytes and functional evidence for a pinned version."""
+    resolved = resolve_model(
+        name, version=version, tracking_uri=tracking_uri, registry_uri=registry_uri
+    )
+    artifact = load_registered_model_set(
+        resolved, tracking_uri=tracking_uri, registry_uri=registry_uri
+    )
+    _verify_set_evidence(client, resolved, artifact, tracking_uri)
+
+
+class _ValidationAdmission:
+    """Run set validation inside the same shared admission used by rollback."""
+
+    def __init__(self, admission: AliasAdmission, validate: Callable[[], None]) -> None:
+        """Wrap an existing admission without nesting or weakening its lock."""
+        self._admission = admission
+        self.local_only = admission.local_only
+        self._validate = validate
+
+    @contextmanager
+    def hold(self, resource_id: str) -> Iterator[None]:
+        """Keep the shared lock through validation and the complete alias mutation."""
+        with self._admission.hold(resource_id):
+            self._validate()
+            yield
+
+
+def rollback_model_set(
+    receipt: AliasChangeReceipt,
+    *,
+    expected_current_version: str,
+    admission: AliasAdmission,
+    tracking_uri: str | None = None,
+    registry_uri: str | None = None,
+) -> AliasChangeReceipt:
+    """Restore a complete prior set only with valid artifacts and persisted validation."""
+    if not isinstance(receipt, AliasChangeReceipt) or receipt.kind != "promotion":
+        raise ValueError("Model set rollback requires a completed promotion receipt.")
+    if receipt.prior_version is None:
+        raise ValueError("Model set rollback requires a prior version.")
+    client = _make_client(_require_mlflow(), tracking_uri, registry_uri)
+    _admission(admission, registry_uri)
+
+    def validate() -> None:
+        """Recheck both executable sets while rollback holds its shared admission."""
+        for version in (receipt.new_version, receipt.prior_version):
+            _validated_version(client, receipt.model_name, str(version), tracking_uri, registry_uri)
+
+    return rollback_promotion(
+        receipt,
+        expected_current_version=expected_current_version,
+        admission=_ValidationAdmission(admission, validate),
+        tracking_uri=tracking_uri,
+        registry_uri=registry_uri,
+    )

@@ -1,11 +1,11 @@
 {
-  "welcome_message": "Create a Skyulf training project. First choose single_model for guided model setup or multi_target for independent targets configured in src/modeling/branches.py. Multi-target setup asks only for shared data and deployment settings; each branch owns its target, features, model, tuning and split. Multi-target scoring is not available. Column names can be comma-separated. Initialization creates local files only. Use --config-file for advanced settings; see skyulf-core/templates/databricks/examples/ in the Skyulf checkout.",
+  "welcome_message": "Create a Skyulf training project. Choose single_model for guided model setup or multi_target for independent targets configured in src/modeling/branches.py. Multi-target setup asks for shared data, output selection and deployment settings; each branch owns its target, features, model, tuning and split. Model and combined business rules live in src/features/scoring.py. Column names can be comma-separated. Initialization creates local files only. Use --config-file for advanced settings; see skyulf-core/templates/databricks/examples/ in the Skyulf checkout.",
   "properties": {
     "training_layout": {
       "order": 0,
       "type": "string",
       "default": "single_model",
-      "description": "Training layout: single_model = guided model setup; multi_target = shared setup, then define each target/model recipe in src/modeling/branches.py (training only)",
+      "description": "Training layout: single_model = guided model setup; multi_target = shared setup, then define target/model recipes in src/modeling/branches.py and score them as one versioned model set",
       "enum": [
         "single_model",
         "multi_target"
@@ -93,6 +93,60 @@
           }
         }
       }
+    },
+    "model_set_name": {
+      "order": 98,
+      "type": "string",
+      "default": "",
+      "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*)?$",
+      "description": "6. Multi-model outputs | Registered MODEL SET name (not a table). Blank = <project_name>_set; enter your own name to override. Target catalog/metadata schema and dev suffix are added automatically",
+      "skip_prompt_if": {"properties": {"training_layout": {"const": "single_model"}}}
+    },
+    "model_set_output_mode": {
+      "order": 99,
+      "type": "string",
+      "default": "all",
+      "enum": ["all", "combined_only", "separate_views"],
+      "description": "6. Multi-model outputs | all = save every model prediction and business result together; combined_only = run the models but save only combined business results plus keys/status/version (requires rules); separate_views = save all results once and expose model/business columns through separately named views, without duplicate tables",
+      "skip_prompt_if": {"properties": {"training_layout": {"const": "single_model"}}}
+    },
+    "model_set_table_name": {
+      "order": 100,
+      "type": "string",
+      "default": "",
+      "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*)?$",
+      "description": "6. Multi-model outputs | Physical result table name. Blank = <project_name>_set_scores. Target catalog/schema and dev suffix are added automatically",
+      "skip_prompt_if": {"properties": {"training_layout": {"const": "single_model"}}}
+    },
+    "model_view_prefix": {
+      "order": 101,
+      "type": "string",
+      "default": "",
+      "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*)?$",
+      "description": "6. Multi-model outputs | Prefix for each model view: <prefix>_<branch>. Blank = <project_name>_predictions. Customize individual names or select models in src/modeling/model_set.py",
+      "skip_prompt_if": {"anyOf": [
+        {"properties": {"training_layout": {"const": "single_model"}}},
+        {"properties": {"model_set_output_mode": {"enum": ["all", "combined_only"]}}}
+      ]}
+    },
+    "combined_view_name": {
+      "order": 102,
+      "type": "string",
+      "default": "",
+      "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*)?$",
+      "description": "6. Multi-model outputs | Combined business result view name. Blank = <project_name>_business_results. Created only when the saved set has combined rules",
+      "skip_prompt_if": {"anyOf": [
+        {"properties": {"training_layout": {"const": "single_model"}}},
+        {"properties": {"model_set_output_mode": {"enum": ["all", "combined_only"]}}}
+      ]}
+    },
+    "source_change_policy": {
+      "order": 103,
+      "type": "string",
+      "default": "reject",
+      "enum": ["reject", "rebuild_on_change"],
+      "description": "6. Multi-model outputs | If existing source rows are updated/deleted: reject = stop and keep previous results; rebuild_on_change = rescore the full current snapshot with the selected model set, rebuilding lag/rolling history. New inserts still append. Full data must fit row/byte limits. Independent of the model-change setting",
+      "skip_prompt_if": {"properties": {"training_layout": {"const": "single_model"}}}
     },
     "record_key_columns": {
       "order": 9,
@@ -2855,18 +2909,11 @@
       "order": 83,
       "type": "string",
       "default": "incremental_append",
-      "description": "4. Lifecycle | Keep old predictions and append new rows, or rebuild all rows into a new model-version generation",
+      "description": "4. Lifecycle | When the selected model/model set changes: incremental_append keeps old predictions and scores new rows; full_rebuild recomputes the complete source with the new selection. Independent of source UPDATE/DELETE handling",
       "enum": [
         "incremental_append",
         "full_rebuild"
-      ],
-      "skip_prompt_if": {
-        "properties": {
-          "training_layout": {
-            "const": "multi_target"
-          }
-        }
-      }
+      ]
     },
     "score_model_selection": {
       "order": 84,

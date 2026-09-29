@@ -4,6 +4,7 @@ Leaf module (F-18 split of ``engine.py``).
 """
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -19,6 +20,29 @@ from sklearn.model_selection import (
 from ..fold_scoring import wrap_fold_scorer
 from ..params import clean_search_space
 from ..schemas import TuningConfig
+
+
+def bound_sample_resources(config: TuningConfig, row_count: int) -> TuningConfig:
+    """Cap sample ceilings to the current search population, including nested folds.
+
+    An explicit minimum remains a requirement and fails when it cannot be met.
+    Estimator resources such as tree counts are independent of training rows.
+    The caller's requested policy stays unchanged for other folds and final refit.
+    """
+    params = config.strategy_params
+    if params.get("resource", "n_samples") != "n_samples":
+        return config
+    minimum = _resource_count(params.get("min_resources", "exhaust"))
+    maximum = _resource_count(params.get("max_resources", "auto"))
+    _validate_sample_resources(minimum, maximum)
+    available = row_count if maximum == "auto" else min(maximum, row_count)
+    if type(minimum) is int and minimum > available:
+        raise ValueError(
+            f"Halving min_resources={minimum} exceeds the current sample budget ({available})."
+        )
+    if maximum == "auto" or maximum <= row_count:
+        return config
+    return replace(config, strategy_params={**params, "max_resources": available})
 
 
 def build_halving_searcher(

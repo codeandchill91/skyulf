@@ -26,14 +26,14 @@ def test_initializer_only_shows_task_specific_models_and_metrics(task):
 
     schema = json.loads((WORKFLOW.parents[4] / "databricks_template_schema.json").read_text())
     properties = schema["properties"]
+    values = {name: field["default"] for name, field in properties.items()}
+    values["task"] = task
     other = "regression" if task == "classification" else "classification"
     for suffix in ("model", "metric"):
         assert not Draft7Validator(properties[f"{task}_{suffix}"]["skip_prompt_if"]).is_valid(
-            {"task": task}
+            values
         )
-        assert Draft7Validator(properties[f"{other}_{suffix}"]["skip_prompt_if"]).is_valid(
-            {"task": task}
-        )
+        assert Draft7Validator(properties[f"{other}_{suffix}"]["skip_prompt_if"]).is_valid(values)
     expected_models = set()
     for name in NodeRegistry.get_all_metadata():
         calculator = NodeRegistry.get_calculator(name)

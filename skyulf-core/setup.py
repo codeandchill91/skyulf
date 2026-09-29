@@ -78,7 +78,8 @@ setup(
             "optuna-integration>=3.0.0",
             "cmaes>=0.10.0",  # Required by optuna's CmaEsSampler (not bundled with optuna itself)
         ],
-        "preprocessing-imbalanced": ["imbalanced-learn>=0.13.0"],
+        # 0.1.6 changes target unpacking and breaks imbalanced-learn's g_score.
+        "preprocessing-imbalanced": ["imbalanced-learn>=0.13.0", "sklearn-compat==0.1.5"],
         "modeling-xgboost": ["xgboost>=2.1.4"],
         "modeling-lightgbm": ["lightgbm>=4.0.0"],
         "explainability": ["shap>=0.46.0,<1.0.0"],
@@ -94,6 +95,7 @@ setup(
             "optuna-integration>=3.0.0",
             "cmaes>=0.10.0",
             "imbalanced-learn>=0.13.0",
+            "sklearn-compat==0.1.5",
             "xgboost>=2.1.4",
             "lightgbm>=4.0.0",
             "sentence-transformers>=2.2.0",

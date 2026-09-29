@@ -118,6 +118,33 @@ def test_external_validation_never_drives_nested_selection() -> None:
     assert reserved.nested_cv == ordinary.nested_cv
 
 
+@pytest.mark.parametrize("strategy", ["halving_grid", "halving_random"])
+@pytest.mark.parametrize("classification", [False, True])
+def test_nested_halving_explicit_sample_ceiling_fits_each_outer_population(
+    strategy: Any, classification: bool
+) -> None:
+    """A full-data sample ceiling must never cause replacement sampling in smaller searches."""
+    X, y = regression_rows()
+    family = "decision_tree_classifier" if classification else "ridge_regression"
+    if classification:
+        y = pd.Series(np.where(y > y.median(), "yes", "no"), name="target")
+    params = {"resource": "n_samples", "min_resources": 36, "max_resources": 72, "factor": 2}
+    config = TuningConfig(
+        strategy=strategy,
+        cv_type="nested_cv",
+        cv_folds=3,
+        n_trials=2,
+        metric="accuracy" if classification else "mse",
+        search_space={"max_depth": [1, 3]} if classification else {"alpha": [0.1, 10.0]},
+        strategy_params=params.copy(),
+    )
+    _, result = TuningCalculator(NodeRegistry.get_calculator(family)()).fit(X, y, config)
+    assert result.nested_cv is not None
+    assert len(result.nested_cv["folds"]) == 3
+    assert all(np.isfinite(fold["outer_score"]) for fold in result.nested_cv["folds"])
+    assert config.strategy_params == params
+
+
 @pytest.mark.parametrize("strategy", ["grid", "random", "optuna", "halving_grid", "halving_random"])
 def test_preprocessing_never_fits_outer_test_rows(strategy: Any) -> None:
     """Every strategy must fit preprocessing only within its current outer training partition."""

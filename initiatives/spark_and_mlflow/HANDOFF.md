@@ -1,4 +1,61 @@
-# Active handoff: SM-36b complete, SM-36c ready (2026-09-29)
+# Active handoff: SM-36c complete, SM-36d ready (2026-09-29)
+
+## Latest follow-up: output selection and shared scoring rules
+
+[Report111](111-model-set-source-corrections.md) adds opt-in source UPDATE/DELETE
+recovery through the existing full snapshot model-set scorer. Local targeted
+tests/static checks/actual CLI generation and strict Bundle validation passed.
+[Report112](112-clean-databricks-acceptance.md) records live acceptance in clean
+schema `workspace.skyulf_validation_20260929`; old test resources are untouched.
+516 contract tests passed (including all 20 real Delta cases); four CLI-only
+skips passed locally. Real four-branch saved-project scoring, all output modes,
+source corrections, temporal continuation and UC replacement/rollback passed.
+The 170 model/strategy combinations, 254 settings and 16 nested policy cases passed
+after fixing a nested-halving sample ceiling defect. The corrected r2 wheel
+passed both 34-model halving matrices and CV/halving settings.
+The final cloud regression replay `769662790160519` is SUCCESS: **176 passed**.
+It uses the verified sklearn-compat 0.1.5 pin after 0.1.6 caused four g_score
+failures also reproduced locally. The pin is synchronized across root/Core
+dependency declarations and uv.lock. Full local static gates and 176 focused
+tests pass. User requested the signed delivery commit; no push requested.
+Earlier failed runs remain failed; report112
+distinguishes passing individual tasks and corrected reruns.
+
+[Report110](110-model-set-output-plan.md) records the user-approved addition:
+`features/scoring.py` now has model rules and combined rules; the new template
+has no composition folder. Output modes are all columns, combined-only storage,
+or selected named views over one backing table. Names bind to the active target.
+165 local contract tests and 94 actual CLI generation checks passed; expanded
+shared-scoring replay tests passed separately. Full static gates and generated
+Bundle strict validation passed. Live verification
+of the new views/storage modes is now complete in report112. The cloud runs below
+are older evidence for the preceding SM-36c implementation.
+
+Previous base: `20dfa004`; completed SM-36c implementation is described in
+[report109](109-sm36c-model-set-delivery.md). User selected per-rule dependencies:
+only `required_components` govern each composition rule's eligibility.
+Immutable sets preserve exact component artifacts, captured rules/dependencies,
+one controlled champion and coherent rollback. Both existing jobs are retained.
+Review fixes cover immutable publication paths, dependency pins, empty rebuilds,
+hidden rule inputs and temporal release changes requiring full rebuild.
+
+Final Databricks wheel SHA256:
+`6240df62310363e60bb6898b6832b67b6d427ccf38608b7e66c0a0079664ab08`.
+Run `357086522081045`: 114 tests passed and actual Bundle entrypoints trained,
+packaged, approved and scored two engines. Saved rules survived producer source
+removal; 40 initial rows, repeat no-op, one new row (41 total). Earlier run
+`191435347102413` verified actual UC v1/v2 approval, replacement, rollback,
+fresh-process replay and failed-rule preservation. Final run `648117691633410`
+verified all-excluded output and two-component temporal Delta continuation.
+All cloud runs succeeded; exact evidence and boundaries are in report109.
+
+Local affected suites, full Ruff/format/Ty/CCN10, 16 actual CLI template tests and
+generated Bundle validation passed. No full repository pytest/MkDocs repetition.
+Commit scope includes SM-36c, follow-ups 110-112 and the two live-test fixes.
+Keep unrelated `.tmp*`, `mlruns/`, caches and wheels
+out of commits. Next task: **SM-36d**, segmentation training/scoring (report81).
+
+## Previous completed delivery: SM-36b
 
 Authoritative queue: [OPEN_QUEUE_updated.md](OPEN_QUEUE_updated.md).
 Base commit: `16e903c3`; this delivery includes SM-36b, named recipes and the
@@ -21,7 +78,7 @@ passed six regression/classification/ensemble branches over pandas/Polars with
 CV/grid tuning, missing-label sampling, snapshot pinning and a failed second
 branch. The live smoke called the Core service; no persistent jobs were deployed.
 
-Next READY: **SM-36c**, versioned model-set identity, coherent activation/rollback,
+At the prior handoff, next READY was **SM-36c**, versioned model-set identity, coherent activation/rollback,
 keyed component predictions, optional composition and atomic publication.
 Independent targets remain distinct from same-target winner selection.
 

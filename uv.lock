@@ -4975,6 +4975,7 @@ dependencies = [
     { name = "sentence-transformers" },
     { name = "sentry-sdk", extra = ["fastapi"] },
     { name = "shap" },
+    { name = "sklearn-compat" },
     { name = "skyulf-core" },
     { name = "slowapi" },
     { name = "sqlalchemy", extra = ["asyncio"] },
@@ -5107,6 +5108,7 @@ requires-dist = [
     { name = "sentry-sdk", extras = ["fastapi"], specifier = ">=2.0.0" },
     { name = "shap", specifier = ">=0.46.0,<1.0.0" },
     { name = "shapely", marker = "extra == 'geo'", specifier = ">=2.0.2,<2.2.0" },
+    { name = "sklearn-compat", specifier = "==0.1.5" },
     { name = "skyulf", extras = ["geo", "auth", "viz", "nlp"], marker = "extra == 'all'" },
     { name = "skyulf-core", editable = "skyulf-core" },
     { name = "slowapi", specifier = ">=0.1.9" },
@@ -5173,6 +5175,7 @@ all = [
     { name = "rich" },
     { name = "sentence-transformers" },
     { name = "shap" },
+    { name = "sklearn-compat" },
     { name = "vadersentiment" },
     { name = "xgboost" },
 ]
@@ -5221,6 +5224,7 @@ nlp = [
 ]
 preprocessing-imbalanced = [
     { name = "imbalanced-learn" },
+    { name = "sklearn-compat" },
 ]
 spark = [
     { name = "pandas" },
@@ -5289,6 +5293,8 @@ requires-dist = [
     { name = "shap", marker = "extra == 'all'", specifier = ">=0.46.0,<1.0.0" },
     { name = "shap", marker = "extra == 'explainability'", specifier = ">=0.46.0,<1.0.0" },
     { name = "shapely", marker = "extra == 'geo'", specifier = ">=2.0.2,<2.2.0" },
+    { name = "sklearn-compat", marker = "extra == 'all'", specifier = "==0.1.5" },
+    { name = "sklearn-compat", marker = "extra == 'preprocessing-imbalanced'", specifier = "==0.1.5" },
     { name = "statsmodels", specifier = ">=0.14.0" },
     { name = "syrupy", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "twine", marker = "extra == 'dev'" },

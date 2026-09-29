@@ -1,0 +1,68 @@
+"""Name the model set and choose how scoring results are published.
+
+Bundle setup offers defaults for every destination; entering a name overrides
+that default. Catalog, schema and deployment suffix are added automatically.
+model_name is the registered model set; prediction_table stores its results.
+
+Output modes (example: revenue and cost models, profit = revenue - cost):
+- all: one table holds id, revenue prediction, cost prediction and profit.
+  Each model's own scoring outputs are included too. This is the default.
+- combined_only: the models still run, but the table holds id and profit;
+  intermediate model predictions/outputs are not saved. Active combined rules
+  must have been captured in the approved set; an empty rule list is an error.
+- separate_views: the physical table holds everything, as in all. Model views
+  expose each selected model's columns; the combined view exposes profit.
+  Views read the same committed data and do not store independent copies.
+Every mode retains record keys, relevant statuses and model-set provenance.
+
+Output selection does not change the batch policy in config/workflow.json:
+- incremental_append keeps earlier predictions when a new model set is selected
+  and uses the new set for newly inserted source rows.
+- full_rebuild rebuilds the full source snapshot when the selected set changes.
+
+source_change_policy below handles source corrections independently:
+- reject (default): updating/deleting an existing source row fails the batch.
+- rebuild_on_change: UPDATE/DELETE triggers the existing full-rebuild scorer,
+  even with the same set. All current rows are scored with the selected set,
+  including both model and combined rules. Deleted rows disappear; lag/rolling
+  history is rebuilt. This replaces all earlier results, including predictions
+  from older model versions. No training occurs. Inserts alone still append.
+  The full snapshot must fit max_rows/max_input_mb; exceeding limits fails.
+  Missing CDF history or permission errors still fail; they are not corrections.
+
+Rule exceptions fail the job before publishing new results. Previous successful
+results remain. Changing all/combined_only storage schemas needs a new table.
+"""
+
+
+def build_model_set():
+    """Choose where results are published; business rules live in features/scoring.py."""
+    enabled = {{if eq .training_layout "multi_target"}}True{{else}}False{{end}}
+    if not enabled:
+        return None
+    return {
+        # Registry object: groups the component models under one approved version.
+        "model_name": "{catalog}.{metadata_schema}.{{if .model_set_name}}{{.model_set_name}}{{else}}{{.project_name}}_set{{end}}{resource_suffix}",
+        # Physical Delta output: custom name from setup, or the project default.
+        "prediction_table": "{catalog}.{output_schema}.{{if .model_set_table_name}}{{.model_set_table_name}}{{else}}{{.project_name}}_set_scores{{end}}{resource_suffix}",
+        "combined_rules_path": "../features",
+        # A correction may replace all results even with incremental_append.
+        # Legacy projects without this setting keep the reject behavior.
+        "source_change_policy": "{{.source_change_policy}}",
+        "publication": {
+            # all: persist model and combined results in one physical table.
+            # combined_only: compute models, persist only combined values and
+            # keys/status/provenance. Requires active saved combined rules.
+            # separate_views: persist all results once; expose named projections.
+            "mode": "{{.model_set_output_mode}}",
+{{if eq .model_set_output_mode "separate_views"}}
+            # None creates a view for every branch. A mapping selects only its
+            # listed branches and gives each a custom name; {} selects none.
+            # Example: {"revenue": "{catalog}.{output_schema}.revenue_predictions{resource_suffix}"}
+            "model_views": None,
+            "model_view_template": "{catalog}.{output_schema}.{{if .model_view_prefix}}{{.model_view_prefix}}{{else}}{{.project_name}}_predictions{{end}}_{branch}{resource_suffix}",
+            # Created only when the saved set has combined business outputs.
+            "combined_view": "{catalog}.{output_schema}.{{if .combined_view_name}}{{.combined_view_name}}{{else}}{{.project_name}}_business_results{{end}}{resource_suffix}",
+{{end}}
+        },
+    }

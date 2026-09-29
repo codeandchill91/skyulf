@@ -68,6 +68,13 @@ def _load(published: dict[str, Any], resolved: registry.ResolvedModel | None = N
     )
 
 
+def test_bundle_uses_plain_digest_metadata(published: dict[str, Any]) -> None:
+    """New bundle publications expose one unprefixed digest field."""
+    metadata = mlflow.models.Model.load(published["package"]).metadata
+    assert metadata["bundle_digest"] == published["resolved"].digest
+    assert "skyulf_bundle_digest" not in metadata
+
+
 def test_load_pinned_bundle_after_alias_moves(published: dict[str, Any]) -> None:
     """Moving an alias must not replace the artifact already selected for a job."""
     client = published["client"]
@@ -170,9 +177,9 @@ def test_reject_invalid_packaged_bundle(
     artifact = model.flavors["python_function"]["artifacts"]["bundle"]
     resolved = _register_copy(published, package)
     if damage == "metadata-digest":
-        model.metadata.pop("skyulf_bundle_digest")
+        model.metadata.pop("bundle_digest")
     elif damage == "bundle-digest":
-        model.metadata["skyulf_bundle_digest"] = "0" * 64
+        model.metadata["bundle_digest"] = "0" * 64
         resolved = replace(resolved, digest="0" * 64)
     elif damage == "missing-artifact":
         model.flavors["python_function"]["artifacts"].pop("bundle")

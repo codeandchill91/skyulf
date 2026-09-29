@@ -1,6 +1,12 @@
 """Choose which rows receive predictions and which extra result columns to publish.
 
-Flow: input rows -> eligibility -> model prediction -> outputs -> result table.
+Model rules: input rows -> eligibility -> model prediction -> outputs.
+Combined rules: all models' results -> business calculations using those results.
+Publication: selected results -> one Delta table, optionally exposed through views.
+
+build_model_rules() configures one model. build_combined_rules() below configures
+cross-model calculations such as revenue minus cost. Both run in multi-model
+scoring, in that order. Single-model scoring uses only build_model_rules().
 
 eligibility = checks BEFORE prediction. A check returns None for an accepted row
 or a text reason for an excluded row. Excluded rows stay in the result table with
@@ -38,7 +44,7 @@ SCORING_MODE = "pre_split"  # Options: pre_split, custom, combined
 SKIP_TARGET_PRE_SPLIT_STEPS = False
 
 
-def build_scoring():
+def build_model_rules():
     """Select reuse, custom rules or their ordered combination for this model version."""
     if SCORING_MODE not in ("pre_split", "custom", "combined"):
         raise ValueError("SCORING_MODE must be pre_split, custom or combined.")
@@ -47,6 +53,10 @@ def build_scoring():
         return reuse
     custom = {"eligibility": build_eligibility_rules(), "outputs": build_output_rules()}
     return custom if SCORING_MODE == "custom" else {**reuse, **custom}
+
+
+# Keep existing callers and custom feature packages compatible.
+build_scoring = build_model_rules
 
 
 # 1. BEFORE prediction: which input rows may reach the model?
@@ -94,3 +104,27 @@ def build_output_rules():
         #     "columns": [{"name": "band", "dtype": "string"}],
         # },
     ]
+
+
+# 3. AFTER ALL model predictions: optional combined business results.
+def build_combined_rules():
+    """Return cross-model rules; the profit example stays disabled until configured."""
+    return [
+        # Adapt these names to keys in modeling/branches.py, then uncomment.
+        # required_components lists only the models this rule needs. A filtered
+        # revenue or cost row excludes profit for that row; an unrelated model's
+        # exclusion does not. Exceptions fail the job before new results are saved.
+        # {
+        #     "name": "profit",
+        #     "version": "1",
+        #     "function": "scoring.profit",
+        #     "params": {},
+        #     "columns": [{"name": "profit", "dtype": "float64"}],
+        #     "required_components": ["revenue", "cost"],
+        # },
+    ]
+
+
+def profit(inputs, predictions, params):
+    """Example callback: subtract cost from revenue, activated only by the rule above."""
+    return (predictions["revenue__prediction"] - predictions["cost__prediction"]).to_frame("profit")

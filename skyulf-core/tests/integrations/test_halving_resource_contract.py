@@ -14,8 +14,34 @@ from sklearn.pipeline import Pipeline
 from skyulf.modeling._tuning.engine import TuningCalculator
 from skyulf.modeling._tuning.fold_pipeline import FoldAwareModelStep
 from skyulf.modeling._tuning.schemas import TuningConfig
-from skyulf.modeling._tuning.strategies.halving import build_halving_searcher
+from skyulf.modeling._tuning.strategies.halving import (
+    bound_sample_resources,
+    build_halving_searcher,
+)
 from skyulf.modeling.regression import RandomForestRegressorCalculator
+
+
+@pytest.mark.parametrize("maximum", ["auto", 100, "100"])
+def test_sample_minimum_cannot_be_silently_lowered(maximum):
+    """Insufficient fold populations must fail rather than quietly weaken minimum resources."""
+    config = TuningConfig(
+        strategy="halving_grid", strategy_params={"min_resources": 48, "max_resources": maximum}
+    )
+    with pytest.raises(ValueError, match="min_resources=48.*sample budget \\(32\\)"):
+        bound_sample_resources(config, 32)
+
+
+def test_estimator_resource_ceiling_is_independent_of_sample_count():
+    """Few training rows must not reduce an explicitly requested forest size."""
+    config = TuningConfig(
+        strategy="halving_grid",
+        strategy_params={
+            "resource": "n_estimators",
+            "min_resources": 50,
+            "max_resources": 100,
+        },
+    )
+    assert bound_sample_resources(config, 10) is config
 
 
 @pytest.mark.parametrize("strategy", ["halving_grid", "halving_random"])

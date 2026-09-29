@@ -1030,6 +1030,7 @@ class TuningCalculator(BaseModelCalculator):
                 metric, scoring_y, getattr(self.model_calculator, "problem_type", None)
             )
             if config.strategy in ["halving_grid", "halving_random"]:
+                search_config = _halving.bound_sample_resources(search_config, len(X_for_search))
                 searcher = _halving.build_halving_searcher(
                     search_config, estimator, cv, scoring, log_callback
                 )

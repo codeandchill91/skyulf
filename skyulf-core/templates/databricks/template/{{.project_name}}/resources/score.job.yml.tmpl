@@ -18,7 +18,11 @@ resources:
         - task_key: score
           max_retries: 0
           notebook_task:
+{{if eq .training_layout "multi_target"}}
+            notebook_path: ../src/jobs/score_models.py
+{{else}}
             notebook_path: ../src/jobs/score.py
+{{end}}
             base_parameters:
               workflow_contract: "3"
               deployed_score_handoff: "{{.score_handoff}}"

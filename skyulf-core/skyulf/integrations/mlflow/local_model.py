@@ -82,7 +82,7 @@ def log_local_model(
                 "skyulf_artifact_kind": "local_pipeline",
                 "skyulf_fitted_engine": artifact.manifest.fitted_engine,
                 "skyulf_execution_scope": "whole_frame_local",
-                "skyulf_local_pipeline_digest": artifact.manifest.pipeline_sha256,
+                "local_pipeline_digest": artifact.manifest.pipeline_sha256,
             },
             mlflow_model=mlflow.models.Model(run_id=run_id, artifact_path=artifact_path),
             **save_options,

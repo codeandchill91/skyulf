@@ -1,4 +1,4 @@
-"""Run explicitly configured multi-target training without alias changes or scoring."""
+"""Run multi-target candidates and optional coherent set lifecycle operations."""
 
 import html
 import json
@@ -18,6 +18,13 @@ from .job_runtime import (
     _read_notebook_config,
 )
 from .local_workflow import resolve_target_config
+from .model_set_project import (
+    _endpoints,
+    capture_set_rules,
+    load_project_model_set,
+    package_training_model_set,
+    render_model_set_result,
+)
 from .project import load_project_workflow
 
 
@@ -102,7 +109,7 @@ def _render_branch_result(payload: dict[str, Any]) -> str:
     return (
         "<h2>Multi-target training results</h2>"
         "<p>Candidates registered and compared. No aliases changed; scoring was not run. "
-        "Coherent activation and multi-target scoring are planned in SM-36C.</p><pre>"
+        "Enable src/modeling/model_set.py for coherent activation and scoring.</p><pre>"
         + html.escape(json.dumps(payload, indent=2, default=str, allow_nan=False))
         + "</pre>"
     )
@@ -115,14 +122,29 @@ def run_branch_training_notebook(
     display_html: Callable[[str], Any] | None = None,
     exit_notebook: bool = True,
 ) -> str:
-    """Train branch candidates once per invocation; reject repair and operator actions."""
+    """Train branch candidates or explicitly operate an enabled saved model set."""
     values = dbutils.widgets.getAll()
     _lifecycle_widget_context(values)
-    if values.get("lifecycle_action", "train") != "train":
+    action = values.get("lifecycle_action", "train")
+    settings = load_project_model_set(values)
+    if settings is None and action != "train":
         raise ValueError(
-            "Multi-target entrypoint supports only train; activation is not available."
+            "Multi-target entrypoint supports only train unless a model set is enabled."
         )
-    _operator_options("train", values)
+    options = _operator_options(action, values)
+    if action != "train":
+        return _set_operator_output(
+            spark,
+            dbutils,
+            values,
+            settings,
+            options,
+            display_html=display_html,
+            exit_notebook=exit_notebook,
+        )
+    source = ""
+    if settings is not None:
+        settings, source = capture_set_rules(values, settings)
     configs = load_training_branch_configs(values)
     from .local_branches import (  # noqa: PLC0415 - load training services after preflight
         prepare_training_branches,
@@ -135,15 +157,63 @@ def run_branch_training_notebook(
         outcome = train_local_branches(
             spark,
             branches,
-            tracking_uri=base.get("tracking_uri") or "databricks",
-            registry_uri=base.get("registry_uri") or "databricks-uc",
+            **_endpoints(base),
             experiment_name=values["experiment_name"],
             artifact_path=directory,
         )
+    payload = asdict(outcome)
+    if settings is not None:
+        candidate = package_training_model_set(
+            spark,
+            branches,
+            outcome,
+            settings,
+            composition_source=source,
+            **_endpoints(base),
+        )
+        payload["model_set_candidate"] = {
+            "name": candidate.name,
+            "version": candidate.version,
+            "digest": candidate.digest,
+        }
+        payload["next_actions"] = [
+            "Review component comparisons and set outputs.",
+            "Run approve with candidate_version and expected_champion_version.",
+            "Run the score job after explicit approval.",
+        ]
     return _notebook_output(
-        asdict(outcome),
+        payload,
         dbutils,
-        render=_render_branch_result,
+        render=render_model_set_result if settings is not None else _render_branch_result,
+        display_html=display_html,
+        exit_notebook=exit_notebook,
+    )
+
+
+def _set_operator_output(
+    spark: Any,
+    dbutils: Any,
+    values: dict[str, str],
+    settings: dict[str, Any] | None,
+    options: dict[str, Any],
+    *,
+    display_html: Callable[[str], Any] | None,
+    exit_notebook: bool,
+) -> str:
+    """Keep legacy projects train only and route enabled saved-set operations."""
+    if settings is None:
+        raise ValueError(
+            "Multi-target entrypoint supports only train unless a model set is enabled."
+        )
+    if values["lifecycle_action"] not in {"approve", "rollback"}:
+        raise ValueError("Model sets support train, approve and rollback; reject is unsupported.")
+    from .model_set_project import run_model_set_operator  # noqa: PLC0415
+
+    payload = run_model_set_operator(spark, values, settings, options)
+    return _notebook_output(
+        payload,
+        dbutils,
+        render=render_model_set_result,
         display_html=display_html,
         exit_notebook=exit_notebook,
     )

@@ -7,6 +7,12 @@ training and scoring environments. Existing model versions use their saved code.
 
 from .pre_split import build_pre_split_steps
 from .preprocessing import build_preprocessing
-from .scoring import build_scoring
+from .scoring import build_combined_rules, build_model_rules, build_scoring
 
-__all__ = ["build_pre_split_steps", "build_preprocessing", "build_scoring"]
+__all__ = [
+    "build_pre_split_steps",
+    "build_preprocessing",
+    "build_scoring",
+    "build_model_rules",
+    "build_combined_rules",
+]

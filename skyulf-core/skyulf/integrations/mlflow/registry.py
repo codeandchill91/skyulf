@@ -32,6 +32,14 @@ __all__ = [
 ]
 
 
+def _digest_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Normalize historical digest keys at the artifact read boundary."""
+    return metadata | {
+        key: metadata.get(key, metadata.get(f"skyulf_{key}"))
+        for key in ("bundle_digest", "local_pipeline_digest", "model_set_digest")
+    }
+
+
 class RegistryError(RuntimeError):
     """Base class for typed MLflow registry failures."""
 
@@ -101,8 +109,8 @@ def load_registered_bundle(
         model = mlflow.models.Model.load(Path(local_path))
     except Exception as exc:  # noqa: BLE001 - translate registry and artifact transport failures
         raise _translate_error(exc, name=resolved.name, version=resolved.version) from exc
-    metadata = model.metadata or {}
-    if metadata.get("skyulf_bundle_digest") != resolved.digest:
+    metadata = _digest_metadata(model.metadata or {})
+    if metadata.get("bundle_digest") != resolved.digest:
         raise ValueError(
             "Packaged Skyulf bundle digest is missing or differs from resolved digest."
         )
@@ -172,11 +180,11 @@ def load_run_local_pipeline(
 
 def _load_local_package(local_path: Path, model: Any, digest: str) -> LocalPipelineArtifact:
     """Validate shared run and registry metadata, contained paths and fitted identity."""
-    metadata = model.metadata or {}
+    metadata = _digest_metadata(model.metadata or {})
     if (
         metadata.get("skyulf_artifact_kind") != "local_pipeline"
         or metadata.get("skyulf_execution_scope") != "whole_frame_local"
-        or metadata.get("skyulf_local_pipeline_digest") != digest
+        or metadata.get("local_pipeline_digest") != digest
     ):
         raise ValueError(
             "Packaged Skyulf local pipeline metadata differs from resolved digest or scope."
@@ -261,8 +269,12 @@ def resolve_model(
         model = mlflow.models.Model.load(Path(local_path))
     except Exception as exc:  # noqa: BLE001 - artifact metadata is another registry boundary
         raise _translate_error(exc, name=name, version=concrete_version) from exc
-    metadata = model.metadata or {}
-    digest = metadata.get("skyulf_bundle_digest") or metadata.get("skyulf_local_pipeline_digest")
+    metadata = _digest_metadata(model.metadata or {})
+    digest = (
+        metadata.get("bundle_digest")
+        or metadata.get("local_pipeline_digest")
+        or metadata.get("model_set_digest")
+    )
     return ResolvedModel(
         name=name,
         version=concrete_version,

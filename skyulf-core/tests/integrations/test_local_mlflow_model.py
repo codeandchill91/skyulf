@@ -103,6 +103,11 @@ def test_local_pyfunc_matches_saved_categorical_pipeline(
     pd.testing.assert_frame_equal(result.reset_index(drop=True), saved.reset_index(drop=True))
     assert loaded.metadata.signature is not None
     assert loaded.metadata.metadata["skyulf_fitted_engine"] == engine
+    assert (
+        loaded.metadata.metadata["local_pipeline_digest"]
+        == load_local_pipeline(artifact_path).manifest.pipeline_sha256
+    )
+    assert "skyulf_local_pipeline_digest" not in loaded.metadata.metadata
     mlmodel_file = mlflow.artifacts.download_artifacts(
         f"{model_uri}/MLmodel", dst_path=str(tmp_path / "download")
     )

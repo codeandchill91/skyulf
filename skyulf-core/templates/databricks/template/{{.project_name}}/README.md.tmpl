@@ -9,11 +9,10 @@ and model fitting run locally on the selected compute.
 The initializer's `training_layout` defaults to `single_model`. Choose
 `multi_target` to use the same `train` job with one `train_models` task; the
 project still has exactly two jobs (`train` and `score`). Setup asks shared data,
-limits, compute and training schedule questions. Configure model/target, split,
+limits, output selection, compute and training schedule questions. Configure model/target, split,
 CV, tuning and quality settings in branches.py; those questions are hidden.
 Multi-target keeps `promotion_policy=manual_approval` and `score_handoff=disabled`.
-Preflight rejects
-automatic promotion, scoring handoff, operator actions, and task repair/retry.
+Preflight rejects automatic promotion, scoring handoff, and task repair/retry.
 
 Configure `build_training_branches()` in `src/modeling/branches.py`; its empty
 default deliberately fails preflight. The commented example defines two
@@ -59,13 +58,98 @@ candidate, and comparison against its own champion. Keep every known target
 column out of all input feature lists. Missing labels are excluded separately
 per branch. The report exposes the parent run and every component result.
 
-This layout trains, registers, and compares candidates only. It changes no
-champion/challenger aliases and does not call the scoring job. Candidate evidence
-is retained, but these candidates cannot yet use the single-model Bundle's
-approve/reject/rollback actions. Coherent activation and multi-target scoring
-are planned in SM-36C. The existing `score` job retains its single-model role;
-running it does not activate or combine these branch candidates. The remaining
-single-model lifecycle instructions below apply to `training_layout=single_model`.
+Multi-target projects enable `src/modeling/model_set.py`. Training packages every
+completed component candidate under one model-set name/version/digest. It copies
+the frozen component artifacts and shared `src/features/` source into the set, leaving
+all aliases unchanged. Legacy projects without that factory remain train only.
+`src/features/scoring.py` contains both stages: `build_model_rules()` selects each
+model's eligibility and output rules; `build_combined_rules()` selects calculations
+that use several model results. The latter returns an empty list by default.
+To enable one, declare its callback, version, parameters, typed columns and
+`required_components` there. The commented profit example depends
+only on revenue and cost; an unrelated component's exclusion does not suppress it.
+The feature package exports `build_scoring` as the compatible model-rule hook.
+
+### Select published results
+
+The initializer asks `model_set_name`, `model_set_output_mode` and `model_set_table_name` for this
+layout. Blank names use project defaults; explicit names use exactly that object
+name with the target's catalog/schema and deployment suffix added automatically.
+`model_set_name` names the registered model set, not a table (default:
+`<project_name>_set`). `model_set_table_name` names its physical result table
+(default: `<project_name>_set_scores`). View defaults are
+`<project_name>_predictions_<branch>` and `<project_name>_business_results`.
+Edit `publication` in `src/modeling/model_set.py` to change the selection:
+
+| Mode | Physical table | Consumer views |
+| --- | --- | --- |
+| `all` (default) | Model predictions, model outputs and combined business results | None |
+| `combined_only` | Combined business results, keys, rule status and set provenance | None |
+| `separate_views` | All results saved once | One per selected model, plus combined results when rules exist |
+
+All modes still run each model's saved scoring rules before combined rules.
+`combined_only` requires active combined rules in the saved set; configure,
+train and approve them first. It omits intermediate predictions from storage.
+Switching between this mode and the full schema requires a new table name.
+
+For `separate_views`, setup also asks `model_view_prefix` and
+`combined_view_name`. `model_views=None` creates a view for every saved branch;
+a mapping selects only its listed branches and gives each a custom name:
+
+```python
+"model_views": {
+    "revenue": "{catalog}.{output_schema}.revenue_predictions{resource_suffix}",
+    "cost": "{catalog}.{output_schema}.cost_predictions{resource_suffix}",
+},
+"combined_view": "{catalog}.{output_schema}.profit_results{resource_suffix}",
+```
+
+`model_views={}` exposes no individual model views. Views contain record keys,
+the relevant output/status columns and set provenance; model columns retain their
+branch prefix. Views are projections, not additional prediction tables. All read
+one committed backing table. A rule error fails the job before any new data is
+written; earlier successful results remain. View setup happens before the data
+write and can leave empty/old-result views if setup fails. Existing unrelated
+objects are never replaced. Changed view sources/projections require new names;
+removing a view from configuration does not delete an existing catalog object.
+
+For example, after scoring `id=101`, inserting `id=102` lets the next batch append
+its prediction. Updating a feature on `id=101` or deleting that row is different:
+the default `source_change_policy="reject"` fails the batch. Choose
+`rebuild_on_change` in Bundle setup (or `modeling/model_set.py`) to rebuild the
+complete current snapshot with the selected set when UPDATE/DELETE is observed.
+Deleted rows disappear, corrected rows and business results are recomputed,
+and lag/rolling history starts from the corrected snapshot. Ordinary inserts
+still append. The full snapshot must fit `max_rows` and `max_input_mb`; otherwise
+the job fails and keeps previous results. CDF/permission failures still fail.
+
+The two questions have independent purposes: `model_change_mode` controls a
+new model-set selection; `source_change_policy` controls changed/deleted source
+rows. A source-triggered rebuild uses the selected set for ALL rows, even if
+earlier rows were scored with older versions in append mode. There is no
+retraining. Old projects without the new setting retain `reject`. This option
+currently belongs to model-set scoring; the standalone single-model insert
+scorer keeps its existing source-change rejection contract.
+
+Use the `train` job's `lifecycle_action=approve`, the concrete set
+`candidate_version`, and `expected_champion_version` (`none` for first activation).
+Approval executes the saved complete set on a bounded scoring-source snapshot and
+requires each component and rule to produce at least one result. This verifies
+functional execution; review the component comparisons separately for model quality.
+Save the returned promotion receipt. To restore its prior complete set, use
+`lifecycle_action=rollback`, `promotion_receipt_json`, and the expected current
+champion version. Set rejection is currently unsupported and fails explicitly.
+
+The same `score` job calls `score_models.py` for this layout. It pins the set
+champion once (or uses `score_model_version`) and publishes the full keyed result
+with set identity. Scoring loads saved code, so changing editable rules requires
+training/packaging and approving a new set. Both jobs remain serialized with
+`max_concurrent_runs=1`; they must exclusively own set aliases and output writes.
+Append retains earlier rows with their original set version; full rebuild
+atomically replaces compatible output on a set change. Temporal carry changes
+require full rebuild. Declare rule dependencies as exact pins in
+`src/features/requirements.txt`; conflicting component pins are rejected.
+The remaining lifecycle instructions below apply to `training_layout=single_model`.
 
 ## 1. Configure and preview
 
@@ -74,7 +158,7 @@ single-model lifecycle instructions below apply to `training_layout=single_model
 | `config/workflow.json` | Existing input tables, record keys, features/target, model parameters, validation/search, data selection, limits and promotion/scoring policies |
 | `src/features/pre_split.py` | `build_pre_split_steps()` for fixed cleanup and training eligibility |
 | `src/features/preprocessing.py` | `build_preprocessing()` for transformations fitted inside each CV fold |
-| `src/features/scoring.py` | Optional `build_scoring()` for eligibility and versioned output rules |
+| `src/features/scoring.py` | `build_model_rules()` for each model; `build_combined_rules()` for calculations across models |
 | `src/features/assets.json` | Relative paths of bounded data files to save with the model |
 | `src/features/requirements.txt` | Exact project dependency pins verified at fit/load and recorded by MLflow |
 | `src/features/custom/` | Optional Calculator/Applier pairs and helper modules; use relative imports |

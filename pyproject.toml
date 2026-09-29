@@ -38,6 +38,7 @@ dependencies = [
     "scikit-learn>=1.8.0,<2.0.0",
     "joblib>=1.3.0",
     "imbalanced-learn>=0.14.1,<1.0.0",
+    "sklearn-compat==0.1.5",  # 0.1.6 breaks imbalanced-learn's g_score target unpacking.
     "scipy>=1.10.0,<2.0.0",
     "statsmodels>=0.14.0,<1.0.0",
     "sqlalchemy[asyncio]>=2.0.0,<3.0.0",

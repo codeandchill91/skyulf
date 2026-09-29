@@ -169,9 +169,17 @@ def test_multi_target_cli_graph_has_same_two_jobs(tmp_path, compute):
     assert parameters["repair_count"] == "{{job.repair_count}}"
     assert parameters["execution_count"] == "{{task.execution_count}}"
     assert task["environment_key" if compute == "serverless" else "job_cluster_key"] == "skyulf"
-    assert jobs["score"]["tasks"][0]["notebook_task"]["notebook_path"] == "../src/jobs/score.py"
+    assert (
+        jobs["score"]["tasks"][0]["notebook_task"]["notebook_path"] == "../src/jobs/score_models.py"
+    )
     bundle = yaml.safe_load((project / "databricks.yml").read_text())
     assert "src/modeling/branches.py" in _synced_sources(project, bundle)
+    from skyulf.inference.project_code import load_project_module
+
+    factory = load_project_module((project / "src/modeling/model_set.py").read_text())
+    assert factory.build_model_set()["model_name"].endswith("sm33_generated_set{resource_suffix}")
+    assert factory.build_model_set()["combined_rules_path"] == "../features"
+    assert factory.build_model_set()["publication"] == {"mode": "all"}
 
 
 def test_default_branch_factory_is_disabled():

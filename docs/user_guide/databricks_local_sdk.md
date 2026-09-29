@@ -755,12 +755,137 @@ result is written only after all branches succeed. Replaying a saved plan keeps
 the source version and split/sample settings; it is a new attempt and can create
 new model versions. It is not an exactly-once registration retry.
 
-Multi-target training currently requires `promotion_policy=manual_approval` and
-`score_handoff=disabled`. It registers candidates without moving champion or
-challenger aliases. The existing score job still scores one selected model;
-coherent model-set activation, rollback and composed scoring are the next SM-36c
-scope. Multi-target candidates are not automatically eligible for the single-model
-Bundle approval shortcut, which requires its own staged lifecycle receipt.
+Multi-target training requires `promotion_policy=manual_approval` and
+`score_handoff=disabled`. Newly generated projects enable
+`src/modeling/model_set.py`: its `build_model_set()` factory declares the set's
+registered model name, prediction table, publication settings and shared rule path. Returning
+`None` disables set packaging; older projects without this file remain train only.
+The project still has two jobs. Training registers the complete set candidate
+without moving any component or set aliases. The multi-target score job uses
+`score_models.py` to select one complete saved set.
+
+### Activate and score a coherent model set
+
+The set copies each component's exact fitted artifact and records its concrete
+model name, version and digest. It also captures `src/features/`, the combined rule
+configuration and typed record keys. Scoring and approval load these saved assets;
+editing project files cannot change an existing set. Packaging changed rules
+creates a new set candidate and preserves earlier registered packages.
+
+In `features/scoring.py`, `build_model_rules()` configures each model's eligibility
+and output rules, while `build_combined_rules()` configures calculations across
+model results. Both stages execute during multi-model scoring. The latter's
+default empty list adds no combined business rules. Each
+component retains its namespaced predictions and exclusion outcomes. Optional
+rules declare a named function, rule version, parameters, output column types and
+`required_components`. Functions receive `(inputs, predictions, params)` and
+return a pandas DataFrame containing exactly their declared output columns. A
+profit rule can require revenue and cost without depending on an unrelated churn
+component. Excluded required predictions make that rule ineligible; missing
+predictions are never substituted with zero.
+
+`inputs` contains only the set's declared keys and component input columns.
+Declare rule Python dependencies as exact pins in
+`src/features/requirements.txt`; the saved set includes them in its MLflow
+requirements and rejects pins that conflict with a component.
+Legacy projects using `composition_config` and `src/composition/` remain readable;
+existing saved artifacts keep their original source without migration.
+
+### Choose output storage and consumer views
+
+Multi-target initialization asks `model_set_name`, `model_set_output_mode` and a custom physical
+table name. The generated `modeling/model_set.py` contains the editable
+`publication` settings. Modes are:
+
+| Mode | Stored values | Consumer access |
+| --- | --- | --- |
+| `all` | Every model output and combined rule result | One prediction table |
+| `combined_only` | Combined results, keys, rule outcomes and set provenance | One prediction table |
+| `separate_views` | All results, written once | Selected model views and a combined-result view |
+
+Leaving names blank uses `<project_name>_set` for the registered model set,
+`<project_name>_set_scores` for the physical result table,
+`<project_name>_predictions_<branch>` for model views, and
+`<project_name>_business_results` for the combined view. Custom names replace
+these defaults. Registry names use the metadata schema; tables/views use the
+output schema. The deployment suffix is added to both.
+
+`combined_only` still computes all models and their scoring policies. It requires
+saved combined rules; an empty rule list fails explicitly. Changing this storage
+schema requires a new compatible table. Model output values are not stored in
+this mode, even though needed for the combined calculations.
+
+Only `separate_views` asks for `model_view_prefix` and `combined_view_name`.
+Blank names use project defaults. Explicit names gain the active target catalog,
+output schema and resource suffix. Fine-tune names and selection in the factory:
+
+```python
+"publication": {
+    "mode": "separate_views",
+    "model_views": {
+        "revenue": "{catalog}.{output_schema}.revenue_predictions{resource_suffix}",
+        "cost": "{catalog}.{output_schema}.cost_predictions{resource_suffix}",
+    },
+    "combined_view": "{catalog}.{output_schema}.profit_results{resource_suffix}",
+}
+```
+
+`model_views=None` selects every saved branch using `model_view_template`;
+an explicit mapping selects only listed branches; `{}` selects none.
+Combined views exist only if the saved set has combined rules. Every view keeps
+record keys, relevant output/status fields and set provenance. Branch output
+names retain their prefix. These are views of one Delta table, not independently
+written prediction copies. Setup verifies or creates all views before the data
+write. A setup failure can leave views of empty/previous data, but no new subset
+of predictions is published. Unrelated objects are never overwritten. Existing
+view definitions must match their recorded projection; use new names to change
+the source or columns. Removing configuration does not delete catalog objects.
+
+After reviewing component evaluation evidence, run the training job with
+`lifecycle_action=approve`, the set's `candidate_version`, and
+`expected_champion_version` (`none` for first activation). Approval runs every
+saved component and rule against one bounded scoring-source snapshot and requires
+each to produce at least one result. This validates execution, not predictive
+quality. Save the returned promotion receipt. To restore its complete prior set,
+use `lifecycle_action=rollback`, `promotion_receipt_json` and the expected current
+champion version. Set rejection is currently unsupported and fails explicitly.
+
+Run the score job after approval. It resolves the set champion once, or uses an
+explicit `score_model_version`, and joins component outcomes by unique non-null
+integer, string or boolean keys. One final Delta publication contains the complete
+selected result and set provenance. A component or rule exception fails the job
+before a new data commit; previous successful output remains intact.
+Repeated committed source versions are no-ops; model changes follow the configured
+append or full rebuild policy. Both jobs use `max_concurrent_runs=1` and require
+exclusive ownership of set alias changes and prediction-table writes.
+
+Append mode preserves older rows and their original set identities. Full rebuild
+atomically replaces the compatible output table when the selected set changes,
+even without new input. A transition involving temporal carry history requires
+full rebuild so lag/rolling state is reconstructed from the complete snapshot.
+Schema changes require a separate compatible output table. Source updates and
+deletes cannot be consumed as incremental inserts.
+
+For example, inserting a new `id=102` after scoring `id=101` appends a new
+prediction. Updating a feature or deleting the already-scored `id=101` instead
+fails the next incremental batch: there is no update/delete reconciliation of
+previous predictions under the default `source_change_policy="reject"`.
+For model-set scoring, select `rebuild_on_change` in Bundle setup or the
+`modeling/model_set.py` factory to reuse the complete snapshot rebuild when
+updates/deletes are observed, even without a model-set change. The selected set
+rescores ALL current rows, recomputes model/combined rules and resets temporal
+history. Deleted records disappear. This can replace earlier predictions from
+older sets; new inserts alone still append. No model training is involved.
+
+`model_change_mode` independently controls what happens when the model selection
+changes. Source-triggered rebuilding respects the full snapshot row/byte limits
+and commits results/history once after successful computation. Empty snapshots
+clear the table and history. A failed calculation, exceeded budget, missing CDF
+history or permission error preserves prior output. Only recognized readable
+source changes trigger recovery. Receipts record `source_change_policy`,
+`source_rebuilt` (source-triggered rebuild) and `write_mode`.
+This setting applies to the model-set adapter; the standalone single-model
+incremental scorer still rejects source updates/deletes.
 
 
 ### Select preprocessing and pre-split recipes independently

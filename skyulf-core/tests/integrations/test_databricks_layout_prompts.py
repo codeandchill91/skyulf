@@ -30,6 +30,13 @@ SHARED_FIELDS = {
     "retraining_cron_expression",
     "retraining_timezone_id",
     "retraining_pause_status",
+    "model_set_output_mode",
+    "model_set_name",
+    "source_change_policy",
+    "model_change_mode",
+    "model_set_table_name",
+    "model_view_prefix",
+    "combined_view_name",
 }
 
 
@@ -101,3 +108,63 @@ def test_multi_target_keeps_scheduled_training_and_policy_compute_questions():
         not Draft7Validator(properties[name].get("skip_prompt_if", False)).is_valid(values)
         for name in fields
     )
+
+
+@pytest.mark.parametrize(
+    "layout,mode,expected",
+    [
+        ("single_model", "separate_views", set()),
+        ("multi_target", "all", {"model_set_output_mode", "model_set_table_name"}),
+        ("multi_target", "combined_only", {"model_set_output_mode", "model_set_table_name"}),
+        (
+            "multi_target",
+            "separate_views",
+            {
+                "model_set_output_mode",
+                "model_set_table_name",
+                "model_view_prefix",
+                "combined_view_name",
+            },
+        ),
+    ],
+)
+def test_model_set_output_questions_follow_selected_layout(layout, mode, expected):
+    """Only separate views need consumer names; single-model setup remains unchanged."""
+    properties = json.loads(SCHEMA.read_text())["properties"]
+    names = {
+        "model_set_name",
+        "source_change_policy",
+        "model_set_output_mode",
+        "model_set_table_name",
+        "model_view_prefix",
+        "combined_view_name",
+    }
+    if layout == "multi_target":
+        expected = expected | {"model_set_name", "source_change_policy"}
+    visible = {
+        name
+        for name in names
+        if not Draft7Validator(properties[name]["skip_prompt_if"]).is_valid(
+            {"training_layout": layout, "model_set_output_mode": mode}
+        )
+    }
+    assert visible == expected
+
+
+@pytest.mark.parametrize(
+    "name,valid",
+    [("", True), ("profit_models", True), ("other.schema.set", False), ("bad-name", False)],
+)
+def test_model_set_name_accepts_default_or_simple_custom_name(name, valid):
+    """Custom registry names must preserve namespace bindings and safe template rendering."""
+    definition = json.loads(SCHEMA.read_text())["properties"]["model_set_name"]
+    assert Draft7Validator(definition).is_valid(name) is valid
+
+
+def test_multi_target_exposes_independent_model_and_source_change_choices():
+    """Choosing how new models replace results must remain separate from source corrections."""
+    properties = json.loads(SCHEMA.read_text())["properties"]
+    values = {name: field["default"] for name, field in properties.items()}
+    values["training_layout"] = "multi_target"
+    for name in ("model_change_mode", "source_change_policy"):
+        assert not Draft7Validator(properties[name].get("skip_prompt_if", False)).is_valid(values)

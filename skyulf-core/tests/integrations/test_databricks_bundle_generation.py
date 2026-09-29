@@ -56,6 +56,53 @@ def _generate_project(tmp_path, **overrides):
     return project
 
 
+@pytest.mark.parametrize("mode", ["all", "combined_only", "separate_views"])
+def test_multi_target_output_selection_renders_custom_destinations(tmp_path, mode):
+    """Initializer choices must produce callable settings with usable custom consumer names."""
+    from skyulf.inference.project_code import load_project_module
+    from skyulf.integrations.databricks.model_set_project import (
+        capture_set_rules,
+        load_project_model_set,
+    )
+
+    project = _generate_project(
+        tmp_path,
+        training_layout="multi_target",
+        model_set_name="business_models",
+        source_change_policy="rebuild_on_change",
+        model_set_output_mode=mode,
+        model_set_table_name="business_predictions",
+        model_view_prefix="estimates",
+        combined_view_name="profit_results",
+    )
+    values = {
+        "config_path": str(project / "config/workflow.json"),
+        "catalog": "workspace",
+        "input_schema": "default",
+        "output_schema": "default",
+        "metadata_schema": "default",
+        "resource_suffix": "_dev",
+    }
+    settings = load_project_model_set(
+        values, json.loads((project / "config/workflow.json").read_text())
+    )
+    assert settings is not None
+    assert settings["model_name"] == "workspace.default.business_models_dev"
+    assert settings["source_change_policy"] == "rebuild_on_change"
+    assert settings["prediction_table"] == "workspace.default.business_predictions_dev"
+    assert settings["publication"]["mode"] == mode
+    captured, source = capture_set_rules(values, settings)
+    assert captured["composition_config"] == {"outputs": []}
+    assert load_project_module(source).build_scoring()["reuse_pre_split"] is True
+    if mode == "separate_views":
+        assert (
+            settings["publication"]["model_view_template"]
+            == "workspace.default.estimates_{branch}_dev"
+        )
+        assert settings["publication"]["combined_view"] == "workspace.default.profit_results_dev"
+    assert not (project / "src/composition").exists()
+
+
 def test_cli_multi_target_setup_needs_only_shared_inputs(tmp_path):
     """Shared inputs alone must initialize a valid base config for branch overlays."""
     from test_databricks_layout_prompts import SHARED_FIELDS
@@ -76,7 +123,9 @@ def test_cli_multi_target_setup_needs_only_shared_inputs(tmp_path):
     assert config["score_handoff"] == "disabled"
     jobs = _read_jobs(project)
     assert [task["task_key"] for task in jobs["train"]["tasks"]] == ["train_models"]
-    assert jobs["score"]["tasks"][0]["notebook_task"]["notebook_path"] == "../src/jobs/score.py"
+    assert (
+        jobs["score"]["tasks"][0]["notebook_task"]["notebook_path"] == "../src/jobs/score_models.py"
+    )
     assert "schedule" not in jobs["score"]
 
 

@@ -23,6 +23,17 @@ from .local_publish import _check_target, _scalar
 from .local_sdk import LocalWorkflowConfig, PreparedLocalWorkflow
 
 
+class SourceChangeRequiresRebuild(ValueError):
+    """Signal readable CDF updates/deletes that cannot be published as new inserts."""
+
+
+def validate_source_change_policy(value: Any) -> str:
+    """Require explicit permission before replacing results after source corrections."""
+    if value not in ("reject", "rebuild_on_change"):
+        raise ValueError("source_change_policy must be reject or rebuild_on_change.")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class IncrementalBatchResult:
     """Describe one committed increment or a run with no new source inserts."""
@@ -349,7 +360,9 @@ def _select_incremental_rows(
             .table(source_table)
         )
         if selected.where(functions.col("_change_type") != "insert").limit(1).count():
-            raise ValueError("Source updates and deletes require an explicit rescore policy.")
+            raise SourceChangeRequiresRebuild(
+                "Source updates and deletes require an explicit rescore policy."
+            )
         selected = selected.where(functions.col("_change_type") == "insert")
     if period_column is not None:
         if selected.schema[period_column].dataType.typeName() != "timestamp":

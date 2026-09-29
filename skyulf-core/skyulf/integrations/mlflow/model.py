@@ -133,7 +133,7 @@ def _scrub_local_artifact_uri(model_path: Path, artifact_key: str = "bundle") ->
 def _metadata(bundle: InferenceBundle) -> dict[str, str]:
     """Record contract identity without copying rows, credentials or sessions."""
     return {
-        "skyulf_bundle_digest": bundle.semantic_digest,
+        "bundle_digest": bundle.semantic_digest,
         "skyulf_input_stage": bundle.input_stage,
         "skyulf_task": bundle.manifest.task,
         "skyulf_feature_order": ",".join(bundle.feature_order),
