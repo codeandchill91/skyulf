@@ -1,9 +1,26 @@
 """Bind explicit recipe choices into the executable source saved with a model."""
 
+from inspect import signature
 from types import ModuleType
 from typing import Any
 
 from ...config_validation import validate_preprocessing_steps
+
+
+def recipe_label(module: ModuleType, factory_name: str, selected: str | None) -> str:
+    """Name an explicit recipe or a builder's declared default without invoking it again."""
+    if selected is not None:
+        return selected
+    factory = getattr(module, factory_name, None)
+    if factory is None:
+        return "none"
+    try:
+        parameter = signature(factory).parameters.get("recipe")
+    except (TypeError, ValueError):
+        return "builder_default"
+    if parameter is not None and isinstance(parameter.default, str):
+        return parameter.default
+    return "builder_default"
 
 
 def bind_recipe_source(source: str, selections: dict[str, str | None]) -> str:

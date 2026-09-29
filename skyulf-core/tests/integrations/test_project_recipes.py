@@ -70,12 +70,15 @@ def test_independent_selections_are_bound_into_saved_source(tmp_path):
     assert sources[0] != sources[1]
     for config, column in zip(configs, ("category", "other"), strict=True):
         pipeline = config["pipeline"]
+        assert pipeline["feature_recipes"] == {"preprocessing": column, "pre_split": column}
         module = load_project_module(pipeline["project_python_source"])
         assert module.build_preprocessing() == pipeline["preprocessing"]
         assert module.build_pre_split_steps() == config["pre_split_steps"]
         assert pipeline["preprocessing"][0]["params"]["columns"] == [column]
         assert pipeline["project_scoring"]["pre_split"]["steps"] == config["pre_split_steps"]
-    assert load_project_workflow(_config(), root)["pipeline"]["preprocessing"] == []
+    default = load_project_workflow(_config(), root)["pipeline"]
+    assert default["preprocessing"] == []
+    assert default["feature_recipes"] == {"preprocessing": "default", "pre_split": "default"}
 
 
 def test_phase_selections_do_not_select_each_other(tmp_path):

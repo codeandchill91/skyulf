@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import itertools
+import json
 import math
+from unittest.mock import Mock
 
 import pandas as pd
 import polars as pl
@@ -13,8 +15,10 @@ from skyulf.data.dataset import SplitDataset
 from skyulf.inference.local_pipeline import load_local_pipeline, predict_local_pipeline
 from skyulf.integrations.databricks.local_batch import fit_local_workflow
 from skyulf.integrations.databricks.local_cv import LocalCVSpec
+from skyulf.integrations.databricks.local_retraining import LocalTrainingSpec
 from skyulf.integrations.databricks.local_search import prepare_search_pipeline
 from skyulf.integrations.databricks.local_search_results import post_selection_cv, tuning_evidence
+from skyulf.integrations.databricks.training_parameters import log_training_parameters
 
 _FAMILIES = ("voting_classifier", "stacking_classifier", "voting_regressor", "stacking_regressor")
 _STRATEGIES = ("grid", "random", "halving_grid", "halving_random", "optuna")
@@ -177,6 +181,27 @@ def test_all_ensemble_families_and_search_strategies_fit_and_replay(
             assert model.final_estimator_.fit_intercept is False
     else:
         assert list(model.weights) == ([3, 1] if classification else [2, 1])
+    run = Mock()
+    spec = LocalTrainingSpec(
+        table="workspace.test.source",
+        version=1,
+        record_key_columns=("id",),
+        input_columns=("x",),
+        target_column="target",
+        max_rows=50,
+        max_bytes=100_000,
+    )
+    log_training_parameters(run, restored, spec, config)
+    params = run.log_params.call_args.args[0]
+    assert params["model_type"] == family
+    assert json.loads(params["ensemble.base_models"]) == [name for name, _ in model.estimators]
+    for name, value in evidence["best_params"].items():
+        assert json.loads(params[f"model_params.{name}"]) == value
+    if family.startswith("stacking"):
+        assert params["ensemble.cv"] == "2"
+        assert params["ensemble.final_estimator"] == type(model.final_estimator_).__name__
+    else:
+        assert json.loads(params["ensemble.weights"]) == list(model.weights)
 
 
 @pytest.mark.parametrize("family", _FAMILIES)

@@ -199,6 +199,15 @@ def test_candidate_search_isolates_holdout_and_logs_selected_artifact(
     assert logged_params["tuning_best_params.n_estimators"] == "3"
     assert int(logged_params["tuning_best_params.max_depth"]) in (2, 4)
     assert json.loads(logged_params["tuning_search_space"])["max_depth"] == [2, 4]
+    assert logged_params["model_type"] == pipeline["modeling"]["base_model"]["type"]
+    assert logged_params["model_params.n_estimators"] == "3"
+    assert logged_params["model_params.max_depth"] == logged_params["tuning_best_params.max_depth"]
+    assert logged_params["split_strategy"] == "random"
+    assert logged_params["split_test_size"] == "0.2"
+    assert logged_params["split_random_state"] == "42"
+    assert json.loads(logged_params["preprocessing_steps"]) == ["scale"]
+    assert json.loads(logged_params["pre_split_steps"]) == []
+    assert documents["training_parameters.json"]["model_params"]["n_estimators"] == 3
     assert "cross_validation.json" not in documents
     model = fitted.artifact.pipeline.model_estimator._unwrap_tuned_model()
     assert model.n_estimators == 3

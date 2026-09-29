@@ -67,6 +67,7 @@ from .training_dates import (
     parse_training_date,
     training_date_spec,
 )
+from .training_parameters import log_training_parameters
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -935,6 +936,7 @@ def _log_fitted_candidate(
     cv_results, evidence = fitted.cv_results, fitted.evidence
     unavailable = fitted.unavailable_labels
     _log_tuning_evidence(run, artifact, config)
+    log_training_parameters(run, artifact, spec, config)
     if cv_results is not None:
         cv_results.update(
             dataset_id=spec.dataset_id, training_rows=fitted.training_rows, engine=engine

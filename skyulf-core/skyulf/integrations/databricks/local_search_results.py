@@ -119,11 +119,11 @@ def tuning_evidence(artifact: LocalPipelineArtifact) -> dict[str, Any] | None:
     return evidence
 
 
-def _parameter_preview(value: Any, section: str) -> str:
-    """Keep parameter previews small while preserving full values in tuning.json."""
+def _parameter_preview(value: Any, section: str, *, artifact_file: str = "tuning.json") -> str:
+    """Keep parameter previews small while pointing to their complete artifact."""
     encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
     if len(encoded.encode("utf-8")) > 500:
-        return f"See tuning.json: {section} (value exceeds parameter preview limit)"
+        return f"See {artifact_file}: {section} (value exceeds parameter preview limit)"
     return encoded
 
 

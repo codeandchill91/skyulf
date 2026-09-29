@@ -13,7 +13,7 @@ from ...inference.project_code import (
 )
 from ...inference.project_scoring import validate_scoring_config
 from ._project_files import modeling_hook, project_source, read_source
-from ._project_recipes import bind_recipe_source, recipe_steps
+from ._project_recipes import bind_recipe_source, recipe_label, recipe_steps
 from .local_ensemble import ENSEMBLE_MODELS
 from .local_search import _bounded_space
 
@@ -198,6 +198,10 @@ def _resolve_project_workflow(
     result = deepcopy(config)
     result["pipeline"]["preprocessing"] = steps
     result["pipeline"]["project_python_source"] = source
+    result["pipeline"]["feature_recipes"] = {
+        "preprocessing": recipe_label(module, "build_preprocessing", preprocessing_recipe),
+        "pre_split": recipe_label(module, "build_pre_split_steps", pre_split_recipe),
+    }
     result["pre_split_steps"] = deepcopy(pre_split_steps)
     _load_scoring_hook(result, module, source)
     _load_ensemble_hook(result, Path(path))

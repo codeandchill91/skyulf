@@ -437,6 +437,26 @@ With nested CV, Parameters shows the final search on all training rows; individu
 outer-fold selections remain in `tuning.json`. These fields appear on new training
 runs after updating the Core wheel; existing experiment runs are not backfilled.
 
+Fixed and tuned models also expose their fitted configuration in Parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `model_type`, `model_params.<name>` | Model family and actual constructor settings, including defaults and tuned values |
+| `ensemble.base_models`, `ensemble.strategy` | Ordered member names and voting/stacking strategy |
+| `ensemble.voting`, `ensemble.weights` | Applicable voting type and weights in member order |
+| `ensemble.final_estimator`, `ensemble.cv` | Stacking meta-model and its internal folds, separate from workflow CV |
+| `split_strategy`, `split_test_size`, `split_random_state`, `split_stratify` | Active random holdout controls, separate from CV and tuning seeds |
+| `split_start`, `split_holdout_start`, `split_cutoff`, `split_event_column` | Temporal holdout boundaries and clock column; inactive random controls are omitted |
+| `preprocessing_recipe`, `pre_split_recipe` | Selected recipe or declared builder default; `inline` means no project recipe metadata |
+| `preprocessing_steps`, `pre_split_steps` | Ordered step names for each phase |
+
+`training_parameters.json` retains complete summaries when a preview exceeds the
+display limit. Non-JSON constructor objects are described by type; their nested
+constructor settings are separate entries, and the fitted artifact retains the
+actual objects. `builder_default` means the builder has no named recipe default;
+`none` means that optional builder is absent. Previously saved artifacts without
+recipe metadata still work.
+
 The top-level `cv_*` fields are the only fold settings. They score search
 candidates; `cv_enabled: false` uses an internal training-only validation split. There is
 no second post-search CV report. The search objective (`rmse`, `accuracy`, etc.)

@@ -171,13 +171,19 @@ def test_temporal_split_fits_real_skyulf_pipeline_without_holdout_leakage(tmp_pa
 
 def test_failed_candidate_never_mutates_champion(monkeypatch, tmp_path):
     """A failed publication leaves promotion to an explicit later operation."""
+    from sklearn.linear_model import LinearRegression
+
     spec = _spec()
     monkeypatch.setattr(retraining, "read_training_snapshot", lambda spark, request: _frame())
     monkeypatch.setattr(
         retraining,
         "fit_local_workflow",
         lambda *args, **kwargs: SimpleNamespace(
-            manifest=SimpleNamespace(pipeline_sha256="a" * 64, project_source_sha256=None)
+            manifest=SimpleNamespace(pipeline_sha256="a" * 64, project_source_sha256=None),
+            pipeline=SimpleNamespace(
+                config=args[0],
+                model_estimator=SimpleNamespace(_unwrap_tuned_model=lambda: LinearRegression()),
+            ),
         ),
     )
     monkeypatch.setattr(
