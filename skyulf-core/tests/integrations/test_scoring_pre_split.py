@@ -1,5 +1,6 @@
 """Pre-split reuse must preserve recipe semantics and explicit prediction outcomes."""
 
+import re
 import shutil
 from pathlib import Path
 
@@ -16,7 +17,7 @@ TEMPLATE = (
 )
 
 
-def _project(tmp_path, *, skip=False, mode="pre_split", steps=None, engine="pandas"):
+def _project(tmp_path, *, skip=False, mode="pre_split", steps=None, engine="pandas", examples=True):
     """Exercise actual generated switches with an editable pre-split recipe."""
     root = tmp_path / "features"
     shutil.copytree(TEMPLATE, root)
@@ -27,6 +28,8 @@ def _project(tmp_path, *, skip=False, mode="pre_split", steps=None, engine="pand
             "SKIP_TARGET_PRE_SPLIT_STEPS = False", "SKIP_TARGET_PRE_SPLIT_STEPS = True"
         )
     source = source.replace('SCORING_MODE = "pre_split"', f"SCORING_MODE = {mode!r}")
+    if examples:
+        source = re.sub(r'(?m)^(        )# (?=[{}" ])', r"\1", source)
     scoring.write_text(source, encoding="utf-8")
     if steps is not None:
         (root / "pre_split.py").write_text(
@@ -39,6 +42,26 @@ def _project(tmp_path, *, skip=False, mode="pre_split", steps=None, engine="pand
         "pipeline": {"preprocessing": [], "modeling": {"type": "linear_regression"}},
     }
     return load_project_workflow(config, root)
+
+
+@pytest.mark.parametrize("mode", ["custom", "combined"])
+def test_template_custom_examples_are_inactive_by_default(tmp_path, mode):
+    """Choosing a mode alone must not activate sample business limits or output columns."""
+    pipeline = _project(tmp_path, mode=mode, examples=False)["pipeline"]
+    policy = pipeline["project_scoring"]
+    rows = pd.DataFrame({"feature_value": [-1.0, 121.0]})
+    result = run_project_scoring(
+        rows,
+        lambda frame: pd.DataFrame({"prediction": frame.feature_value}),
+        source=pipeline["project_python_source"],
+        config=policy,
+        row_keys=[],
+        prediction_dtypes={"prediction": "float64"},
+    )
+    assert policy["eligibility"] == policy["outputs"] == []
+    assert result.prediction.tolist() == [-1.0, 121.0]
+    assert result.scoring_status.tolist() == ["predicted", "predicted"]
+    assert "band" not in result
 
 
 def _missing(column, name="observed"):

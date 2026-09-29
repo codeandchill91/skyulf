@@ -183,4 +183,7 @@ def test_tuning_hook_is_synced_with_generated_bundle():
     source = TEMPLATE_ROOT / "template/{{.project_name}}/src/modeling/tuning.py"
     bundle = TEMPLATE_ROOT / "template/{{.project_name}}/databricks.yml.tmpl"
     assert source.is_file()
-    assert "    - src/modeling/tuning.py" in bundle.read_text()
+    assert "    - src/modeling/**/*.py" in bundle.read_text()
+    assert source in list(
+        (TEMPLATE_ROOT / "template/{{.project_name}}/src/modeling").glob("**/*.py")
+    )

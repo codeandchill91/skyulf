@@ -1,15 +1,50 @@
 """Configure feature transformations fitted separately within each training fold.
 
-Uncomment a step and its import, then adapt its columns. Core and custom steps
-run in the order shown in the same list. All Python
-files under features are saved with the model; inference reuses fitted state.
+Single-model training calls the default recipe. For multi-target training,
+branches.py selects preprocessing_recipe independently for every model.
+Available starters: default, none, frequency_only, imputer_only, combined.
+Adapt their columns or add your own named function to the mapping below.
+Core and custom steps run in list order. Only the selected recipe runs.
+All Python files are saved with the model; inference reuses its fitted state.
 """
+
+from .custom import preprocessing_custom
 
 # from .custom.preprocessing_custom import frequency_encoding
 
 
-def build_preprocessing():
-    """Return ordered Core/custom transformations with project-specific parameters."""
+def build_preprocessing(recipe="default"):
+    """Select a named step list; each model and CV fold learns its own fitted state."""
+    recipes = {
+        "default": _default_recipe,
+        "none": lambda: [],
+        "frequency_only": _frequency_only,
+        "imputer_only": _imputer_only,
+        "combined": lambda: _imputer_only() + _frequency_only(),
+    }
+    if recipe not in recipes:
+        raise ValueError(f"Unknown preprocessing recipe: {recipe}. Choose from {list(recipes)}.")
+    return recipes[recipe]()
+
+
+def _frequency_only():
+    """Encode category using only this model's training frequencies; no imputation."""
+    return [preprocessing_custom.frequency_encoding(columns=["category"])]
+
+
+def _imputer_only():
+    """Fill feature_value from this model's training mean; no custom encoding."""
+    return [
+        {
+            "name": "impute",
+            "transformer": "SimpleImputer",
+            "params": {"columns": ["feature_value"], "strategy": "mean"},
+        },
+    ]
+
+
+def _default_recipe():
+    """Keep the default inactive; uncomment steps and their imports to customize it."""
     return [
         # {"name": "impute", "transformer": "SimpleImputer",
         #  "params": {"columns": ["feature_value"], "strategy": "mean"}},

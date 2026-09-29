@@ -5,8 +5,11 @@
 > SM-36a is DONE for its approved scope. Project packages/custom steps:
 > `9cc81304`; temporal history: `84a7dcb4` ([report105](105-sm36a-temporal-history-delivery.md)).
 > Keyed scoring outcomes, assets/pins and output rules are implemented and verified
-> locally and on Databricks; this delivery commit includes the final slice.
-> [Final evidence](106-sm36a-project-delivery.md). Next: SM-36b is READY.
+> locally and on Databricks; commit `16e903c3` includes the final slice.
+> [Final evidence](106-sm36a-project-delivery.md). SM-36b is DONE locally and on Databricks.
+> [Evidence107](107-sm36b-training-branches.md). Next READY: SM-36c.
+> [Recipe follow-up108](108-sm36b-named-recipes.md): independent preprocessing/pre-split selectors,
+> inline asset help and shared-only setup; eight models passed the full cloud pipeline.
 > This file replaces the removed historical `OPEN_QUEUE.md` as the active queue.
 
 Updated: 2026-09-29 (dbml re-comparison queued; see report93). **SM-00 through SM-16, SM-15L/15I/24a/25/26, SM-22a/b/c/28a/28b, SM-20a/20R/20S and SM-27/29 complete for their documented scopes. Target: 0.9.0.**
@@ -155,8 +158,8 @@ on an existing candidate without retraining or reuploading the model.
 | SM-35 | Multi-metric quality gates and clear thresholds | SM-34C6 | DONE | Optional absolute gates enforced across SDK/tasks/first champion/approval; canonical historical digests and per-gate evidence. Sourcery follow-up covers alias commits, workflow checks/preview/dispatch and pre-split validation. 578 local tests and 3,512 identical offline outcomes; committed b67594b7 with DCO/hooks. Later SM-36 acceptance verified live passing/failed gates and corrected UC tag names (uncommitted fix). [Local evidence](77-sm35-quality-gates-evidence.md), [live evidence](83-sm36-databricks-live-acceptance.md) |
 | SM-36 | Core tuning, model search and optional explainability | SM-35 | DONE | Five strategies, automatic/custom spaces, four ensemble families, shared diagnostic CV and bounded SHAP. Expanded Databricks acceptance: 170/170 model-strategy pairs / 3,756 trials; 254 setting scenarios; 143 penalty regression and 90 pruning tests; 45 CLI generation cases. Legacy sklearn penalty loss fixed. Earlier eight lifecycle/score/replay/no-op and manual operator checks remain in report83. Included in this local delivery commit; true nested tuning is tracked separately in SM-36f. [Expanded evidence](85-sm36-full-strategy-acceptance.md), [earlier lifecycle evidence](83-sm36-databricks-live-acceptance.md) |
 | SM-36a | Project-owned feature engineering and output rules | SM-33D, SM-33H3 | DONE | Saved project packages/custom steps: 9cc81304 (report102); temporal history: 84a7dcb4 (report105). Keyed scoring exclusions/coverage, atomic continuation, bounded assets/exact dependency pins and named output rules passed local and live acceptance ([report106](106-sm36a-project-delivery.md)); final delivery includes 156 passing cloud tests with zero skips (run 530905329987142). Optional H3Index/sentence-model runtime checks, custom pre-split value normalization and new predicate/data-quality gates remain separate. |
-| SM-36b | Multiple training branches from one pinned source | SM-36, SM-36a | READY | Per-target pipelines/labels/tuning/metrics, linked MLflow runs, reproducible splits and bounded execution; keep multiple models rather than selecting one winner |
-| SM-36c | Composed multi-model scoring and model-set lifecycle | SM-36b | WAIT | Pin component versions and rule code in a versioned set; keyed outputs, all-or-nothing final publication, append/full provenance and coherent rollback |
+| SM-36b | Multiple training branches from one pinned source | SM-36, SM-36a | DONE | Per-target pipelines/labels/tuning/metrics, linked MLflow runs, reproducible splits and bounded execution; keep multiple models rather than selecting one winner |
+| SM-36c | Composed multi-model scoring and model-set lifecycle | SM-36b | READY | Pin component versions and rule code in a versioned set; keyed outputs, all-or-nothing final publication, append/full provenance and coherent rollback |
 | SM-36d | Databricks segmentation training and scoring | SM-36 | WAIT | Reuse Core K-Means, Mini-Batch K-Means, Gaussian Mixture and Birch; explicit clustering setup, optional reference column, preprocessing, cluster metrics, artifact/MLflow replay and new-row scoring. Define cluster-specific lifecycle policy without assuming supervised CV/tuning support. [Scope and acceptance](81-sm36d-segmentation-task.md) |
 | SM-36e | Connect optional SHAP setup and readable results | SM-36 | WAIT | Add explicit opt-in setup, matching runtime dependency, bounded explanation settings and readable feature/sample results linked to MLflow evidence. Preserve training-only inputs and explicit unavailable states. [Scope](82-sm36e-shap-connection-task.md) |
 | SM-36f | True nested tuning across Core, Canvas and Databricks | SM-36 | DONE | Independent inner searches, fold-local preprocessing, separate final search and stored outer evidence. 499 Python regressions, 12 output tests, 113 final frontend tests, 3 CLI generation tests; gates passed. Additional real backend Basic/Advanced x 6 families x ordinary/nested: 24/24. Cloud: 66/66 nested cases across all five strategies and both engines, 12/12 fixed cases, 24/24 reference tests, 1,872 replay predictions. All 255 packaged module hashes verified. Included in this local delivery commit; temporal/group/threshold follow-ups are SM-36g/h/i. [Evidence](88-sm36f-nested-tuning-evidence.md), [receipt](89-sm36f-nested-tuning-receipt.json) |
@@ -309,7 +312,7 @@ scheduled clocks and company acceptance remain separate.
 
 ## Custom feature engineering and multi-model follow-up
 
-### SM-36a complete; next SM-36b
+### SM-36a and SM-36b complete; next SM-36c
 
 User follow-up: generated scoring.py offers pre_split/custom/combined modes
 and an independent target-filter-skip switch. Pre-split reuse passed 285 local
@@ -325,9 +328,23 @@ and fresh-process MLflow replay after deleting the original project files.
 Temporal carry history is delivered in report105. This does not enable arbitrary
 row-dropping recipes or target-history forecasting.
 
-SM-36b is READY: named training branches from one pinned source, independent
-labels/features/tuning, linked runs and bounded sequential execution. Keep all
-component models; winner selection is a different queued scenario.
+SM-36b is DONE ([evidence107](107-sm36b-training-branches.md)): named branches
+share one pinned source while keeping independent labels/features/tuning, linked
+runs and bounded sequential execution. Affected tests: 398 passed, 2 local Delta
+skips; template regression: 162 passed, plus 16 focused checks after wheel-path
+correction. Live run `612123557010767` verified six models across both engines
+and the failed-parent boundary. SM-36c is READY
+for model-set activation and composed scoring; winner selection remains separate.
+
+The [named-recipe follow-up](108-sm36b-named-recipes.md) is also DONE: branches
+select preprocessing and pre-split independently from one shared feature package;
+saved source preserves selections. Assets have inline JSON help and compatible
+manifest loading. Multi-target setup hides branch-owned questions. Local checks:
+188 passed/1 Windows symlink skip, plus 105 template/layout tests. Live run
+`535676495601679` passed eight models on pandas/Polars through the notebook adapter,
+registration, independent Delta scoring, no-op retries and fresh-process reloads.
+All aliases remain unchanged. The branch starter includes a weighted voting
+regression ensemble with its own independent recipe selections.
 
 The user requested optional project-owned Python feature engineering and multiple
 models trained from one source and used together. Existing Core preprocessing,

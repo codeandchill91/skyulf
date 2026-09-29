@@ -52,10 +52,10 @@ def _project_assets(root: Path) -> dict[str, str]:
     if not manifest.exists() and not manifest.is_symlink():
         return {}
     try:
-        entries = json.loads(read_source(_contained_file(root, "assets.json")))
+        entries = _asset_entries(json.loads(read_source(_contained_file(root, "assets.json"))))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValueError("Project assets.json must contain a JSON list of asset paths.") from exc
-    _validate_asset_entries(entries)
+    entries = _validate_asset_entries(entries)
     assets = {}
     size = 0
     for relative in sorted(entries):
@@ -69,7 +69,19 @@ def _project_assets(root: Path) -> dict[str, str]:
     return assets
 
 
-def _validate_asset_entries(entries: object) -> None:
+def _asset_entries(manifest: object) -> object:
+    """Accept legacy lists or a documented file list without capturing its help text."""
+    if not isinstance(manifest, dict):
+        return manifest
+    if "files" not in manifest or set(manifest) - {"files", "_help"}:
+        raise ValueError("Project assets.json object requires files and optional _help only.")
+    help_text = manifest.get("_help", [])
+    if not isinstance(help_text, list) or any(not isinstance(line, str) for line in help_text):
+        raise ValueError("Project assets.json _help must be a list of text instructions.")
+    return manifest["files"]
+
+
+def _validate_asset_entries(entries: object) -> list[str]:
     """Reject ambiguous declarations and keep executable source out of data assets."""
     if not isinstance(entries, list) or any(not isinstance(item, str) for item in entries):
         raise ValueError("Project assets.json must contain a JSON list of asset paths.")
@@ -80,6 +92,7 @@ def _validate_asset_entries(entries: object) -> None:
         for item in entries
     ):
         raise ValueError("Project assets must be data files, separate from source and metadata.")
+    return entries
 
 
 def _project_requirements(root: Path) -> tuple[str, ...]:

@@ -9,6 +9,14 @@ from .local_batch import (
     read_local_source,
     score_local_source,
 )
+from .local_branches import (
+    BranchTrainingResult,
+    TrainingBranch,
+    branch_training_payload,
+    prepare_training_branches,
+    restore_training_branches,
+    train_local_branches,
+)
 from .local_incremental import IncrementalBatchResult, run_incremental_local_batch
 from .local_publish import run_local_batch
 from .local_retraining import (
@@ -35,6 +43,7 @@ from .training_dates import TrainingDateSpec
 __all__ = [
     "BatchResult",
     "BatchSpec",
+    "BranchTrainingResult",
     "IncrementalBatchResult",
     "InputSource",
     "LocalWorkflowConfig",
@@ -49,16 +58,21 @@ __all__ = [
     "PreflightResult",
     "PreparedLocalWorkflow",
     "TrainingDateSpec",
+    "TrainingBranch",
+    "branch_training_payload",
     "evaluate_local_holdout",
     "fit_local_workflow",
     "preflight_local",
     "prepare_local_workflow",
+    "prepare_training_branches",
     "read_local_source",
     "read_training_snapshot",
+    "restore_training_branches",
     "run_batch",
     "run_incremental_local_batch",
     "run_local_batch",
     "score_local_source",
     "split_labeled_snapshot",
     "train_local_candidate",
+    "train_local_branches",
 ]

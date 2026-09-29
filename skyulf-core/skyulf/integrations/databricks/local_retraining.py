@@ -85,6 +85,7 @@ class LocalTrainingSpec:
     event_column: str | None = None
     group_column: str | None = None
     filter_unavailable_results: bool = False
+    drop_missing_labels: bool = False
     result_available_at_column: str | None = None
     result_cutoff: datetime | None = None
     event_time_parsing: TrainingDateSpec = TrainingDateSpec()
@@ -126,8 +127,7 @@ class LocalTrainingSpec:
             raise ValueError("version must be a nonnegative Delta snapshot version.")
         if self.split_strategy not in ("random", "temporal"):
             raise ValueError("split_strategy must be random or temporal.")
-        if type(self.filter_unavailable_results) is not bool:
-            raise ValueError("filter_unavailable_results must be boolean.")
+        self._validate_label_policy()
         if self.split_strategy == "random":
             self._validate_random_split()
         else:
@@ -136,6 +136,12 @@ class LocalTrainingSpec:
         self._validate_columns()
         self._validate_budgets_and_sampling()
         self._validate_evidence_digests()
+
+    def _validate_label_policy(self) -> None:
+        """Require explicit boolean values for both independent label eligibility policies."""
+        for field in ("filter_unavailable_results", "drop_missing_labels"):
+            if type(getattr(self, field)) is not bool:
+                raise ValueError(f"{field} must be boolean.")
 
     def _validate_random_split(self) -> None:
         """Check the random split and its optional event-selection window."""
@@ -272,6 +278,8 @@ class LocalTrainingSpec:
     def dataset_id(self) -> str:
         """Pin source, selection, split and seed independently of mutable driver limits."""
         settings = asdict(self)
+        if not self.drop_missing_labels:
+            settings.pop("drop_missing_labels")
         if self.group_column is None:
             settings.pop("group_column")
         settings.pop("survivor_key_sha256")
@@ -478,16 +486,12 @@ def _sample_training_source(source: Any, spec: LocalTrainingSpec) -> tuple[Any, 
     }
     _validate_sample_keys(source, keys, floating, F)
     source_rows = source.count()
-    if spec.filter_unavailable_results:
-        result = column_name(cast(str, spec.result_available_at_column))
-        if (
-            spec.event_column is not None
-            and source.where(f"{result} < {column_name(spec.event_column)}").limit(1).count()
-        ):
-            raise ValueError("Label availability precedes event time.")
-        cutoff = instant_microseconds(cast(datetime, spec.result_cutoff))
-        source = source.where(f"{result} IS NOT NULL AND {result} <= {cutoff}")
-    eligible_rows = source.count() if spec.filter_unavailable_results else source_rows
+    source = _eligible_training_source(source, spec, floating)
+    eligible_rows = (
+        source.count()
+        if spec.filter_unavailable_results or spec.drop_missing_labels
+        else source_rows
+    )
     _validate_sample_targets(source, spec, floating, F)
     # Struct field order, UTC timestamp rendering and the tie-break keys are
     # explicit so partition layout and Spark session timezone cannot change membership.
@@ -507,6 +511,26 @@ def _sample_training_source(source: Any, spec: LocalTrainingSpec) -> tuple[Any, 
         "eligible_rows": eligible_rows,
         "unavailable_labels": source_rows - eligible_rows,
     }
+
+
+def _eligible_training_source(source: Any, spec: LocalTrainingSpec, floating: set[str]) -> Any:
+    """Apply label time and missing-target policies before validating the sampling pool."""
+    if spec.filter_unavailable_results:
+        result = column_name(cast(str, spec.result_available_at_column))
+        if (
+            spec.event_column is not None
+            and source.where(f"{result} < {column_name(spec.event_column)}").limit(1).count()
+        ):
+            raise ValueError("Label availability precedes event time.")
+        cutoff = instant_microseconds(cast(datetime, spec.result_cutoff))
+        source = source.where(f"{result} IS NOT NULL AND {result} <= {cutoff}")
+    if spec.drop_missing_labels:
+        target = column_name(spec.target_column)
+        condition = f"{target} IS NOT NULL"
+        if spec.target_column in floating:
+            condition += f" AND NOT isnan({target})"
+        source = source.where(condition)
+    return source
 
 
 def _key_digest(frame: pd.DataFrame, keys: tuple[str, ...]) -> str:
@@ -1083,6 +1107,7 @@ def train_local_candidate(
     on_registered: Callable[[ResolvedModel], None] | None = None,
     risk_category: str | None = None,
     cv: LocalCVSpec | None = None,
+    run_tags: dict[str, str] | None = None,
 ) -> LocalCandidateResult:
     """Fit, register and compare; optionally notify an explicit lifecycle owner.
 
@@ -1122,6 +1147,7 @@ def train_local_candidate(
     with track_run(tracking, run_name=run_name) as run:
         if run.run_id is None:
             raise RuntimeError("MLflow did not provide a run ID.")
+        run.set_tags(run_tags or {})
         fitted = _fit_candidate(
             spark,
             spec,
@@ -1402,6 +1428,12 @@ def _validate_labeled_snapshot(frame: pd.DataFrame, spec: LocalTrainingSpec, eng
         raise ValueError("Training row keys must be unique.")
 
 
+def _validate_training_event_window(events: pd.Series, spec: LocalTrainingSpec) -> None:
+    """Require each normalized event to fall within the pinned half-open source window."""
+    if events.isna().any() or (events < spec.start).any() or (events >= spec.cutoff).any():
+        raise ValueError("Training event time falls outside the pinned window.")
+
+
 def _label_availability(
     frame: pd.DataFrame, selected: pd.DataFrame, spec: LocalTrainingSpec
 ) -> pd.Series:
@@ -1416,8 +1448,7 @@ def _label_availability(
             index=frame.index,
             dtype="datetime64[ns, UTC]",
         )
-        if events.isna().any() or (events < spec.start).any() or (events >= spec.cutoff).any():
-            raise ValueError("Training event time falls outside the pinned window.")
+        _validate_training_event_window(events, spec)
         selected[spec.event_column] = events
     available = pd.Series(True, index=frame.index)
     if spec.filter_unavailable_results:
@@ -1432,6 +1463,8 @@ def _label_availability(
         if events is not None and ((labels < events) & labels.notna()).any():
             raise ValueError("Label availability precedes event time.")
         available = labels.notna() & (labels <= spec.result_cutoff)
+    if spec.drop_missing_labels:
+        available &= frame[spec.target_column].notna()
     return available
 
 

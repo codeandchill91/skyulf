@@ -56,6 +56,30 @@ def _generate_project(tmp_path, **overrides):
     return project
 
 
+def test_cli_multi_target_setup_needs_only_shared_inputs(tmp_path):
+    """Shared inputs alone must initialize a valid base config for branch overlays."""
+    from test_databricks_layout_prompts import SHARED_FIELDS
+
+    root = Path(__file__).resolve().parents[2] / "templates/databricks"
+    properties = json.loads((root / "databricks_template_schema.json").read_text())["properties"]
+    project = _generate_project(
+        tmp_path,
+        training_layout="multi_target",
+        omit_fields=set(properties) - SHARED_FIELDS,
+    )
+    config = _read_validated_config(project, action="train")
+    assert config["task"] == "regression"
+    assert config["target_column"] == "target"
+    assert config["input_columns"] == ["feature_value"]
+    assert config["split_strategy"] == "random" and config["cv_enabled"] is False
+    assert config["promotion_policy"] == "manual_approval"
+    assert config["score_handoff"] == "disabled"
+    jobs = _read_jobs(project)
+    assert [task["task_key"] for task in jobs["train"]["tasks"]] == ["train_models"]
+    assert jobs["score"]["tasks"][0]["notebook_task"]["notebook_path"] == "../src/jobs/score.py"
+    assert "schedule" not in jobs["score"]
+
+
 def _read_jobs(project):
     """Keep each job independently parseable with stable resource keys and no duplicates."""
     jobs = {}
@@ -122,7 +146,8 @@ def test_generated_source_layout_connects_both_custom_recipes(tmp_path):
         )
         assert f"# {shown}," in text
         path.write_text(text.replace(f"# {shown},", f"{configured},"), encoding="utf-8")
-    config["input_columns"] = ["category", "amount"]
+    # Default scoring reuses pre-split checks, so their inputs must be declared too.
+    config["input_columns"] = ["category", "amount", "quality_a", "quality_b"]
     (project / "config/workflow.json").write_text(json.dumps(config), encoding="utf-8")
     enabled = load_project_workflow(config, features)
     assert enabled["pre_split_steps"][0]["pre_split"]["effect"] == "filter"
@@ -218,7 +243,7 @@ def test_cli_rejects_invalid_limits_and_column_text(tmp_path, field, value):
     assert field in generated.stderr
 
 
-def _read_validated_config(project):
+def _read_validated_config(project, *, action="score"):
     """Check generated settings against the same preflight used by the notebook."""
     from skyulf.integrations.databricks.local_workflow import resolve_target_config
     from skyulf.integrations.databricks.workflow_config import validate_workflow_config
@@ -234,7 +259,7 @@ def _read_validated_config(project):
             "resource_suffix": "_dev",
         },
     )
-    validate_workflow_config(resolved, action="score")
+    validate_workflow_config(resolved, action=action)
     return config
 
 

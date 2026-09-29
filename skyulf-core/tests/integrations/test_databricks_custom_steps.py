@@ -116,6 +116,14 @@ def _enabled_project(tmp_path):
 
 def _configure(root, *, pre_split, preprocessing):
     """Configure the actual shipped builders by activating their inline custom step entries."""
+    # These training-only quality fields are deliberately absent from prediction input.
+    # Scoring-policy reuse and its required inputs have separate integration coverage.
+    (root / "scoring.py").write_text(
+        '"""Keep this fixture focused on fitted custom preprocessing."""\n\n'
+        'def build_scoring():\n    """Opt out of prediction eligibility rules."""\n'
+        "    return None\n",
+        encoding="utf-8",
+    )
     recipes = [
         (
             "pre_split.py",

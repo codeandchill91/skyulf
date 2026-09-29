@@ -641,7 +641,10 @@ rules. Both modes expose the same separate custom sections:
 
 `build_eligibility_rules()` and `build_output_rules()` configure the callable
 paths and parameters; `custom/scoring_custom.py` implements the functions under
-BEFORE/AFTER headings. Either list may be empty. The complete dictionary form
+BEFORE/AFTER headings. Both lists start empty; the sample dictionaries in
+`scoring.py` are commented out. Uncomment and adapt a desired example explicitly.
+Selecting custom or combined mode alone does not activate sample rules.
+The complete dictionary form
 below is also supported (returning `None` explicitly disables all scoring rules):
 
 ```python
@@ -693,8 +696,12 @@ scoring rather than relying on eligibility to reinterpret an incompatible schema
 
 ### Deliver lookup files and external Python dependencies
 
-`src/features/assets.json` is an explicit list of relative paths, for example
-`["assets/bands.json"]`. Inside saved code, read a declared file as bytes:
+`src/features/assets.json` includes detailed `_help` instructions and a `files`
+list, initially empty. Create your data file and add its feature-root-relative
+path, for example `"files": ["assets/bands.json"]`. The original plain-list format
+`["assets/bands.json"]` also works. Help text is never embedded as model data.
+Assets can support pre-split, preprocessing or scoring; they do not automatically
+add a pipeline step. Inside saved code, read a declared file as bytes:
 
 ```python
 from skyulf.inference.project_package import read_project_asset
@@ -713,3 +720,78 @@ unpickling the model. The artifact manifest records the pins; MLflow includes th
 in its saved environment. Provision the same dependencies in the training and
 scoring job environments; prediction never installs packages. Ranges, URLs,
 recursive requirement files, options, extras and environment markers are rejected.
+
+## Train independent target models in one job
+
+Choose `training_layout=multi_target` when generating a project to use the existing
+`train` job for several named training branches. Configure branches in
+`src/modeling/branches.py`. The default `single_model` layout retains the ordinary
+training and lifecycle graph. Multi-target setup asks shared source, key, limit,
+compute and training schedule questions; target/model/search/CV/split/quality
+settings belong in branches.py.
+
+A branch has its own target, input columns, preprocessing package, estimator,
+tuning/CV settings, quality metric and registered model name. For example, a
+customer dataset can train a purchase classifier, a spending regressor and a
+visit-count ensemble. Each model remains useful independently. Different targets
+have different metrics; their scores are not ranked against each other.
+
+The coordinator resolves one Delta table version before training starts. Branches
+read that same immutable snapshot sequentially within their individual row/byte
+budgets. Missing labels are excluded separately per target before sampling and
+splitting. A missing spending label cannot remove an otherwise labeled purchase
+example. All target columns are forbidden as model inputs to prevent cross-target
+leakage. The existing training service fits learned preprocessing inside training
+folds and keeps the final holdout separate.
+
+MLflow records a parent run and a linked run for each trained branch. The parent
+saves the exact branch plan and progress; child runs retain their fitted pipeline,
+CV/tuning evidence, holdout metrics, dependency pins and immutable model version.
+Every candidate comparison uses only that branch's own pinned champion and metric.
+
+All branches are required. If one fails, execution stops and the parent is failed;
+earlier immutable candidate versions remain available for inspection. A complete
+result is written only after all branches succeed. Replaying a saved plan keeps
+the source version and split/sample settings; it is a new attempt and can create
+new model versions. It is not an exactly-once registration retry.
+
+Multi-target training currently requires `promotion_policy=manual_approval` and
+`score_handoff=disabled`. It registers candidates without moving champion or
+challenger aliases. The existing score job still scores one selected model;
+coherent model-set activation, rollback and composed scoring are the next SM-36c
+scope. Multi-target candidates are not automatically eligible for the single-model
+Bundle approval shortcut, which requires its own staged lifecycle receipt.
+
+
+### Select preprocessing and pre-split recipes independently
+
+Keep custom implementations in `src/features/custom/`. In `preprocessing.py`,
+`build_preprocessing(recipe="default")` selects an ordered Core/custom step list.
+`pre_split.py` independently exposes `build_pre_split_steps(recipe="default")`.
+Select the two names at branch level (beside its `workflow` overlay):
+
+```python
+"preprocessing_recipe": "frequency_only",
+"pre_split_recipe": "complete_inputs",
+```
+
+Another branch can select `imputer_only` with `none`, while a third selects
+`combined` with the same `complete_inputs`. No feature-package copy is needed.
+The shipped starters use `feature_value` and `category`; adapt their columns or
+add your own recipe function to the relevant builder's mapping. `frequency_only`
+uses only the custom encoder, `imputer_only` uses only the Core mean imputer, and
+`combined` runs imputation before encoding. `complete_inputs` requires at least
+one of those inputs; `none` produces an empty list. Both default recipes remain
+empty until explicitly configured.
+
+Keep `workflow.pipeline.preprocessing` empty in branches.py: the selected Python
+builder supplies the steps. `features_path` still selects the whole package and
+defaults to `../features`. All branches may share it while selecting different
+recipes. Learned values remain separate per model/fold. Pre-split scoring reuse
+uses the selected filter list; target-dependent skip policy still applies.
+
+Selectors are optional. Omitting one calls that builder without arguments,
+preserving older project factories. An explicit name requires a builder accepting
+`recipe=...`; missing or misspelled names fail before data reads. The saved code
+binds selected names so fresh-process model loading and training-plan replay use
+the exact original recipe even after the editable files change.

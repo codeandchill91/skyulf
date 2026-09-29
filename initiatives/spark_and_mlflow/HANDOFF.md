@@ -1,4 +1,47 @@
-# Active handoff: SM-36a complete, SM-36b ready (2026-09-29)
+# Active handoff: SM-36b complete, SM-36c ready (2026-09-29)
+
+Authoritative queue: [OPEN_QUEUE_updated.md](OPEN_QUEUE_updated.md).
+Base commit: `16e903c3`; this delivery includes SM-36b, named recipes and the
+requested inactive-scoring-example changes. Do not include
+unrelated `.tmp-review-model/`, temporary test output, generated projects or wheels.
+
+[Report107](107-sm36b-training-branches.md) records the design, code map and proof.
+Optional `training_layout=multi_target` uses the existing train job. Each branch
+has independent targets/features/recipes and missing-label eligibility; source
+snapshot and endpoint identities are pinned. Parent/child MLflow lineage and
+partial-failure progress preserve completed candidates without a complete result.
+Fresh replay can create new versions. Branch candidates do not move aliases and
+cannot use the single-model approve shortcut as model-set activation.
+
+Verification: 398 affected tests passed, 2 local Spark/Delta skips; 162 template
+regressions passed. A stale wheel-path fix matches Core 0.9.1 and passed 16 focused
+template checks. Full Ruff/format/Ty, CCN 10, strict docs and actual generated
+Bundle validation passed. Live run `612123557010767` / task `483504591561147`
+passed six regression/classification/ensemble branches over pandas/Polars with
+CV/grid tuning, missing-label sampling, snapshot pinning and a failed second
+branch. The live smoke called the Core service; no persistent jobs were deployed.
+
+Next READY: **SM-36c**, versioned model-set identity, coherent activation/rollback,
+keyed component predictions, optional composition and atomic publication.
+Independent targets remain distinct from same-target winner selection.
+
+Recipe follow-up completed: [report108](108-sm36b-named-recipes.md). Branches
+select `preprocessing_recipe` and `pre_split_recipe` independently within one
+shared feature package; saved source binds exact choices for replay. Assets JSON
+contains detailed `_help` and `files`, with legacy list support. Multi-target
+initializer asks only shared settings; model-owned options live in branches.py.
+Verification: 188 passed/1 Windows symlink skip, 105 template/layout tests and
+full static/docs checks. Live run `535676495601679`, task `43689010285191`, passed
+eight pandas/Polars models through the real notebook adapter, registry, Delta
+scoring, idempotent repeat calls and isolated-process MLflow replay after source
+deletion. Outputs: 44 predictions and 4 explicit exclusions. Aliases stayed empty.
+Wheel `a168faa49ffbee80dfb596123860936fc1839a97eb9e3808597552b8fbe865fd`.
+The branch starter also includes a voting regression ensemble with its own
+recipe selectors and explicit weights; both base-task CLI examples validate.
+
+---
+
+# Previous handoff: SM-36a complete, SM-36b ready (2026-09-29)
 
 The user selected [OPEN_QUEUE_updated.md](OPEN_QUEUE_updated.md) as the working
 queue. References to OPEN_QUEUE.md in historical notes below are superseded.

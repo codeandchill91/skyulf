@@ -258,19 +258,23 @@ pre-split rejection. Broader work below stays here:
 
 Dependencies: SM-36, SM-36a.
 
-- [ ] Allow named training branches with their own target, features, preprocessing,
+Status: DONE; [implementation and live evidence](107-sm36b-training-branches.md).
+Replay means a fresh registration attempt with identical pinned selection, not
+exactly-once retry. Coherent activation/composed scoring remain SM-36c.
+
+- [x] Allow named training branches with their own target, features, preprocessing,
   estimator, optional tuning/CV, quality metric and registered model name.
-- [ ] Pin the shared source snapshot and reproducible split/sample evidence.
+- [x] Pin the shared source snapshot and reproducible split/sample evidence.
   Define per-target label availability explicitly; missing labels for one target
   must not silently discard training rows for every other branch.
-- [ ] Separate independent targets from a same-target algorithm search. The latter
+- [x] Separate independent targets from a same-target algorithm search. The latter
   is model selection; different-target models may all remain in use.
-- [ ] Log a parent workflow run and linked component runs, fitted pipelines,
+- [x] Log a parent workflow run and linked component runs, fitted pipelines,
   metrics, dependencies and immutable model versions. Keep each target's
   champion/challenger comparisons within its own task and metric contract.
-- [ ] Support sequential execution first; any concurrent mode must enforce an
+- [x] Support sequential execution first; any concurrent mode must enforce an
   aggregate local memory budget. Three models need not mean three user-facing jobs.
-- [ ] Test three branches, distinct label subsets, reproducible retry, a failed
+- [x] Test three branches, distinct label subsets, reproducible retry, a failed
   branch and leakage-free evaluation. Do not publish a complete model set when
   required components failed.
 

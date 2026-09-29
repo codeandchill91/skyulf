@@ -35,7 +35,7 @@ resources:
 {{else}}
           job_cluster_key: skyulf
           libraries:
-            - whl: ${workspace.file_path}/dist/skyulf_core-0.9.0-py3-none-any.whl
+            - whl: ${workspace.file_path}/dist/skyulf_core-0.9.1-py3-none-any.whl
             - pypi:
                 package: mlflow==3.16.1
 {{end}}
@@ -45,7 +45,7 @@ resources:
           spec:
             client: "4"
             dependencies:
-              - ${workspace.file_path}/dist/skyulf_core-0.9.0-py3-none-any.whl
+              - ${workspace.file_path}/dist/skyulf_core-0.9.1-py3-none-any.whl
               - mlflow==3.16.1
 {{else}}
       job_clusters:

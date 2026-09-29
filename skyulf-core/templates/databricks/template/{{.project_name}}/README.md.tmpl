@@ -1,8 +1,71 @@
 # {{.project_name}}
 
-Skyulf 0.9.0 Bundle: **{{.task}}** with **{{.engine}}**, using **{{.compute_mode}}**
+Skyulf 0.9.1 Bundle: **{{if eq .training_layout "multi_target"}}independent target models{{else}}{{.task}}{{end}}** with **{{.engine}}**, using **{{.compute_mode}}**
 compute. Spark reads bounded Delta inputs and writes predictions; preprocessing
 and model fitting run locally on the selected compute.
+
+## Optional multi-target training
+
+The initializer's `training_layout` defaults to `single_model`. Choose
+`multi_target` to use the same `train` job with one `train_models` task; the
+project still has exactly two jobs (`train` and `score`). Setup asks shared data,
+limits, compute and training schedule questions. Configure model/target, split,
+CV, tuning and quality settings in branches.py; those questions are hidden.
+Multi-target keeps `promotion_policy=manual_approval` and `score_handoff=disabled`.
+Preflight rejects
+automatic promotion, scoring handoff, operator actions, and task repair/retry.
+
+Configure `build_training_branches()` in `src/modeling/branches.py`; its empty
+default deliberately fails preflight. The commented example defines two
+regressions and one classification with distinct targets, models, feature lists
+and comparison metrics. Each branch has a `workflow` overlay on
+`config/workflow.json` and optional `features_path` relative to `src/modeling`
+(default `../features`). Overlay values replace complete top-level fields:
+setting `pipeline` replaces the whole pipeline, with no nested model merging.
+Keep its preprocessing list empty; the selected Python recipe fills it.
+A branch selects `preprocessing_recipe` and `pre_split_recipe` independently.
+Omitting a selector calls that phase's default builder. Unknown names fail early.
+Use names such as `{catalog}.{metadata_schema}.revenue{resource_suffix}` to
+retain deployment bindings and namespace isolation. Feature packages must stay
+inside `src`; keep them under `src/features/`, or add their paths to sync includes.
+All modeling Python and feature Python files are explicitly included in sync.
+
+For example, keep all custom implementations in the shared `src/features/custom/`
+package and select different ordered step lists:
+
+| Branch | preprocessing_recipe | pre_split_recipe |
+| --- | --- | --- |
+| revenue | frequency_only | complete_inputs |
+| cost | imputer_only | none |
+| churn | combined | complete_inputs |
+
+`preprocessing.py` defines `build_preprocessing(recipe="default")` and
+`pre_split.py` defines `build_pre_split_steps(recipe="default")`. Add a named
+function to either file's mapping to create a recipe. Each function returns a
+normal list of Core/custom steps. The starters use `feature_value` and `category`;
+adapt those columns to the selected branch's inputs. `frequency_only` performs
+no imputation; `combined` runs the imputer then custom frequency encoding.
+`complete_inputs` requires at least one of the two inputs to be present.
+
+Shared recipes share code, not fitted values: each branch and CV fold learns its
+own statistics from its own training rows. Selected recipe names are bound into
+the saved source, so model reload and saved-plan replay never use another branch's
+current/default recipe. Pre-split scoring reuse uses the selected pre-split list.
+Legacy zero-argument builders remain valid when selectors are omitted.
+
+All branches share one pinned input Delta version and one captured training
+clock. Each has independent labels, preprocessing, optional search/CV, registered
+candidate, and comparison against its own champion. Keep every known target
+column out of all input feature lists. Missing labels are excluded separately
+per branch. The report exposes the parent run and every component result.
+
+This layout trains, registers, and compares candidates only. It changes no
+champion/challenger aliases and does not call the scoring job. Candidate evidence
+is retained, but these candidates cannot yet use the single-model Bundle's
+approve/reject/rollback actions. Coherent activation and multi-target scoring
+are planned in SM-36C. The existing `score` job retains its single-model role;
+running it does not activate or combine these branch candidates. The remaining
+single-model lifecycle instructions below apply to `training_layout=single_model`.
 
 ## 1. Configure and preview
 
@@ -32,8 +95,11 @@ leave all three present. The job definitions and resource keys stay the same.
 Training captures every Python file under `src/features/` in one versioned
 64 KiB snapshot. Relative imports keep custom modules available after MLflow
 reload, even if editable project files change. Add `__init__.py` to subpackages.
-Declare small data files in `src/features/assets.json`, for example
-`["assets/bands.json"]`; read them from saved code with
+The `src/features/assets.json` file contains detailed `_help` instructions and an
+initially empty `files` list. Create the data file yourself, then declare it as
+`"files": ["assets/bands.json"]`. The legacy `["assets/bands.json"]` format also
+works. Assets can be used by pre-split, preprocessing and scoring; listing one
+does not enable a step. Read it from saved custom code with
 `read_project_asset(__package__, "assets/bands.json")` from
 `skyulf.inference.project_package`. Code, encoded assets and dependency pins
 share the 64 KiB snapshot budget. Paths must remain inside the feature package;
@@ -349,6 +415,10 @@ from model features in preprocessing if necessary. Deduplicate is local to the
 current batch, not a persistent cross-batch duplicate detector.
 
 For custom and combined modes, the file separates two sections:
+
+Both lists are empty by default. The sample dictionaries in `scoring.py` are
+commented out: uncomment the rules you need and adapt their columns/limits.
+Selecting a mode alone does not activate these examples.
 
 1. **`eligibility` (before prediction):** decide which input rows can be scored.
    The first example requires `feature_value`; the second requires a finite value

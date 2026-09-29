@@ -1,6 +1,7 @@
 """Saved scoring policies must survive delivery without changing training evaluation."""
 
 import json
+import re
 from unittest.mock import patch
 
 import numpy as np
@@ -276,9 +277,10 @@ def test_template_scoring_rules_are_usable_from_saved_package():
 
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
-def test_template_scoring_sections_reject_invalid_inputs_and_add_bands(engine):
-    """The editable rule sections must run together with real exclusion and output values."""
+def test_template_scoring_sections_reject_invalid_inputs_and_add_bands(engine, tmp_path):
+    """Explicitly enabled examples must run with real exclusion and output values."""
     import importlib
+    import shutil
     from pathlib import Path
 
     from skyulf.inference.project_code import load_project_module
@@ -288,6 +290,12 @@ def test_template_scoring_sections_reject_invalid_inputs_and_add_bands(engine):
     root = (
         Path(__file__).resolve().parents[2]
         / "templates/databricks/template/{{.project_name}}/src/features"
+    )
+    root = Path(shutil.copytree(root, tmp_path / "features"))
+    scoring_path = root / "scoring.py"
+    scoring_path.write_text(
+        re.sub(r'(?m)^(        )# (?=[{}" ])', r"\1", scoring_path.read_text(encoding="utf-8")),
+        encoding="utf-8",
     )
     source = project_source(root)
     module = load_project_module(source)

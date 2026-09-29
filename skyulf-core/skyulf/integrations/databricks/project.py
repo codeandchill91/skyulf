@@ -6,7 +6,6 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from ...config_validation import validate_preprocessing_steps
 from ...inference.project_code import (
     MAX_PROJECT_SOURCE_BYTES,
     load_project_module,
@@ -14,6 +13,7 @@ from ...inference.project_code import (
 )
 from ...inference.project_scoring import validate_scoring_config
 from ._project_files import modeling_hook, project_source
+from ._project_recipes import bind_recipe_source, recipe_steps
 from .local_ensemble import ENSEMBLE_MODELS
 from .local_search import _bounded_space
 
@@ -108,32 +108,36 @@ def _load_search_hook(result: dict[str, Any], preprocessing_path: Path) -> None:
     result["pipeline"]["search_python_sha256"] = digest
 
 
-def load_project_workflow(config: dict[str, Any], path: str | Path) -> dict[str, Any]:
+def load_project_workflow(
+    config: dict[str, Any],
+    path: str | Path,
+    *,
+    preprocessing_recipe: str | None = None,
+    pre_split_recipe: str | None = None,
+) -> dict[str, Any]:
     """Use Python-defined steps for training/preview and capture their exact source.
 
     Score and lifecycle approval load the saved artifact instead of this file.
     A nonempty JSON chain is rejected rather than silently overwritten.
+    Named selections call the corresponding builder with ``recipe=...`` and
+    remain bound into saved source for artifact and training-plan replay.
+    ``None`` preserves the original zero-argument builder contract.
     """
     if config.get("pipeline", {}).get("preprocessing"):
         raise ValueError("Configure preprocessing in the Python file; leave the JSON list empty.")
     if config.get("pre_split_steps"):
         raise ValueError("Configure pre_split_steps in the Python file; leave the JSON list empty.")
-    source = project_source(Path(path))
+    source = bind_recipe_source(
+        project_source(Path(path)),
+        {"preprocessing_recipe": preprocessing_recipe, "pre_split_recipe": pre_split_recipe},
+    )
     module = load_project_module(source)
-    factory = getattr(module, "build_preprocessing", None)
-    if not callable(factory):
-        raise ValueError("preprocessing.py must define build_preprocessing().")
-    steps = factory()
-    if not isinstance(steps, list):
-        raise ValueError("build_preprocessing() must return a list of Core steps.")
-    validate_preprocessing_steps(steps)
-    pre_split_factory = getattr(module, "build_pre_split_steps", None)
-    if pre_split_factory is not None and not callable(pre_split_factory):
-        raise ValueError("build_pre_split_steps must be a function returning Core steps.")
-    pre_split_steps = pre_split_factory() if pre_split_factory is not None else []
-    if not isinstance(pre_split_steps, list):
-        raise ValueError("build_pre_split_steps() must return a list of Core steps.")
-    validate_preprocessing_steps(pre_split_steps)
+    steps = recipe_steps(
+        module, "build_preprocessing", "preprocessing_recipe", preprocessing_recipe
+    )
+    pre_split_steps = recipe_steps(
+        module, "build_pre_split_steps", "pre_split_recipe", pre_split_recipe, optional=True
+    )
     result = deepcopy(config)
     result["pipeline"]["preprocessing"] = steps
     result["pipeline"]["project_python_source"] = source

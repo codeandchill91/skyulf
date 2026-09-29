@@ -67,6 +67,35 @@ def test_asset_changes_isolate_saved_package_identity(tmp_path):
     assert second.VALUE == b'{"weight": 3}'
 
 
+def test_documented_asset_manifest_preserves_snapshot_and_ignores_help(tmp_path):
+    """Inline instructions must not become assets or change a model's executable snapshot."""
+    root = _package(tmp_path)
+    original = project_source(root)
+    manifest = {"_help": ["Declare paths in files."], "files": ["lookup.json"]}
+    (root / "assets.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert project_source(root) == original
+    assert load_project_module(project_source(root)).VALUE == b'{"weight": 2}'
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {"_help": ["Missing files must not silently become empty."]},
+        {"files": [], "file": ["lookup.json"]},
+        {"files": "lookup.json"},
+        {"files": [], "_help": 42},
+        {"files": ["../outside"]},
+        {"files": ["lookup.json", "lookup.json"]},
+    ],
+)
+def test_documented_assets_reject_ambiguous_declarations(tmp_path, manifest):
+    """The documented format must retain strict path and declaration validation."""
+    root = _package(tmp_path)
+    (root / "assets.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="asset"):
+        project_source(root)
+
+
 @pytest.mark.parametrize(
     "asset",
     ["../outside", "/outside", "C:/outside", "a/../lookup.json", "a\\b", "missing", "__init__.py"],
