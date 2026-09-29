@@ -12,6 +12,7 @@ from ...inference.project_code import (
     load_project_module,
     project_source_digest,
 )
+from ...inference.project_scoring import validate_scoring_config
 from ._project_files import modeling_hook, project_source
 from .local_ensemble import ENSEMBLE_MODELS
 from .local_search import _bounded_space
@@ -137,6 +138,24 @@ def load_project_workflow(config: dict[str, Any], path: str | Path) -> dict[str,
     result["pipeline"]["preprocessing"] = steps
     result["pipeline"]["project_python_source"] = source
     result["pre_split_steps"] = deepcopy(pre_split_steps)
+    _load_scoring_hook(result, module, source)
     _load_ensemble_hook(result, Path(path))
     _load_search_hook(result, Path(path))
     return result
+
+
+def _load_scoring_hook(result: dict[str, Any], module: Any, source: str) -> None:
+    """Resolve optional scoring rules once and bind their parameters to the model."""
+    factory = getattr(module, "build_scoring", None)
+    if factory is None:
+        return
+    if not callable(factory):
+        raise ValueError("build_scoring must be a function returning a scoring policy.")
+    config = factory()
+    if isinstance(config, dict) and "reuse_pre_split" in config:
+        from .scoring_pre_split import resolve_pre_split_scoring  # noqa: PLC0415
+
+        config = resolve_pre_split_scoring(config, result)
+    result["pipeline"].pop("project_scoring", None)
+    if config is not None:
+        result["pipeline"]["project_scoring"] = validate_scoring_config(config, source)

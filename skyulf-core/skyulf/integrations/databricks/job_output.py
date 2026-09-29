@@ -302,6 +302,8 @@ def _append_scoring_output(sections: list[str], result: dict[str, Any]) -> None:
         )
     )
     manifest = result.get("manifest", {})
+    if manifest and not noop:
+        _append_scoring_coverage(sections, manifest)
     if manifest:
         label = "Model recorded by the previous write" if noop else "Prediction model"
         sections.append(
@@ -349,3 +351,17 @@ def _append_operator_options(
         sections.append(_table(("Parameter", "Value"), rows))
         if rollback:
             sections.append("</details>")
+
+
+def _append_scoring_coverage(sections: list[str], manifest: dict[str, Any]) -> None:
+    """Expose successful estimates and deliberate exclusions for the current write."""
+    rows = [
+        (label, manifest[key])
+        for key, label in (
+            ("predicted_count", "Predicted rows"),
+            ("excluded_count", "Excluded rows"),
+        )
+        if key in manifest
+    ]
+    if rows:
+        sections.append(_table(("Scoring coverage", "Rows"), rows))

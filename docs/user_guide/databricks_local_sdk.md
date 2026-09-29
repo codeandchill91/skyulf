@@ -599,3 +599,117 @@ The example's trip duration and dropoff ZIP are known only after a trip, so
 it demonstrates retrospective batch fare estimation. Its hard-coded schema,
 experiment and workspace folder are test resources; select your own names
 before using it elsewhere. The example is not a scheduled Bundle job.
+
+## Saved scoring policies and project assets
+
+Generated projects separate `src/features/pre_split.py`, `preprocessing.py`
+and `scoring.py`. Preprocessing fits transformations inside each training fold.
+Scoring has a three-way mode and an independent target-filter switch:
+
+```python
+SCORING_MODE = "pre_split"           # "pre_split", "custom", or "combined"
+SKIP_TARGET_PRE_SPLIT_STEPS = False # fail if reuse requires the actual target
+```
+
+In `pre_split` or `combined`, set the second switch to `True` to skip target-reading filters while keeping
+other pre-split steps. This never changes the predicted target. For example,
+"price is present" is a training-label check; "floor_area is present" can also
+be useful when predicting an unknown price. A mixed target/feature filter is
+skipped whole, because deleting one field would change its meaning. Fixed edits
+are projected onto feature columns. Preview records skipped names and reused steps.
+
+Reused rules use existing Core implementations and survivor guards on a copy.
+Accepted original rows go to the model, so its saved normalization runs once.
+Filter dependencies must exist in scoring `input_columns`; include a field there
+and remove it from model features in preprocessing if necessary. Deduplication
+checks the current batch only. Empty recipes in pre_split mode preserve ordinary output.
+These choices are saved per model version; changing a local switch does not
+change the behavior of an already registered model.
+
+Use `SCORING_MODE="custom"` for custom rules alone, or `"combined"` to run
+pre-split first and custom eligibility only on its survivors. First pre-split
+exclusion reasons are retained. Custom callbacks receive original accepted inputs;
+fixed model transformations still run once. All-excluded batches skip custom
+callbacks and the model; combined mode with no pre-split steps still uses custom
+rules. Both modes expose the same separate custom sections:
+
+- `eligibility`: checks **before prediction**. A null reason accepts a row;
+  a text reason excludes it. The template shows both required-field and finite
+  inclusive numeric-range checks, using `feature_value` as an editable example.
+- `outputs`: rules **after prediction**. Add fields such as a prediction band.
+  They do not change model predictions or select training data.
+
+`build_eligibility_rules()` and `build_output_rules()` configure the callable
+paths and parameters; `custom/scoring_custom.py` implements the functions under
+BEFORE/AFTER headings. Either list may be empty. The complete dictionary form
+below is also supported (returning `None` explicitly disables all scoring rules):
+
+```python
+# src/features/scoring.py
+
+def build_scoring():
+    return {
+        "eligibility": [{
+            "name": "observed_fields", "version": "1",
+            "function": "custom.scoring_custom.require_observed_values",
+            "params": {"columns": ["feature_value"]},
+        }],
+        "outputs": [{
+            "name": "risk_band", "version": "1",
+            "function": "custom.scoring_custom.prediction_band",
+            "params": {"column": "prediction", "thresholds": [10.0, 50.0],
+                       "labels": ["low", "medium", "high"], "output": "band"},
+            "columns": [{"name": "band", "dtype": "string"}],
+        }],
+    }
+```
+
+For classification, the band rule can use `probability_0`, `probability_1`, etc.;
+class order comes from the saved artifact manifest. Callbacks are ordinary trusted
+project functions saved with the model. Eligibility receives `(frame, params)`
+and returns a Series of nullable reason strings: null means eligible. The first
+non-null reason wins in configured order. Output callbacks receive
+`(frame, predictions, params)` and return exactly their declared columns, types,
+rows and index. Supported output types: `float64`, `int64`, `string`, `bool`.
+Callbacks receive defensive pandas frames with a RangeIndex for both engines;
+Core preprocessing and model prediction retain the recorded engine. Rules cannot
+overwrite raw inputs, estimates, keys or publication metadata. Keep callbacks
+deterministic; use saved assets instead of mutable files, clocks or network data.
+
+Every source key has an output row. With a scoring policy enabled, that row has
+`scoring_status` (`predicted`/`excluded`) and nullable `exclusion_reason`.
+Excluded rows have null predictions and business outputs. Receipts include
+`predicted_count` and `excluded_count`; `output_count` counts all outcome rows.
+An all-excluded increment is a successful atomic publication that advances the
+source watermark. Failed callbacks/writes advance nothing. Replays cannot publish
+duplicate keys. Existing targets require the exact output schema, so introduce a
+new scoring schema using a fresh target. Training, CV and holdout comparison still
+use the raw predictor and their independently defined population.
+
+Eligibility precedes lag/rolling processing. Excluded observations never enter
+continuation history. All-excluded batches retain the previous history unchanged.
+The saved input schema still applies to excluded rows; normalize input types before
+scoring rather than relying on eligibility to reinterpret an incompatible schema.
+
+### Deliver lookup files and external Python dependencies
+
+`src/features/assets.json` is an explicit list of relative paths, for example
+`["assets/bands.json"]`. Inside saved code, read a declared file as bytes:
+
+```python
+from skyulf.inference.project_package import read_project_asset
+
+payload = read_project_asset(__package__, "assets/bands.json")
+```
+
+Code, encoded file contents and pins share the bounded 64 KiB source snapshot.
+Paths must remain inside the feature package and asset symlinks are rejected.
+Undeclared assets, large external model downloads and files outside the package
+are not embedded. Replacing a local lookup file cannot change an existing model.
+
+Declare exact `distribution==version` pins in `src/features/requirements.txt`.
+Training/load verifies installed versions before executing package code or
+unpickling the model. The artifact manifest records the pins; MLflow includes them
+in its saved environment. Provision the same dependencies in the training and
+scoring job environments; prediction never installs packages. Ranges, URLs,
+recursive requirement files, options, extras and environment markers are rejected.

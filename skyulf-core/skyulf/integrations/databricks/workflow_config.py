@@ -385,6 +385,7 @@ def _preview_model_and_scoring(checked: dict[str, Any], cv: LocalCVSpec) -> list
     return [
         *model_lines,
         *_preview_explanations(checked["pipeline"]),
+        *_preview_scoring_rules(checked["pipeline"]),
         f"Promotion: {checked['promotion_policy']} | Metric: {checked['metric']} | "
         f"Threshold: {checked.get('quality_threshold')} | "
         f"Minimum improvement (absolute): {checked['min_improvement']}",
@@ -554,3 +555,15 @@ def validate_deployed_contract(config: dict[str, Any], parameters: dict[str, str
         raise ValueError(
             "Project and job definitions disagree; regenerate/redeploy the Bundle together."
         )
+
+
+def _preview_scoring_rules(pipeline: dict[str, Any]) -> list[str]:
+    """Show saved policy declarations without executing eligibility or output callbacks."""
+    config = pipeline.get("project_scoring")
+    if config is None:
+        return ["Project scoring rules: disabled (ordinary prediction schema)."]
+    return [
+        "Project scoring rules: " + json.dumps(config, sort_keys=True),
+        "Every input key receives predicted/excluded status; exclusions carry reasons.",
+        "Rules affect scoring only; training filters and holdout metrics remain independent.",
+    ]

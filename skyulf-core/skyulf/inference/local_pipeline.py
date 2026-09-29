@@ -23,6 +23,8 @@ from ..core.schema import SkyulfSchema
 from ..pipeline import SkyulfPipeline
 from ._manifest import checksum, runtime_requirements
 from .project_code import MAX_PROJECT_SOURCE_BYTES, load_project_module, project_source_digest
+from .project_dependencies import source_project_requirements, verify_project_requirements
+from .project_scoring import validate_scoring_config
 
 _MAX_MANIFEST_BYTES = 64 * 1024
 _MAX_PIPELINE_BYTES = 256 * 1024 * 1024
@@ -46,6 +48,7 @@ class LocalPipelineManifest(BaseModel):
     classes: tuple[str | int | float | bool, ...] = ()
     classification_probabilities: bool = True
     use_tuned_thresholds: bool = False
+    project_requirements: tuple[str, ...] = ()
     project_source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
@@ -100,6 +103,7 @@ def _manifest(
         classes=classes,
         classification_probabilities=classification_probabilities,
         use_tuned_thresholds=use_tuned_thresholds,
+        project_requirements=_project_contract(pipeline),
         project_source_sha256=(
             project_source_digest(pipeline.config["project_python_source"])
             if "project_python_source" in pipeline.config
@@ -120,6 +124,7 @@ def _validate_tuned_thresholds(
 
 def _check_runtime(manifest: LocalPipelineManifest) -> None:
     """Reject incompatible Python or dependency versions before loading pickle."""
+    verify_project_requirements(manifest.project_requirements)
     current = dict(runtime_requirements())
     required = dict(manifest.requirements)
     if set(required) != set(current):
@@ -230,17 +235,7 @@ def predict_local_pipeline(
         raise TypeError("Expected a LocalPipelineArtifact.")
     if not isinstance(frame, pd.DataFrame | pl.DataFrame):
         raise TypeError("Local prediction requires a pandas or Polars DataFrame.")
-    native = _prediction_frame(frame, artifact.manifest)
-    expected = SkyulfSchema(
-        artifact.manifest.input_columns,
-        dict(zip(artifact.manifest.input_columns, artifact.manifest.input_dtypes, strict=True)),
-    )
-    expected.assert_compatible(
-        SkyulfSchema.from_dataframe(native),
-        check_dtypes=True,
-        check_order=True,
-        where="local pipeline input",
-    )
+    native = validate_local_input(frame, artifact)
     prediction = np.asarray(
         artifact.pipeline.predict(
             native, use_tuned_thresholds=artifact.manifest.use_tuned_thresholds
@@ -270,3 +265,34 @@ def _prediction_frame(
     if manifest.fitted_engine == "polars":
         return pl.from_pandas(frame) if isinstance(frame, pd.DataFrame) else frame
     return frame.to_pandas() if isinstance(frame, pl.DataFrame) else frame
+
+
+def _project_contract(pipeline: SkyulfPipeline) -> tuple[str, ...]:
+    """Validate saved scoring policies and dependency pins as part of model identity."""
+    source = pipeline.config.get("project_python_source")
+    config = pipeline.config.get("project_scoring")
+    if config is not None:
+        if not source:
+            raise ValueError("Project scoring requires saved project Python source.")
+        validate_scoring_config(config, source)
+    requirements = source_project_requirements(source) if source else ()
+    verify_project_requirements(requirements)
+    return requirements
+
+
+def validate_local_input(
+    frame: pd.DataFrame | pl.DataFrame, artifact: LocalPipelineArtifact
+) -> pd.DataFrame | pl.DataFrame:
+    """Validate raw columns and dtypes even when scoring eligibility excludes all rows."""
+    native = _prediction_frame(frame, artifact.manifest)
+    expected = SkyulfSchema(
+        artifact.manifest.input_columns,
+        dict(zip(artifact.manifest.input_columns, artifact.manifest.input_dtypes, strict=True)),
+    )
+    expected.assert_compatible(
+        SkyulfSchema.from_dataframe(native),
+        check_dtypes=True,
+        check_order=True,
+        where="local pipeline input",
+    )
+    return native

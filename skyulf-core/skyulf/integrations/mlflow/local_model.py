@@ -14,12 +14,11 @@ from typing import Any
 import mlflow  # ty: ignore[unresolved-import]
 import pandas as pd
 
-from ...inference._manifest import label_dtype
 from ...inference.local_pipeline import (
     LocalPipelineArtifact,
     load_local_pipeline,
-    predict_local_pipeline,
 )
+from ...inference.local_scoring import score_local_pipeline, scoring_output_schema
 from .model import _make_client, _mlflow_dtype, _scrub_local_artifact_uri
 
 
@@ -29,6 +28,10 @@ class SkyulfLocalPythonModel(mlflow.pyfunc.PythonModel):
     def __init__(self) -> None:
         """Start unloaded until MLflow provides the saved artifact path."""
         self._artifact: LocalPipelineArtifact | None = None
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Reload saved project classes through context in each fresh process."""
+        return {**self.__dict__, "_artifact": None}
 
     def load_context(self, context: Any) -> None:
         """Validate the trusted pipeline artifact before the first prediction."""
@@ -47,7 +50,7 @@ class SkyulfLocalPythonModel(mlflow.pyfunc.PythonModel):
             raise RuntimeError("SkyulfLocalPythonModel.load_context() was not called.")
         if not isinstance(model_input, pd.DataFrame):
             raise TypeError("Skyulf local pyfunc requires a pandas DataFrame.")
-        return predict_local_pipeline(model_input, self._artifact)
+        return score_local_pipeline(model_input, self._artifact)
 
 
 def log_local_model(
@@ -114,14 +117,13 @@ def _signature(artifact: LocalPipelineArtifact) -> Any:
             for name, dtype in zip(manifest.input_columns, manifest.input_dtypes, strict=True)
         ]
     )
-    prediction_dtype = "float64" if manifest.task == "regression" else label_dtype(manifest.classes)
-    outputs = [ColSpec(_mlflow_dtype(prediction_dtype), name="prediction")]
-    if manifest.task == "classification" and manifest.classification_probabilities:
-        outputs.extend(
-            ColSpec(_mlflow_dtype("float64"), name=f"probability_{position}")
-            for position in range(len(manifest.classes))
-        )
-    return ModelSignature(inputs=inputs, outputs=Schema(outputs))
+    outputs = Schema(
+        [
+            ColSpec(_mlflow_dtype(column.dtype), name=column.name)
+            for column in scoring_output_schema(artifact)
+        ]
+    )
+    return ModelSignature(inputs=inputs, outputs=outputs)
 
 
 def _input_example(artifact: LocalPipelineArtifact) -> pd.DataFrame:
@@ -146,10 +148,19 @@ def _input_example(artifact: LocalPipelineArtifact) -> pd.DataFrame:
 
 def _pip_requirements(artifact: LocalPipelineArtifact) -> list[str]:
     """Pin the fitted runtime and optional MLflow flavor for reproducible loading."""
-    return [
-        *(f"{name}=={value}" for name, value in artifact.manifest.requirements if name != "python"),
-        f"mlflow=={mlflow.__version__}",
-    ]
+    return list(
+        dict.fromkeys(
+            [
+                *artifact.manifest.project_requirements,
+                *(
+                    f"{name}=={value}"
+                    for name, value in artifact.manifest.requirements
+                    if name != "python"
+                ),
+                f"mlflow=={mlflow.__version__}",
+            ]
+        )
+    )
 
 
 def _validate_local_destination(run_id: str, artifact_path: str, tracking_uri: str | None) -> None:

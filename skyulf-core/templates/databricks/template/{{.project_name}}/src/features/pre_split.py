@@ -2,7 +2,8 @@
 
 Uncomment a step and its import, then adapt its source columns.
 Custom pre-split steps cannot learn statistics or change survivor values.
-Training row filters do not run during scoring.
+scoring.py can reuse this recipe or choose separate custom scoring rules.
+A target-reading filter requires SKIP_TARGET_PRE_SPLIT_STEPS=True for reuse.
 """
 
 # from .custom.pre_split_custom import minimum_completeness

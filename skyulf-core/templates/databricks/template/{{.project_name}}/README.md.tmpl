@@ -11,6 +11,9 @@ and model fitting run locally on the selected compute.
 | `config/workflow.json` | Existing input tables, record keys, features/target, model parameters, validation/search, data selection, limits and promotion/scoring policies |
 | `src/features/pre_split.py` | `build_pre_split_steps()` for fixed cleanup and training eligibility |
 | `src/features/preprocessing.py` | `build_preprocessing()` for transformations fitted inside each CV fold |
+| `src/features/scoring.py` | Optional `build_scoring()` for eligibility and versioned output rules |
+| `src/features/assets.json` | Relative paths of bounded data files to save with the model |
+| `src/features/requirements.txt` | Exact project dependency pins verified at fit/load and recorded by MLflow |
 | `src/features/custom/` | Optional Calculator/Applier pairs and helper modules; use relative imports |
 | `src/modeling/tuning.py` | Optional `build_search_space()` override; returning `None` uses Core defaults |
 | `src/modeling/ensemble.py` | Optional voting/stacking composition; returning `None` keeps JSON parameters and Core defaults |
@@ -29,8 +32,18 @@ leave all three present. The job definitions and resource keys stay the same.
 Training captures every Python file under `src/features/` in one versioned
 64 KiB snapshot. Relative imports keep custom modules available after MLflow
 reload, even if editable project files change. Add `__init__.py` to subpackages.
-Third-party dependencies must be installed in training/scoring environments;
-non-Python assets and modules outside features are not embedded.
+Declare small data files in `src/features/assets.json`, for example
+`["assets/bands.json"]`; read them from saved code with
+`read_project_asset(__package__, "assets/bands.json")` from
+`skyulf.inference.project_package`. Code, encoded assets and dependency pins
+share the 64 KiB snapshot budget. Paths must remain inside the feature package;
+asset symlinks are rejected. Files outside the manifest are not embedded.
+
+Use exact `distribution==version` pins in `src/features/requirements.txt`.
+Install these in the training/scoring job environments as well: the loader
+verifies versions and never installs packages during prediction. MLflow exports
+the pins in its environment requirements. Changing code/assets/pins requires
+a new model version. Large external model downloads are outside this contract.
 
 Custom implementations live in two modules. Their step calls appear directly
 inside the parent builders' returned lists, alongside the Core steps:
@@ -297,3 +310,76 @@ matching graph/notebooks/wheel.
 [predictions]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle_walkthrough/#what-happens-to-existing-predictions
 [replay]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle_walkthrough/#inspect-failures-and-replay-a-pinned-training-input
 [schedules]: https://flyingriverhorse.github.io/Skyulf/user_guide/databricks_bundle_walkthrough/#recovery-and-schedules
+
+## Scoring eligibility and business outputs
+
+Choose the mode and target-filter behavior in `src/features/scoring.py`:
+
+```python
+SCORING_MODE = "combined"  # "pre_split", "custom", or "combined"
+SKIP_TARGET_PRE_SPLIT_STEPS = True
+```
+
+| Setting | What happens during prediction |
+| --- | --- |
+| `SCORING_MODE = "pre_split"` (default) | Reuse the saved pre-split recipe. |
+| `SCORING_MODE = "custom"` | Use custom eligibility checks and output rules. |
+| `SCORING_MODE = "combined"` | Pre-split first, then custom eligibility on its survivors, model prediction and custom outputs. |
+| `SKIP_TARGET_PRE_SPLIT_STEPS = False` (default) | In pre_split/combined, reject a recipe that needs actual target values. |
+| `SKIP_TARGET_PRE_SPLIT_STEPS = True` | In pre_split/combined, skip target-reading filters and retain other steps. Ignored in custom mode. |
+
+Combined mode preserves the first pre-split exclusion reason; custom callbacks
+never receive those excluded rows. Callbacks see the original accepted inputs,
+not the fixed-normalization copy used to decide pre-split membership. If pre-split
+excludes every row, custom callbacks and the model are not called. An empty
+pre-split recipe in combined mode still runs the custom sections.
+
+For example, when predicting `price`, a pre-split "price must not be missing"
+filter uses the answer that prediction is meant to provide. This does not change
+the target: the second switch only skips that filter. A "floor_area must not be
+missing" filter still runs. Mixed filters reading both are skipped as a whole;
+separate them if the feature-only check should remain. Fixed edits to target and
+features are projected onto the features. Preview lists saved steps and skipped
+names. An empty recipe in pre_split mode keeps the ordinary prediction schema.
+
+Reused steps operate on a copy to decide membership. The existing saved model
+still applies its fixed feature transformations once to the original accepted
+inputs. Filter fields must be in `input_columns`; add them there and drop them
+from model features in preprocessing if necessary. Deduplicate is local to the
+current batch, not a persistent cross-batch duplicate detector.
+
+For custom and combined modes, the file separates two sections:
+
+1. **`eligibility` (before prediction):** decide which input rows can be scored.
+   The first example requires `feature_value`; the second requires a finite value
+   between 0 and 120. Adapt the names/limits to your data. Return `[]` to skip checks.
+2. **`outputs` (after prediction):** add business columns beside the model output.
+   The band rule labels predictions below 10 as low, 10 to below 50 as medium,
+   and 50 or above as high. Return `[]` for no business columns.
+
+The actual functions live in `custom/scoring_custom.py`, under matching BEFORE
+and AFTER headings. A `function` path such as
+`custom.scoring_custom.require_value_range` tells the loader which function to
+call; `params` supplies its column/limits. You do not call it manually.
+
+Each rule has a name, immutable version, saved function path and JSON parameters.
+Output rules additionally declare scalar column names/types. Callbacks receive
+pandas frames with an ordered RangeIndex on both model engines. Return exactly
+that index; never drop or reorder rows inside the model's preprocessing.
+
+Training and holdout/CV evaluation remain separate: `pre_split.py` controls
+training eligibility; `scoring.py` chooses reuse, custom rules or their combination. Every source
+key is published once, including exclusions. Opting in adds `scoring_status`
+(`predicted` or `excluded`) and nullable `exclusion_reason`; excluded rows have
+null estimates/business outputs. The Delta receipt records `predicted_count`
+and `excluded_count` alongside total input/output counts. Even an all-excluded
+increment advances the source watermark atomically with its outcome records.
+A failed rule or write advances nothing; a successful retry/no-op cannot duplicate
+keys. Existing targets need the exact new output schema: use a fresh target when
+introducing a scoring policy to an old deployment.
+
+Eligibility runs before temporal preprocessing. Excluded observations do not
+enter lag/rolling history; an all-excluded batch retains the previous tail.
+Input schema validation still applies to every request. Business callbacks are
+trusted saved project code: keep them deterministic and free of mutable network,
+clock or filesystem state. Use the saved asset helper for lookup data.

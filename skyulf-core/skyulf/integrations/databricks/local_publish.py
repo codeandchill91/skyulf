@@ -133,6 +133,11 @@ def run_local_batch(
     output = bridge.join(source_period, on=list(source.record_key_columns), how="inner")
     output = _complete_local_output(output, target, spec, functions, count)
     manifest = _manifest(spec, source_id, source.table, snapshot.committed_us, count, count)
+    manifest |= {
+        key: scored.diagnostics[key]
+        for key in ("predicted_count", "excluded_count")
+        if key in scored.diagnostics
+    }
     manifest = bind_period_history(manifest, temporal_session, history_state)
     committed_version, recorded, replayed = publish_replace_period(
         spark, output, spec, manifest=manifest, admission=admission

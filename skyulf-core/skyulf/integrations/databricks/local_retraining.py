@@ -569,6 +569,38 @@ def _validate_pre_split_survivors(
     )
 
 
+def apply_pre_split_step(
+    native: pd.DataFrame | pl.DataFrame,
+    step: dict[str, Any],
+    *,
+    keys: list[str],
+    target_column: str,
+) -> pd.DataFrame | pl.DataFrame:
+    """Apply one fixed step with identical training and scoring survivor validation."""
+    columns = _validate_pre_split_inputs(native, step, target_column)
+    step_type = step["transformer"]
+    original_columns = list(native.columns)
+    original_dtypes = list(native.dtypes)
+    before_keys = (
+        list(native.select(keys).iter_rows())
+        if isinstance(native, pl.DataFrame)
+        else list(native[keys].itertuples(index=False, name=None))
+    )
+    before_columns = {column: native[column].to_list() for column in native.columns}
+    artifact = NodeRegistry.get_calculator(step["transformer"])().fit(native, step["params"])
+    filtered = NodeRegistry.get_applier(step["transformer"])().apply(native, artifact)
+    _validate_filter_frame(filtered, native, step_type, original_columns, original_dtypes)
+    _validate_pre_split_survivors(
+        filtered,
+        keys,
+        before_keys,
+        before_columns,
+        target_column=target_column,
+        allowed_edits=set(columns) if step_type in FIXED_TYPES else set(),
+    )
+    return filtered
+
+
 def _apply_pre_split_steps(
     selected: pd.DataFrame, spec: LocalTrainingSpec, engine: str
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
@@ -576,34 +608,16 @@ def _apply_pre_split_steps(
     filter_counts = []
     native = pl.from_pandas(selected) if spec.pre_split_steps and engine == "polars" else selected
     for step in spec.pre_split_steps:
-        columns = _validate_pre_split_inputs(native, step, spec.target_column)
-        step_type = step["transformer"]
-        keys = list(spec.record_key_columns)
-        original_columns = list(native.columns)
-        original_dtypes = list(native.dtypes)
-        before_keys = (
-            list(native.select(keys).iter_rows())
-            if isinstance(native, pl.DataFrame)
-            else list(native[keys].itertuples(index=False, name=None))
-        )
-        before_columns = {column: native[column].to_list() for column in native.columns}
-        artifact = NodeRegistry.get_calculator(step["transformer"])().fit(native, step["params"])
-        filtered = NodeRegistry.get_applier(step["transformer"])().apply(native, artifact)
-        _validate_filter_frame(filtered, native, step_type, original_columns, original_dtypes)
-        _validate_pre_split_survivors(
-            filtered,
-            keys,
-            before_keys,
-            before_columns,
-            target_column=spec.target_column,
-            allowed_edits=set(columns) if step_type in FIXED_TYPES else set(),
+        before_count = len(native)
+        filtered = apply_pre_split_step(
+            native, step, keys=list(spec.record_key_columns), target_column=spec.target_column
         )
         filter_counts.append(
             {
                 "name": step["name"],
                 "transformer": step["transformer"],
-                "input_rows": len(before_keys),
-                "excluded_rows": len(before_keys) - len(filtered),
+                "input_rows": before_count,
+                "excluded_rows": before_count - len(filtered),
                 "output_rows": len(filtered),
             }
         )
@@ -1302,7 +1316,7 @@ def _validate_filter_values(
                 )
             if not numeric:
                 raise ValueError(f"pre_split_steps ManualBounds requires numeric column {column}.")
-    if step_type == "Deduplicate":
+    if step_type == "Deduplicate" and target_column in native.columns:
         _validate_deduplicate_labels(native, columns, target_column)
 
 

@@ -1,5 +1,5 @@
 {
-  "welcome_message": "Create a Skyulf training and prediction project. Column names can be comma-separated. Choose a model and search strategy; Core supplies model-appropriate default search settings. Edit custom preprocessing in src/preprocessing.py and search overrides in src/tuning.py. Initialization creates local files only. Data and CV details use defaults; override them with --config-file or edit config/workflow.json. See skyulf-core/templates/databricks/examples/ in the Skyulf checkout.",
+  "welcome_message": "Create a Skyulf training and prediction project. Column names can be comma-separated. Choose a model and search strategy; Core supplies model-appropriate default search settings. Edit preprocessing and optional scoring rules in src/features/, and search overrides in src/modeling/tuning.py. Initialization creates local files only. Data and CV details use defaults; override them with --config-file or edit config/workflow.json. See skyulf-core/templates/databricks/examples/ in the Skyulf checkout.",
   "properties": {
     "project_name": {
       "order": 1,

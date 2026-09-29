@@ -1,9 +1,12 @@
 """Capture bounded project source and locate hooks in legacy or organized layouts."""
 
+import json
 import keyword
+from base64 import b64encode
 from pathlib import Path
 
 from ...inference.project_code import MAX_PROJECT_SOURCE_BYTES, project_source_digest
+from ...inference.project_dependencies import parse_project_requirements
 
 
 def read_source(path: Path) -> str:
@@ -24,6 +27,67 @@ def _module_path(path: Path, root: Path) -> str:
         if not name.isidentifier() or keyword.iskeyword(name):
             raise ValueError(f"Project Python module needs an importable name: {relative}.")
     return relative.as_posix()
+
+
+def _contained_file(root: Path, relative: str) -> Path:
+    """Require canonical relative paths without symlinks or platform-specific aliases."""
+    parts = relative.split("/")
+    if any(part in {"", ".", ".."} for part in parts) or any(
+        character in relative for character in "\\:\x00"
+    ):
+        raise ValueError(f"Project asset path must be a canonical relative path: {relative}.")
+    candidate = root
+    for part in parts:
+        candidate = candidate / part
+        if candidate.is_symlink() or candidate.is_junction():
+            raise ValueError(f"Project asset/metadata cannot use a symlink: {relative}.")
+    if not candidate.resolve().is_relative_to(root.resolve()) or not candidate.is_file():
+        raise ValueError(f"Project asset/metadata must be a file inside its root: {relative}.")
+    return candidate
+
+
+def _project_assets(root: Path) -> dict[str, str]:
+    """Capture only explicitly declared data assets within the total snapshot bound."""
+    manifest = root / "assets.json"
+    if not manifest.exists() and not manifest.is_symlink():
+        return {}
+    try:
+        entries = json.loads(read_source(_contained_file(root, "assets.json")))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("Project assets.json must contain a JSON list of asset paths.") from exc
+    _validate_asset_entries(entries)
+    assets = {}
+    size = 0
+    for relative in sorted(entries):
+        path = _contained_file(root, relative)
+        with path.open("rb") as stream:
+            content = stream.read(MAX_PROJECT_SOURCE_BYTES + 1)
+        size += len(content)
+        if size > MAX_PROJECT_SOURCE_BYTES:
+            raise ValueError("Project assets exceed 64 KiB.")
+        assets[relative] = b64encode(content).decode("ascii")
+    return assets
+
+
+def _validate_asset_entries(entries: object) -> None:
+    """Reject ambiguous declarations and keep executable source out of data assets."""
+    if not isinstance(entries, list) or any(not isinstance(item, str) for item in entries):
+        raise ValueError("Project assets.json must contain a JSON list of asset paths.")
+    if len(entries) != len(set(entries)):
+        raise ValueError("Project asset paths must be distinct.")
+    if any(
+        Path(item).suffix.lower() == ".py" or item in {"assets.json", "requirements.txt"}
+        for item in entries
+    ):
+        raise ValueError("Project assets must be data files, separate from source and metadata.")
+
+
+def _project_requirements(root: Path) -> tuple[str, ...]:
+    """Read optional pinned external dependencies without installing or importing them."""
+    manifest = root / "requirements.txt"
+    if not manifest.exists() and not manifest.is_symlink():
+        return ()
+    return parse_project_requirements(read_source(_contained_file(root, "requirements.txt")))
 
 
 def _validate_package_files(files: dict[str, str]) -> None:
@@ -55,9 +119,12 @@ def project_source(path: Path) -> str:
             raise ValueError("Project package source exceeds 64 KiB.")
         files[relative] = source
     _validate_package_files(files)
+    assets = _project_assets(path)
+    requirements = _project_requirements(path)
+    extras = f", assets={assets!r}, requirements={requirements!r}" if assets or requirements else ""
     source = (
         "from skyulf.inference.project_package import install_project_package\n"
-        f"install_project_package(__name__, {files!r})\n"
+        f"install_project_package(__name__, {files!r}{extras})\n"
     )
     project_source_digest(source)
     return source

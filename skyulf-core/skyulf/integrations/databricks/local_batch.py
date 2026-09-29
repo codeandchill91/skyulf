@@ -23,6 +23,7 @@ from ...inference.local_pipeline import (
     load_local_pipeline,
     save_local_pipeline,
 )
+from ...inference.local_scoring import scoring_counts
 from ...pipeline import SkyulfPipeline
 from ._contracts import column_name, table_name
 from .local_sdk import PreparedLocalWorkflow
@@ -170,6 +171,7 @@ def score_local_source(
         "model_version": prepared.preflight.model_version or "local_path",
         "row_count": len(result),
     }
+    diagnostics |= scoring_counts(predictions)
     return LocalScoreResult(result, diagnostics)
 
 

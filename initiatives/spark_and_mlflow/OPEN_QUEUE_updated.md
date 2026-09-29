@@ -2,13 +2,14 @@
 
 > Active queue: this file (`OPEN_QUEUE_updated.md`), confirmed by the user on
 > 2026-09-28. Use this task order and its added scopes for further work.
-> SM-36a remains PARTIAL. Project packages/custom steps were committed as
-> `9cc81304`; temporal history is included in this delivery commit, with local
-> and live Delta evidence in [report105](105-sm36a-temporal-history-delivery.md).
+> SM-36a is DONE for its approved scope. Project packages/custom steps:
+> `9cc81304`; temporal history: `84a7dcb4` ([report105](105-sm36a-temporal-history-delivery.md)).
+> Keyed scoring outcomes, assets/pins and output rules are implemented and verified
+> locally and on Databricks; this delivery commit includes the final slice.
+> [Final evidence](106-sm36a-project-delivery.md). Next: SM-36b is READY.
 > This file replaces the removed historical `OPEN_QUEUE.md` as the active queue.
-> Next: finish SM-36a keyed scoring exclusions before starting SM-36b.
 
-Updated: 2026-09-28 (dbml re-comparison queued; see report93). **SM-00 through SM-16, SM-15L/15I/24a/25/26, SM-22a/b/c/28a/28b, SM-20a/20R/20S and SM-27/29 complete for their documented scopes. Target: 0.9.0.**
+Updated: 2026-09-29 (dbml re-comparison queued; see report93). **SM-00 through SM-16, SM-15L/15I/24a/25/26, SM-22a/b/c/28a/28b, SM-20a/20R/20S and SM-27/29 complete for their documented scopes. Target: 0.9.0.**
 The pre-Spark local Bundle lifecycle gate passed live: selectable rescoring,
 automatic champion selection, failed-score recovery and serialized handoff.
 This is functional completion for the selected workflow. Production must
@@ -153,8 +154,8 @@ on an existing candidate without retraining or reuploading the model.
 | SM-34C6 | Retire redundant notebook lifecycle routing carefully | SM-34C5; ownership from C2 | DONE | Fixed score entrypoint, no training temp directory, retained sequential API adapter; 204 combined tests plus 10 final output tests (205 distinct), lint/type and review passed. Committed as d9596763; one corrected live scenario passed after custom registration fix 5c9798b9. [Live evidence](75-sm34c-live-acceptance.md). [Evidence](74-sm34c6-explicit-notebook-entrypoints.md) |
 | SM-35 | Multi-metric quality gates and clear thresholds | SM-34C6 | DONE | Optional absolute gates enforced across SDK/tasks/first champion/approval; canonical historical digests and per-gate evidence. Sourcery follow-up covers alias commits, workflow checks/preview/dispatch and pre-split validation. 578 local tests and 3,512 identical offline outcomes; committed b67594b7 with DCO/hooks. Later SM-36 acceptance verified live passing/failed gates and corrected UC tag names (uncommitted fix). [Local evidence](77-sm35-quality-gates-evidence.md), [live evidence](83-sm36-databricks-live-acceptance.md) |
 | SM-36 | Core tuning, model search and optional explainability | SM-35 | DONE | Five strategies, automatic/custom spaces, four ensemble families, shared diagnostic CV and bounded SHAP. Expanded Databricks acceptance: 170/170 model-strategy pairs / 3,756 trials; 254 setting scenarios; 143 penalty regression and 90 pruning tests; 45 CLI generation cases. Legacy sklearn penalty loss fixed. Earlier eight lifecycle/score/replay/no-op and manual operator checks remain in report83. Included in this local delivery commit; true nested tuning is tracked separately in SM-36f. [Expanded evidence](85-sm36-full-strategy-acceptance.md), [earlier lifecycle evidence](83-sm36-databricks-live-acceptance.md) |
-| SM-36a | Project-owned feature engineering and output rules | SM-33D, SM-33H3 | PARTIAL | Project layout, saved multi-file feature packages and inline custom steps committed as 9cc81304 (report102). Temporal history included in this delivery commit: bounded artifact seeds, fold-local temporal CV, explicit backend state and atomic Databricks continuation; both-engine live evidence in [report105](105-sm36a-temporal-history-delivery.md). Existing normalization/dedup is H3; temporal/group CV is SM-36g/h. Remaining: keyed scoring exclusions, external dependency/asset delivery and output rules; optional H3Index/sentence-model execution, custom pre-split value normalization and new predicate/data-quality gates remain separate; reports58/62 |
-| SM-36b | Multiple training branches from one pinned source | SM-36, SM-36a | WAIT | Per-target pipelines/labels/tuning/metrics, linked MLflow runs, reproducible splits and bounded execution; keep multiple models rather than selecting one winner |
+| SM-36a | Project-owned feature engineering and output rules | SM-33D, SM-33H3 | DONE | Saved project packages/custom steps: 9cc81304 (report102); temporal history: 84a7dcb4 (report105). Keyed scoring exclusions/coverage, atomic continuation, bounded assets/exact dependency pins and named output rules passed local and live acceptance ([report106](106-sm36a-project-delivery.md)); final delivery includes 156 passing cloud tests with zero skips (run 530905329987142). Optional H3Index/sentence-model runtime checks, custom pre-split value normalization and new predicate/data-quality gates remain separate. |
+| SM-36b | Multiple training branches from one pinned source | SM-36, SM-36a | READY | Per-target pipelines/labels/tuning/metrics, linked MLflow runs, reproducible splits and bounded execution; keep multiple models rather than selecting one winner |
 | SM-36c | Composed multi-model scoring and model-set lifecycle | SM-36b | WAIT | Pin component versions and rule code in a versioned set; keyed outputs, all-or-nothing final publication, append/full provenance and coherent rollback |
 | SM-36d | Databricks segmentation training and scoring | SM-36 | WAIT | Reuse Core K-Means, Mini-Batch K-Means, Gaussian Mixture and Birch; explicit clustering setup, optional reference column, preprocessing, cluster metrics, artifact/MLflow replay and new-row scoring. Define cluster-specific lifecycle policy without assuming supervised CV/tuning support. [Scope and acceptance](81-sm36d-segmentation-task.md) |
 | SM-36e | Connect optional SHAP setup and readable results | SM-36 | WAIT | Add explicit opt-in setup, matching runtime dependency, bounded explanation settings and readable feature/sample results linked to MLflow evidence. Preserve training-only inputs and explicit unavailable states. [Scope](82-sm36e-shap-connection-task.md) |
@@ -308,17 +309,25 @@ scheduled clocks and company acceptance remain separate.
 
 ## Custom feature engineering and multi-model follow-up
 
-### Next SM-36a slice: keyed scoring exclusions
+### SM-36a complete; next SM-36b
 
-Preserve each requested record key when an explicit scoring rule excludes a row:
-report the exclusion reason separately from successful predictions, distinguish
-intentional exclusions from unexpected row loss, and preserve retry/publication
-consistency. Training-only eligibility filters must stay training-only. Add
-pandas/Polars and saved-artifact tests before live acceptance. External assets/
-dependencies and remaining output rules follow within SM-36a; SM-36b stays WAIT.
+User follow-up: generated scoring.py offers pre_split/custom/combined modes
+and an independent target-filter-skip switch. Pre-split reuse passed 285 local
+tests; the latest combined-mode selection passed 200 tests. Final Databricks
+run `530905329987142` passed all 156 tests with zero failures/skips, including
+seven real Delta cases. The final scoring modes are verified on both engines.
+Exact wheel/run evidence and earlier acceptance boundaries are in report106.
 
+[Report106](106-sm36a-project-delivery.md) closes keyed scoring outcomes,
+coverage, all-excluded incremental progress, versioned business outputs and
+bounded asset/dependency delivery. Databricks verified real Delta writes/retry
+and fresh-process MLflow replay after deleting the original project files.
 Temporal carry history is delivered in report105. This does not enable arbitrary
 row-dropping recipes or target-history forecasting.
+
+SM-36b is READY: named training branches from one pinned source, independent
+labels/features/tuning, linked runs and bounded sequential execution. Keep all
+component models; winner selection is a different queued scenario.
 
 The user requested optional project-owned Python feature engineering and multiple
 models trained from one source and used together. Existing Core preprocessing,
@@ -350,7 +359,8 @@ missing declared sort columns, invalid direct lag shifts and known current-targe
 rolling; backend admission shares the target guard. Verified with 1,981 Core and
 1,731 backend tests, Ruff, ty and strict MkDocs. This does not deliver automatic
 history/availability handling: forecast horizon, cross-batch context retrieval,
-missing/tied time policy and context-row removal remain SM-36a (report 62).
+missing/tied time policy and context-row removal were later delivered in SM-36a
+(report105); this paragraph records the earlier review baseline.
 SM-33H1 completed after committing the review as `522c6e82`; its implementation
 and the H3 plan are included in the requested delivery commit. Final affected tests: 71 passed; CLI generation: 56
 passed; real local WSL Delta: 1 passed. Ruff, full ty, strict docs and generated

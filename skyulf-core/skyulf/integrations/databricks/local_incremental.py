@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from ...inference.local_pipeline import LocalPipelineArtifact
+from ...inference.local_scoring import scoring_counts
 from ._contracts import PREDICTION_METADATA_COLUMNS, column_name, table_name
 from .admission import BatchConflictError, PublishAdmission, validate_admission
 from .delta import DeltaPublishError, history, table_identity
@@ -198,7 +199,7 @@ def run_incremental_local_batch(
             spark, selected, target, record_key_columns, period_column, prepared
         )
         with incremental_history(prepared, previous) as temporal_session:
-            bridge = _incremental_prediction_bridge(
+            bridge, coverage = _incremental_prediction_bridge(
                 spark, prepared, frame, inputs, output_names, record_key_columns, target
             )
         output = (
@@ -217,7 +218,7 @@ def run_incremental_local_batch(
             prior_version,
             upper_version,
             frame,
-            history_receipt(temporal_session),
+            history_receipt(temporal_session) | coverage,
         )
         output = _complete_incremental_output(output, target, config, digest, functions, frame)
         committed, recorded = _commit_increment(
@@ -367,7 +368,7 @@ def _incremental_prediction_bridge(
     record_key_columns: tuple[str, ...],
     target: Any,
 ) -> Any:
-    """Score bounded rows, preserve keys and reject already published predictions."""
+    """Score bounded rows, preserve keys and return explicit outcome counts."""
     predicted = prepared.predict(frame.loc[:, list(inputs)])
     if list(predicted.columns) != list(output_names) or len(predicted) != len(frame):
         raise ValueError("Local prediction schema or row count differs from the model contract.")
@@ -395,7 +396,7 @@ def _incremental_prediction_bridge(
         .count()
     ):
         raise BatchConflictError("Source key already has a published prediction.")
-    return bridge
+    return bridge, scoring_counts(predicted)
 
 
 def _incremental_manifest(

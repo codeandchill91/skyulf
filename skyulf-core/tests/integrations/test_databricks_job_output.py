@@ -236,3 +236,24 @@ def test_nested_search_output_explains_independent_outer_scores():
     assert "Nested CV evaluation" in html and "Outer mean score" in html
     assert "Inner folds" in html and "neg_mean_squared_error" in html
     assert "separate final search" in html
+
+
+def test_scoring_coverage_is_visible_only_for_current_write():
+    """A no-op must not present prior prediction/exclusion counts as new work."""
+    from skyulf.integrations.databricks.job_output import render_bundle_output
+
+    result = {
+        "noop": False,
+        "input_count": 3,
+        "output_count": 3,
+        "manifest": {
+            "model_name": "workspace.test.model",
+            "model_version": "1",
+            "predicted_count": 2,
+            "excluded_count": 1,
+        },
+    }
+    html = render_bundle_output({"action": "score", "result": result})
+    assert "Predicted rows" in html and "Excluded rows" in html
+    noop_html = render_bundle_output({"action": "score", "result": result | {"noop": True}})
+    assert "Predicted rows" not in noop_html and "Excluded rows" not in noop_html

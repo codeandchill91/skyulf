@@ -2,7 +2,8 @@
 
 Only null/NaN count as missing; blank strings and infinity remain values.
 No statistics are learned. The surviving values, columns and order are preserved.
-This declared pre-split filter applies to training selection, never scoring.
+This filter selects training rows and can also be reused during scoring via
+SCORING_MODE="pre_split" or "combined" in features/scoring.py.
 """
 
 import numpy as np
