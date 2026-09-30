@@ -11,14 +11,16 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
+from skyulf.integrations.databricks._local_frames import frame_bytes
+
 from ...inference.local_pipeline import LocalPipelineArtifact
 from ...modeling._tuning.cv_policy import (
     FrozenSplit,
-    _validate_classes,
     fold_evidence,
     policy_description,
     policy_splitter,
     prepare_policy_data,
+    validate_class_membership,
 )
 from ...modeling._tuning.engine import TuningCalculator
 from ...modeling._tuning.grid_random import fit_and_score_candidate_fold
@@ -30,9 +32,8 @@ from ...preprocessing.fold_adapter import (
     merged_branch_step_unsafe_reason,
 )
 from ...registry import NodeRegistry
-from .local_batch import _frame_bytes
 from .local_cv import CV_FIELDS, LocalCVSpec
-from .local_search import _validate_metric, base_model_config
+from .local_search import base_model_config, validate_metric
 from .local_search_results import tuning_evidence
 
 _MINIMIZE = {"mae", "mse", "rmse", "log_loss"}
@@ -51,7 +52,7 @@ def competition_metric(metric: str, task: str) -> str:
     if native == "roc_auc_weighted":
         native = "roc_auc_ovr_weighted"
     try:
-        _validate_metric(native, task)
+        validate_metric(native, task)
     except ValueError as exc:
         raise ValueError(f"Unsupported competition metric {metric} for {task}.") from exc
     if task not in {"regression", "classification"}:
@@ -109,7 +110,7 @@ def _validate_bounds(frame: Any, max_rows: int, max_bytes: int) -> None:
     for name, limit in (("max_rows", max_rows), ("max_bytes", max_bytes)):
         if type(limit) is not int or limit <= 0:
             raise ValueError(f"Competition {name} must be a positive integer.")
-    if len(frame) > max_rows or _frame_bytes(frame) > max_bytes:
+    if len(frame) > max_rows or frame_bytes(frame) > max_bytes:
         raise ValueError("Competition training data exceeds max_rows or max_bytes.")
 
 
@@ -122,7 +123,7 @@ def _split_plan(policy: TuningConfig, task: str, y: Any, metadata: dict) -> Froz
     for train, test in parts:
         if min(len(train), len(test)) < 2:
             raise ValueError("Each competition fold requires at least two rows per partition.")
-        _validate_classes(labels, train, test, task)
+        validate_class_membership(labels, train, test, task)
     return FrozenSplit(parts, [fold_evidence(train, test, metadata) for train, test in parts])
 
 

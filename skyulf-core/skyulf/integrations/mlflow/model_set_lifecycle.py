@@ -5,8 +5,6 @@ with saved quality pins additionally require a policy-aware validator under the
 same admission. Legacy packages retain their explicit functional-only API.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 import tempfile
@@ -18,6 +16,8 @@ from uuid import uuid4
 
 import pandas as pd
 
+from skyulf.integrations.mlflow._client import make_registry_client, require_mlflow
+
 from ...inference.model_set import ModelSetArtifact
 from ...inference.model_set_scoring import model_set_output_schema, predict_model_set
 from .model_set import load_registered_model_set
@@ -26,18 +26,18 @@ from .promotion import (
     AliasAdmission,
     AliasChangeReceipt,
     AliasConflictError,
-    _active_marker,
-    _admission,
-    _assert_not_rejected,
-    _commit_change,
-    _event_tag,
-    _read_event,
-    _read_optional_alias,
+    active_marker,
     alias_resource_id,
+    assert_not_rejected,
+    commit_change,
     controlled_champion_version,
+    event_tag,
+    read_event,
+    read_optional_alias,
     rollback_promotion,
+    validate_admission,
 )
-from .registry import ResolvedModel, _make_client, _require_mlflow, resolve_model
+from .registry import ResolvedModel, resolve_model
 
 _PROOF_TAG = "model_set_validation_sha256"
 _PATH_TAG = "model_set_validation_artifact"
@@ -62,15 +62,15 @@ def approve_model_set(
     Packages with saved quality pins also require a passing quality validator;
     representative predictions alone cannot approve those packages.
     """
-    _admission(admission, registry_uri)
+    validate_admission(admission, registry_uri)
     _bounded_frame(validation_frame, max_rows, max_bytes)
     artifact = load_registered_model_set(
         resolved, tracking_uri=tracking_uri, registry_uri=registry_uri
     )
     evidence = _validation_evidence(resolved, artifact, validation_frame, max_bytes)
-    client = _make_client(_require_mlflow(), tracking_uri, registry_uri)
+    client = make_registry_client(require_mlflow(), tracking_uri, registry_uri)
     with admission.hold(alias_resource_id(resolved.name)):
-        _assert_not_rejected(client, resolved.name, resolved.version)
+        assert_not_rejected(client, resolved.name, resolved.version)
         current = controlled_champion_version(
             resolved.name, tracking_uri=tracking_uri, registry_uri=registry_uri
         )
@@ -89,7 +89,7 @@ def approve_model_set(
             _validated_version(client, resolved.name, current, tracking_uri, registry_uri)
         digest = _persist_evidence(client, resolved, evidence, tracking_uri)
         receipt, updates = _release_change(client, resolved, current, digest)
-        _commit_change(
+        commit_change(
             client,
             receipt,
             updates,
@@ -131,13 +131,13 @@ def _validate_quality_result(result: Any, artifact: ModelSetArtifact, expected: 
 
 def _validate_set_roles(client: Any, name: str, current: str | None) -> None:
     """Require champion history to match the previous committed set release."""
-    previous = _read_optional_alias(client, name, "previous_champion")
+    previous = read_optional_alias(client, name, "previous_champion")
     if current is None and previous is not None:
         raise AliasConflictError("Model set has a previous champion without a current champion.")
     if current is not None:
-        event_id = _active_marker(client, name, current)
+        event_id = active_marker(client, name, current)
         tags = client.get_model_version(name, current).tags or {}
-        event = _read_event(tags.get(_event_tag(str(event_id))))
+        event = read_event(tags.get(event_tag(str(event_id))))
         expected = event.get("p") if event["k"] == "promotion" else event.get("o")
         if previous != expected:
             raise AliasConflictError(
@@ -149,7 +149,7 @@ def _release_change(
     client: Any, resolved: ResolvedModel, current: str | None, digest: str
 ) -> tuple[AliasChangeReceipt, list[tuple[str, str | None, str | None]]]:
     """Plan one complete-set activation using the shared durable receipt format."""
-    previous = _read_optional_alias(client, resolved.name, "previous_champion")
+    previous = read_optional_alias(client, resolved.name, "previous_champion")
     receipt = AliasChangeReceipt(
         event_id=uuid4().hex,
         kind="initial" if current is None else "promotion",
@@ -158,14 +158,14 @@ def _release_change(
         prior_version=current,
         new_version=resolved.version,
         comparison_sha256=digest,
-        parent_event_id=_active_marker(client, resolved.name, current) if current else None,
+        parent_event_id=active_marker(client, resolved.name, current) if current else None,
         previous_champion_version=previous,
     )
     updates: list[tuple[str, str | None, str | None]] = []
     if current is not None:
         updates.append(("previous_champion", current, previous))
     updates.append(("champion", resolved.version, current))
-    if _read_optional_alias(client, resolved.name, "challenger") is not None:
+    if read_optional_alias(client, resolved.name, "challenger") is not None:
         updates.append(("challenger", None, resolved.version))
     return receipt, updates
 
@@ -266,7 +266,7 @@ def _persist_evidence(
 
 def _download_evidence(uri: str, digest: str, tracking_uri: str | None) -> dict[str, Any]:
     """Read evidence only when its complete stored bytes match the recorded digest."""
-    path = _require_mlflow().artifacts.download_artifacts(
+    path = require_mlflow().artifacts.download_artifacts(
         artifact_uri=uri, tracking_uri=tracking_uri
     )
     content = Path(path).read_bytes()
@@ -348,8 +348,8 @@ def rollback_model_set(
         raise ValueError("Model set rollback requires a completed promotion receipt.")
     if receipt.prior_version is None:
         raise ValueError("Model set rollback requires a prior version.")
-    client = _make_client(_require_mlflow(), tracking_uri, registry_uri)
-    _admission(admission, registry_uri)
+    client = make_registry_client(require_mlflow(), tracking_uri, registry_uri)
+    validate_admission(admission, registry_uri)
 
     def validate() -> None:
         """Recheck both executable sets while rollback holds its shared admission."""

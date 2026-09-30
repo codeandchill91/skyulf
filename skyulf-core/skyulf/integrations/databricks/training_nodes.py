@@ -4,17 +4,19 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from ..mlflow.registry import _packaged_artifact_path, _require_mlflow, load_run_local_pipeline
+from skyulf.integrations.mlflow._client import require_mlflow
+
+from ..mlflow.registry import load_run_local_pipeline, packaged_artifact_path
 from . import local_retraining as training
 from ._lifecycle_data import training_partitions
-from ._lifecycle_state import LifecycleContext, LifecyclePhaseResult, _PhaseStore
-from .competition_training import _fit_one
+from ._lifecycle_state import LifecycleContext, LifecyclePhaseResult, PhaseStore
+from .competition_training import fit_training_pipeline
 from .explanation_report import copy_winner_explanations
 from .local_competition import choose_winner
 from .local_training_evidence import evidence_digest
 
 
-def _candidate_phase(store: _PhaseStore, name: str) -> str:
+def _candidate_phase(store: PhaseStore, name: str) -> str:
     """Use only the frozen candidate identifiers as durable task names."""
     if name not in store.request.get("competition", {}).get("candidates", {}):
         raise ValueError("Training node is not a candidate in this invocation.")
@@ -26,7 +28,7 @@ def _fitted_output(fitted: Any, engine: str) -> dict[str, Any]:
     return {
         "model_digest": fitted.artifact.manifest.pipeline_sha256,
         "project_source_sha256": fitted.artifact.manifest.project_source_sha256,
-        "spec": training._training_spec_payload(fitted.spec, engine),
+        "spec": training.training_spec_payload(fitted.spec, engine),
         "training_rows": fitted.training_rows,
         "holdout_rows": fitted.holdout_rows,
         "unavailable_labels": fitted.unavailable_labels,
@@ -43,25 +45,27 @@ def run_competition_training(
     reference: dict[str, str],
 ) -> LifecyclePhaseResult:
     """Train exactly one pinned candidate; leave registration and selection to the join."""
-    from .lifecycle_tasks import (  # noqa: PLC0415
-        _record_phase_failure,
-        _spec,
-        _validate_active_phase,
+    from .lifecycle_tasks import (  # noqa: PLC0415 - lazy dependency  # noqa: PLC0415 - lazy dependency  # noqa: PLC0415 - lazy dependency
+        phase_training_spec,
+        record_phase_failure,
+        validate_active_phase,
     )
 
     context.validate()
-    store = _PhaseStore(tracking_uri, context)
+    store = PhaseStore(tracking_uri, context)
     store.bind(reference)
     phase = _candidate_phase(store, name)
     if reference["phase"] != "prepare_dataset":
         raise ValueError("Candidate training requires the prepared dataset reference.")
-    _validate_active_phase(store, "train")
+    validate_active_phase(store, "train")
     store.begin(phase)
     try:
         recipe = store.request["competition"]["candidates"][name]
-        spec = _spec(store.request["spec"], recipe["pipeline"].get("project_python_source"))
+        spec = phase_training_spec(
+            store.request["spec"], recipe["pipeline"].get("project_python_source")
+        )
         with TemporaryDirectory(prefix="skyulf-candidate-task-") as directory:
-            fitted, row = _fit_one(
+            fitted, row = fit_training_pipeline(
                 spark,
                 store,
                 spec,
@@ -78,11 +82,11 @@ def run_competition_training(
             }
         return store.complete(phase, output, reference)
     except BaseException:
-        _record_phase_failure(store, phase)
+        record_phase_failure(store, phase)
         raise
 
 
-def _completed_candidates(store: _PhaseStore) -> dict[str, dict]:
+def _completed_candidates(store: PhaseStore) -> dict[str, dict]:
     """Require every expected fit to retain its own finished child run and recipe."""
     completed = {}
     for name, recipe in store.request["competition"]["candidates"].items():
@@ -104,7 +108,7 @@ def _completed_candidates(store: _PhaseStore) -> dict[str, dict]:
     return completed
 
 
-def _adopt_model(store: _PhaseStore, winner: dict, recipe: dict) -> str:
+def _adopt_model(store: PhaseStore, winner: dict, recipe: dict) -> str:
     """Repackage the original fitted bytes under the parent run without fitting again."""
     config = store.request["config"]
     row = winner["evaluation"]
@@ -117,14 +121,14 @@ def _adopt_model(store: _PhaseStore, winner: dict, recipe: dict) -> str:
         raise ValueError("Winning model configuration differs from its frozen recipe.")
     with TemporaryDirectory(prefix="skyulf-winner-adoption-") as directory:
         package = Path(store.client.download_artifacts(winner["run_id"], "model", directory))
-        model = _require_mlflow().models.Model.load(package)
-        path = _packaged_artifact_path(package, model.flavors, "local_pipeline")
-        return training._log_local_model(
+        model = require_mlflow().models.Model.load(package)
+        path = packaged_artifact_path(package, model.flavors, "local_pipeline")
+        return training.log_local_model(
             path, run_id=store.run_id, tracking_uri=config["tracking_uri"]
         )
 
 
-def _copy_fit_evidence(store: _PhaseStore, child_run_id: str) -> None:
+def _copy_fit_evidence(store: PhaseStore, child_run_id: str) -> None:
     """Carry the winner's original receipts and experiment settings onto the parent."""
     child = store.client.get_run(child_run_id)
     store.run.log_params(child.data.params)
@@ -136,17 +140,15 @@ def _copy_fit_evidence(store: _PhaseStore, child_run_id: str) -> None:
                 store.client.log_artifact(store.run_id, path)
 
 
-def join_competition_training(
-    store: _PhaseStore, reference: dict[str, str]
-) -> LifecyclePhaseResult:
+def join_competition_training(store: PhaseStore, reference: dict[str, str]) -> LifecyclePhaseResult:
     """Verify a full fan-out and create the ordinary train receipt for existing phases."""
-    from .lifecycle_tasks import (  # noqa: PLC0415
-        _record_phase_failure,
-        _training_summary,
-        _validate_active_phase,
+    from .lifecycle_tasks import (  # noqa: PLC0415 - lazy dependency  # noqa: PLC0415 - lazy dependency  # noqa: PLC0415 - lazy dependency
+        record_phase_failure,
+        training_summary,
+        validate_active_phase,
     )
 
-    _validate_active_phase(store, "train")
+    validate_active_phase(store, "train")
     completed = _completed_candidates(store)
     selection = choose_winner([value["evaluation"] for value in completed.values()], set(completed))
     store.begin("train")
@@ -171,11 +173,11 @@ def join_competition_training(
             "tags": tags,
             "competition": selection,
             "competition_sha256": evidence_digest(selection),
-            **_training_summary(
+            **training_summary(
                 store, artifact, config={**store.request["config"], "pipeline": recipe["pipeline"]}
             ),
         }
         return store.complete("train", output, reference)
     except BaseException:
-        _record_phase_failure(store, "train")
+        record_phase_failure(store, "train")
         raise

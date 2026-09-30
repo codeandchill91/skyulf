@@ -7,21 +7,22 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from ..mlflow.tracking import _get_or_create_experiment
+from skyulf.integrations.mlflow._client import get_or_create_experiment
+
 from ..mlflow.validation import ModelComparisonReport
-from ._lifecycle_state import LifecycleContext, LifecyclePhaseResult, _PhaseStore
-from .lifecycle_tasks import _record_phase_failure, _validate_active_phase
+from ._lifecycle_state import LifecycleContext, LifecyclePhaseResult, PhaseStore
+from .lifecycle_tasks import record_phase_failure, validate_active_phase
 from .local_branches import (
     BranchTrainingResult,
-    _log_progress,
-    _train_branch,
     branch_training_payload,
+    log_progress,
     prepare_training_branches,
     restore_training_branches,
+    train_branch,
 )
 from .local_retraining import LocalCandidateResult
 from .local_training_evidence import evidence_digest
-from .model_set_project import _endpoints, package_training_model_set
+from .model_set_project import package_training_model_set, project_endpoints
 from .model_set_release import pin_model_set_baseline
 
 
@@ -30,7 +31,7 @@ def _training_request(spark: Any, configs: dict, settings: dict | None) -> dict:
     champions = None
     base = next(iter(configs.values()))
     if settings is not None:
-        settings, champions = pin_model_set_baseline(settings, configs, _endpoints(base))
+        settings, champions = pin_model_set_baseline(settings, configs, project_endpoints(base))
     branches = prepare_training_branches(spark, configs, champion_versions=champions)
     plan = branch_training_payload(branches)
     digest = hashlib.sha256(
@@ -79,7 +80,7 @@ def initialize_branch_training(
     }
     if action == "train":
         request.update(_training_request(spark, configs, settings))
-    store = _PhaseStore(tracking_uri, context)
+    store = PhaseStore(tracking_uri, context)
     _create_parent(store, request, experiment_name)
     if action == "train":
         store.log("branch_training_plan.json", request["branch_plan"])
@@ -94,9 +95,9 @@ def initialize_branch_training(
     )
 
 
-def _create_parent(store: _PhaseStore, request: dict, experiment_name: str) -> None:
+def _create_parent(store: PhaseStore, request: dict, experiment_name: str) -> None:
     """Reject duplicate job attempts before writing an immutable request."""
-    experiment = _get_or_create_experiment(store.client, experiment_name)
+    experiment = get_or_create_experiment(store.client, experiment_name)
     tags = {
         "skyulf.lifecycle.job_id": store.context.job_id,
         "skyulf.lifecycle.job_run_id": store.context.job_run_id,
@@ -115,10 +116,10 @@ def _create_parent(store: _PhaseStore, request: dict, experiment_name: str) -> N
     store.begin("prepare")
 
 
-def _bound_store(context: LifecycleContext, tracking_uri: str, reference: dict) -> _PhaseStore:
+def _bound_store(context: LifecycleContext, tracking_uri: str, reference: dict) -> PhaseStore:
     """Accept only the initialization receipt of the same unrepaired invocation."""
     context.validate()
-    store = _PhaseStore(tracking_uri, context)
+    store = PhaseStore(tracking_uri, context)
     store.bind(reference)
     if reference["phase"] != "prepare":
         raise ValueError("Multi-model task requires its initialization reference.")
@@ -135,7 +136,7 @@ def run_branch_training(
 ) -> LifecyclePhaseResult:
     """Train, register and compare one branch using its frozen independent policy."""
     store = _bound_store(context, tracking_uri, reference)
-    _validate_active_phase(store, "train")
+    validate_active_phase(store, "train")
     branches = {
         branch.name: branch for branch in restore_training_branches(store.request["branch_plan"])
     }
@@ -145,22 +146,22 @@ def run_branch_training(
     store.begin(phase)
     try:
         with TemporaryDirectory(prefix="skyulf-branch-task-") as directory:
-            result = _train_branch(
+            result = train_branch(
                 spark,
                 branches[name],
                 run=store.run,
                 digest=store.request["plan_sha256"],
                 path=Path(directory) / "model",
                 experiment_name=store.request["experiment_name"],
-                **_endpoints(store.request["config"]),
+                **project_endpoints(store.request["config"]),
             )
         return store.complete(phase, {"name": name, **asdict(result)}, reference)
     except BaseException:
-        _record_phase_failure(store, phase)
+        record_phase_failure(store, phase)
         raise
 
 
-def _completed_branches(store: _PhaseStore, branches: tuple) -> BranchTrainingResult:
+def _completed_branches(store: PhaseStore, branches: tuple) -> BranchTrainingResult:
     """Require exact completed children before creating a publishable parent result."""
     completed = {}
     for branch in branches:
@@ -192,24 +193,24 @@ def register_branch_set(
 ) -> LifecyclePhaseResult:
     """Package and nominate a complete model set without evaluating or promoting it."""
     store = _bound_store(context, tracking_uri, reference)
-    _validate_active_phase(store, "train")
+    validate_active_phase(store, "train")
     branches = restore_training_branches(store.request["branch_plan"])
     outcome = _completed_branches(store, branches)
     store.begin("register_model_set")
     try:
         store.log("branch_training_result.json", asdict(outcome))
-        _log_progress(store.run, outcome.components, status="complete")
+        log_progress(store.run, outcome.components, status="complete")
         store.client.set_terminated(store.run_id, status="FINISHED")
         payload = _register_set(spark, store, branches, outcome)
         return store.complete("register_model_set", payload, reference)
     except BaseException:
-        _record_phase_failure(store, "register_model_set")
+        record_phase_failure(store, "register_model_set")
         store.client.set_terminated(store.run_id, status="FAILED")
         raise
 
 
 def _register_set(
-    spark: Any, store: _PhaseStore, branches: tuple, outcome: BranchTrainingResult
+    spark: Any, store: PhaseStore, branches: tuple, outcome: BranchTrainingResult
 ) -> dict:
     """Expose the new immutable set and its challenger nomination as one visible step."""
     from ..mlflow.model_set_challenger import nominate_model_set  # noqa: PLC0415
@@ -226,7 +227,7 @@ def _register_set(
         outcome,
         settings,
         composition_source=store.request["composition_source"],
-        **_endpoints(config),
+        **project_endpoints(config),
     )
     payload["model_set_candidate"] = {
         "name": candidate.name,
@@ -237,7 +238,7 @@ def _register_set(
         candidate,
         expected_champion_version=settings["expected_champion_version"],
         admission=ExclusiveAliasWriterAdmission(),
-        **_endpoints(config),
+        **project_endpoints(config),
     )
     payload["challenger_version"] = candidate.version
     return payload
@@ -276,11 +277,11 @@ def run_branch_operator(
     reference: dict,
 ) -> LifecyclePhaseResult:
     """Run an explicit set action from pinned settings without loading editable recipes."""
-    from .job_runtime import _operator_options  # noqa: PLC0415
+    from .job_runtime import operator_options  # noqa: PLC0415  # noqa: PLC0415
     from .model_set_project import run_model_set_operator  # noqa: PLC0415
 
     store = _bound_store(context, tracking_uri, reference)
-    _validate_active_phase(store, "operator")
+    validate_active_phase(store, "operator")
     store.begin("operator")
     try:
         values = store.request["operator_values"]
@@ -288,12 +289,12 @@ def run_branch_operator(
             spark,
             values,
             store.request["settings"],
-            _operator_options(store.request["action"], values),
+            operator_options(store.request["action"], values),
             config=store.request["config"],
         )
         result = store.complete("operator", output, reference)
         store.client.set_terminated(store.run_id, status="FINISHED")
         return result
     except BaseException:
-        _record_phase_failure(store, "operator")
+        record_phase_failure(store, "operator")
         raise

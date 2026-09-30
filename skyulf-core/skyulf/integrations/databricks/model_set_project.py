@@ -9,16 +9,16 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from skyulf.integrations.mlflow._client import make_registry_client, require_mlflow
+
 from ...inference._manifest import ColumnSpec
 from ...inference.model_set import ComponentReference, save_model_set
 from ...inference.project_code import load_project_module
 from ..mlflow.promotion import ExclusiveAliasWriterAdmission, controlled_champion_version
 from ..mlflow.registry import (
     ResolvedModel,
-    _load_local_package,
-    _make_client,
-    _packaged_artifact_path,
-    _require_mlflow,
+    load_local_package,
+    packaged_artifact_path,
     register_model,
     resolve_model,
 )
@@ -26,16 +26,16 @@ from ._contracts import input_budget_bytes
 from ._project_files import project_source, read_source
 from .admission import SingleWriterAdmission
 from .job_runtime import (
-    _OPERATOR_FIELDS,
-    _notebook_output,
-    _read_notebook_config,
-    _validate_job_parameters,
-    _version,
+    OPERATOR_FIELDS,
+    notebook_output,
+    parse_model_version,
+    read_notebook_config,
+    validate_job_parameters,
 )
 from .local_branches import BranchTrainingResult, TrainingBranch, branch_training_payload
-from .local_incremental import _bounded_frame, _latest, validate_source_change_policy
+from .local_incremental import bounded_frame, latest_source_version, validate_source_change_policy
 from .local_search import base_model_config
-from .local_workflow import _bind_target_name, resolve_target_config
+from .local_workflow import bind_target_name, resolve_target_config
 from .model_set_output import publication_policy, publication_views
 from .workflow_config import validate_workflow_config
 
@@ -47,7 +47,7 @@ def load_project_model_set(
     path = Path(values["config_path"]).parent.parent / "src/modeling/model_set.py"
     if not path.exists():
         return None
-    base = _read_notebook_config(values) if base_config is None else base_config
+    base = read_notebook_config(values) if base_config is None else base_config
     factory = getattr(load_project_module(read_source(path)), "build_model_set", None)
     if not callable(factory):
         raise ValueError("model_set.py must define build_model_set().")
@@ -99,7 +99,7 @@ def _bind_publication(value: Any, bindings: dict[str, str]) -> dict[str, Any]:
 
     def bind(name: str) -> str:
         """Keep the branch token while validating the destination namespace."""
-        return _bind_target_name(
+        return bind_target_name(
             "prediction_table",
             name.replace("{branch}", "BRANCHTOKEN"),
             bindings,
@@ -188,7 +188,7 @@ def _completed_parent(
     if (outcome.source_table, outcome.source_version) != (spec.table, spec.version):
         raise ValueError("Model-set training result differs from the pinned source.")
     _verify_training_plan(branches, outcome)
-    client = _make_client(_require_mlflow(), tracking_uri, registry_uri)
+    client = make_registry_client(require_mlflow(), tracking_uri, registry_uri)
     parent = client.get_run(outcome.parent_run_id)
     if (
         parent.info.status != "FINISHED"
@@ -218,8 +218,8 @@ def _verify_training_plan(
 
 def _component_directory(resolved: ResolvedModel, tracking_uri: str, registry_uri: str) -> Path:
     """Validate and reuse registered artifact bytes without reserializing fitted pipelines."""
-    mlflow = _require_mlflow()
-    client = _make_client(mlflow, tracking_uri, registry_uri)
+    mlflow = require_mlflow()
+    client = make_registry_client(mlflow, tracking_uri, registry_uri)
     version = client.get_model_version(resolved.name, resolved.version)
     source = getattr(version, "source", None) or resolved.model_uri
     package = Path(
@@ -230,8 +230,8 @@ def _component_directory(resolved: ResolvedModel, tracking_uri: str, registry_ur
     model = mlflow.models.Model.load(package)
     if not isinstance(resolved.digest, str):
         raise ValueError("Component needs a resolved digest.")
-    _load_local_package(package, model, resolved.digest)
-    return _packaged_artifact_path(package, model.flavors, "local_pipeline")
+    load_local_package(package, model, resolved.digest)
+    return packaged_artifact_path(package, model.flavors, "local_pipeline")
 
 
 def _registered_components(
@@ -325,7 +325,7 @@ def package_training_model_set(
     )
 
 
-def _endpoints(config: dict[str, Any]) -> dict[str, str]:
+def project_endpoints(config: dict[str, Any]) -> dict[str, str]:
     """Use the same default registry services as branch training."""
     return {
         "tracking_uri": config.get("tracking_uri") or "databricks",
@@ -333,11 +333,13 @@ def _endpoints(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _approval_frame(spark: Any, artifact: Any, config: dict[str, Any]) -> Any:
+def approval_frame(spark: Any, artifact: Any, config: dict[str, Any]) -> Any:
     """Read one bounded representative snapshot using only the saved input contract."""
     table = config["score_source_table"]
-    source = spark.read.option("versionAsOf", int(_latest(spark, table)["version"])).table(table)
-    return _bounded_frame(
+    source = spark.read.option(
+        "versionAsOf", int(latest_source_version(spark, table)["version"])
+    ).table(table)
+    return bounded_frame(
         source,
         tuple(column.name for column in artifact.manifest.input_schema),
         artifact.manifest.record_key_columns,
@@ -359,9 +361,9 @@ def run_model_set_operator(
 
     action = values["lifecycle_action"]
     config = validate_workflow_config(
-        _read_notebook_config(values) if config is None else config, action=action
+        read_notebook_config(values) if config is None else config, action=action
     )
-    endpoints = _endpoints(config)
+    endpoints = project_endpoints(config)
     admission = ExclusiveAliasWriterAdmission()
     if action == "rollback":
         receipt = options["promotion_receipt"]
@@ -435,17 +437,17 @@ def run_model_set_score_notebook(
     parameters = {
         key: value
         for key, value in values.items()
-        if key not in _OPERATOR_FIELDS | {"lifecycle_action"}
+        if key not in OPERATOR_FIELDS | {"lifecycle_action"}
     }
-    _validate_job_parameters(parameters)
-    config = validate_workflow_config(_read_notebook_config(values), action="score")
+    validate_job_parameters(parameters)
+    config = validate_workflow_config(read_notebook_config(values), action="score")
     settings = load_project_model_set(values, config)
     if settings is None:
         raise ValueError("Multi-target score requires an enabled model set.")
-    endpoints = _endpoints(config)
+    endpoints = project_endpoints(config)
     override = parameters.get("score_model_version", "")
     version = (
-        _version(override)
+        parse_model_version(override)
         if override
         else controlled_champion_version(settings["model_name"], **endpoints)
     )
@@ -466,7 +468,7 @@ def run_model_set_score_notebook(
         publication=settings.get("publication"),
         source_change_policy=settings.get("source_change_policy", "reject"),
     )
-    return _notebook_output(
+    return notebook_output(
         {
             "model_set_name": resolved.name,
             "model_set_version": resolved.version,

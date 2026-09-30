@@ -166,7 +166,7 @@ def save_local_pipeline(
         )
 
 
-def _read_bounded(path: Path, limit: int) -> bytes:
+def read_bounded_artifact(path: Path, limit: int) -> bytes:
     """Limit artifact bytes before JSON or pickle decoding."""
     with path.open("rb") as stream:
         data = stream.read(limit + 1)
@@ -178,7 +178,7 @@ def _read_bounded(path: Path, limit: int) -> bytes:
 def load_local_pipeline(path: str | Path) -> LocalPipelineArtifact:
     """Validate and load a trusted producer's local pipeline artifact."""
     source = Path(path)
-    metadata = _read_bounded(source / "manifest.json", _MAX_MANIFEST_BYTES)
+    metadata = read_bounded_artifact(source / "manifest.json", _MAX_MANIFEST_BYTES)
     document = json.loads(
         metadata.decode("utf-8"), object_pairs_hook=_unique_object, parse_constant=_bad_constant
     )
@@ -187,11 +187,13 @@ def load_local_pipeline(path: str | Path) -> LocalPipelineArtifact:
     manifest = LocalPipelineManifest.model_validate_json(metadata)
     _validate_manifest_schema(manifest)
     _check_runtime(manifest)
-    payload = _read_bounded(source / "pipeline.pkl", _MAX_PIPELINE_BYTES)
+    payload = read_bounded_artifact(source / "pipeline.pkl", _MAX_PIPELINE_BYTES)
     if checksum(payload) != manifest.pipeline_sha256:
         raise ValueError("Local pipeline payload checksum mismatch.")
     if manifest.project_source_sha256 is not None:
-        code = _read_bounded(source / "preprocessing.py", MAX_PROJECT_SOURCE_BYTES).decode("utf-8")
+        code = read_bounded_artifact(source / "preprocessing.py", MAX_PROJECT_SOURCE_BYTES).decode(
+            "utf-8"
+        )
         if project_source_digest(code) != manifest.project_source_sha256:
             raise ValueError("Project preprocessing source checksum mismatch.")
         load_project_module(code)

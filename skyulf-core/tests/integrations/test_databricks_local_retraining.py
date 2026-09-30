@@ -189,7 +189,7 @@ def test_failed_candidate_never_mutates_champion(monkeypatch, tmp_path):
     monkeypatch.setattr(
         retraining, "evaluate_local_holdout", lambda *args, **kwargs: {"heldout_rmse": 0.1}
     )
-    monkeypatch.setattr(retraining, "_log_local_model", lambda *args, **kwargs: "runs:/run/model")
+    monkeypatch.setattr(retraining, "log_local_model", lambda *args, **kwargs: "runs:/run/model")
     monkeypatch.setattr(
         retraining,
         "register_model",
@@ -412,7 +412,7 @@ def test_saved_filter_evidence_replays_after_project_file_changes(monkeypatch, t
     digest = hashlib.sha256(
         json.dumps(comparison_payload(result.comparison), sort_keys=True, allow_nan=False).encode()
     ).hexdigest()
-    report, saved, saved_engine, evidence = local_approval._load_evidence(
+    report, saved, saved_engine, evidence = local_approval.load_candidate_evidence(
         client, result.model_name, result.model_version, digest
     )
     _, holdout, _ = retraining.split_labeled_snapshot(frame, saved, engine=saved_engine)
@@ -472,7 +472,9 @@ def test_saved_filter_evidence_replays_after_project_file_changes(monkeypatch, t
 
     monkeypatch.setattr(client, "download_artifacts", changed_engine)
     with pytest.raises(ValueError, match="engine"):
-        local_approval._load_evidence(client, result.model_name, result.model_version, digest)
+        local_approval.load_candidate_evidence(
+            client, result.model_name, result.model_version, digest
+        )
 
     def changed_counts(run_id, path, directory):
         """Model an altered filter receipt without changing the pinned comparison."""
@@ -486,7 +488,9 @@ def test_saved_filter_evidence_replays_after_project_file_changes(monkeypatch, t
 
     monkeypatch.setattr(client, "download_artifacts", changed_counts)
     with pytest.raises(ValueError, match="evidence digest"):
-        local_approval._load_evidence(client, result.model_name, result.model_version, digest)
+        local_approval.load_candidate_evidence(
+            client, result.model_name, result.model_version, digest
+        )
 
     def null_receipt(run_id, path, directory):
         """A declared receipt decoded as JSON null must stop approval replay."""
@@ -497,7 +501,9 @@ def test_saved_filter_evidence_replays_after_project_file_changes(monkeypatch, t
 
     monkeypatch.setattr(client, "download_artifacts", null_receipt)
     with pytest.raises(ValueError, match="training filter evidence.*object"):
-        local_approval._load_evidence(client, result.model_name, result.model_version, digest)
+        local_approval.load_candidate_evidence(
+            client, result.model_name, result.model_version, digest
+        )
 
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
@@ -555,7 +561,7 @@ def test_failed_training_retains_pin_before_risky_work(monkeypatch, tmp_path, en
     monkeypatch.setattr(retraining, operation, fail)
     publish = MagicMock(side_effect=AssertionError("failure must not publish"))
     callback = MagicMock(side_effect=AssertionError("failure must not nominate an alias"))
-    monkeypatch.setattr(retraining, "_log_local_model", publish)
+    monkeypatch.setattr(retraining, "log_local_model", publish)
     monkeypatch.setattr(retraining, "register_model", publish)
     with pytest.raises(RuntimeError) as caught:
         retraining.train_local_candidate(

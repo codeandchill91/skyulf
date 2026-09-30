@@ -15,15 +15,15 @@ from ...inference.project_scoring import validate_scoring_config
 from ._project_files import modeling_hook, project_source, read_source
 from ._project_recipes import bind_recipe_source, recipe_label, recipe_steps
 from .local_ensemble import ENSEMBLE_MODELS
-from .local_search import _bounded_space
+from .local_search import bounded_space
 
 
-def _strict_json_value(value: Any, filename: str = "ensemble.py") -> Any:
+def strict_json_value(value: Any, filename: str = "ensemble.py") -> Any:
     """Copy only finite JSON values from trusted project hook output."""
     if type(value) is dict:
         return _strict_json_object(value, filename)
     if type(value) is list:
-        return [_strict_json_value(item, filename) for item in value]
+        return [strict_json_value(item, filename) for item in value]
     if value is None or type(value) in {str, bool, int}:
         return value
     if type(value) is float and math.isfinite(value):
@@ -35,7 +35,7 @@ def _strict_json_object(value: dict[Any, Any], filename: str = "ensemble.py") ->
     """Copy nested hook mappings while rejecting non-string JSON keys."""
     if any(type(key) is not str for key in value):
         raise ValueError(f"{filename} must return a JSON object with string keys.")
-    return {key: _strict_json_value(item, filename) for key, item in value.items()}
+    return {key: strict_json_value(item, filename) for key, item in value.items()}
 
 
 def _load_single_model(config: dict[str, Any], path: Path) -> dict[str, Any]:
@@ -50,7 +50,7 @@ def _load_single_model(config: dict[str, Any], path: Path) -> dict[str, Any]:
     factory = getattr(load_project_module(read_source(hook)), "build_modeling", None)
     if not callable(factory):
         raise ValueError("single_model.py must define build_modeling().")
-    modeling = _strict_json_value(factory(), hook.name)
+    modeling = strict_json_value(factory(), hook.name)
     if type(modeling) is not dict:
         raise ValueError("single_model.py build_modeling() must return a JSON object.")
     if len(json.dumps(modeling, allow_nan=False).encode("utf-8")) > MAX_PROJECT_SOURCE_BYTES:
@@ -86,7 +86,7 @@ def _load_ensemble_hook(result: dict[str, Any], preprocessing_path: Path) -> Non
     if overrides is not None:
         if type(overrides) is not dict:
             raise ValueError("build_ensemble_params() must return a JSON object or None.")
-        overrides = _strict_json_value(overrides)
+        overrides = strict_json_value(overrides)
         if len(json.dumps(overrides, allow_nan=False).encode("utf-8")) > MAX_PROJECT_SOURCE_BYTES:
             raise ValueError("ensemble.py returned more than 64 KiB of parameters.")
         params = selected.get("params", {})
@@ -123,7 +123,7 @@ def _load_search_hook(result: dict[str, Any], preprocessing_path: Path) -> None:
     )
     if space is not None:
         try:
-            modeling["search_space"] = _bounded_space(space)
+            modeling["search_space"] = bounded_space(space)
         except ValueError as exc:
             raise ValueError(f"tuning.py returned invalid search_space: {exc}") from exc
     result["pipeline"]["search_python_source"] = source
@@ -156,9 +156,9 @@ def load_project_workflow(
                 "Competition selects candidate preprocessing and shared default pre-split."
             )
         return load_competition_project(config, path)
-    _validate_project_steps(config)
+    validate_project_steps(config)
     config = _load_single_model(config, Path(path))
-    return _resolve_project_workflow(
+    return resolve_project_workflow(
         config,
         path,
         project_source(Path(path)),
@@ -167,7 +167,7 @@ def load_project_workflow(
     )
 
 
-def _validate_project_steps(config: dict[str, Any]) -> None:
+def validate_project_steps(config: dict[str, Any]) -> None:
     """Reject JSON step chains before reading source that would replace them."""
     if config.get("pipeline", {}).get("preprocessing"):
         raise ValueError("Configure preprocessing in the Python file; leave the JSON list empty.")
@@ -175,7 +175,7 @@ def _validate_project_steps(config: dict[str, Any]) -> None:
         raise ValueError("Configure pre_split_steps in the Python file; leave the JSON list empty.")
 
 
-def _resolve_project_workflow(
+def resolve_project_workflow(
     config: dict[str, Any],
     path: str | Path,
     source: str,

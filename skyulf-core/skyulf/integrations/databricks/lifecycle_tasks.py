@@ -15,16 +15,17 @@ from typing import Any
 
 import polars as pl
 
+from skyulf.integrations.mlflow._client import get_or_create_experiment
+
 from ...inference.project_code import load_project_module, project_source_digest
 from ..mlflow.challenger import ChallengerLifecycle
 from ..mlflow.promotion import AliasChangeReceipt, ExclusiveAliasWriterAdmission
 from ..mlflow.registry import load_run_local_pipeline
-from ..mlflow.tracking import _get_or_create_experiment
 from ..mlflow.validation import ModelComparisonReport
 from . import _lifecycle_data as data_stages
 from . import local_retraining as training
 from . import local_workflow as workflow
-from ._lifecycle_state import _PREDECESSORS, LifecycleContext, LifecyclePhaseResult, _PhaseStore
+from ._lifecycle_state import PHASE_PREDECESSORS, LifecycleContext, LifecyclePhaseResult, PhaseStore
 from .local_competition import prepare_competition, selected_request, validate_competition_budget
 from .local_cv import LocalCVSpec
 from .local_training_evidence import evidence_digest, validate_training_evidence
@@ -47,7 +48,7 @@ class _ReplayEvidence:
     filter_evidence: dict[str, Any]
 
 
-def _spec(payload: dict[str, Any], source: str | None) -> training.LocalTrainingSpec:
+def phase_training_spec(payload: dict[str, Any], source: str | None) -> training.LocalTrainingSpec:
     """Restore pinned source settings after loading the saved custom-step identities."""
     if source is not None:
         module = load_project_module(source)
@@ -76,10 +77,10 @@ def _prepare_training_request(
 
         validate_competition_config(config)
         validate_competition_budget(config)
-    spec, cv, champion = workflow._prepare_training(spark, config, policy=policy, now=now)
+    spec, cv, champion = workflow.prepare_training(spark, config, policy=policy, now=now)
     if config.get("champion_version") is not None and str(config["champion_version"]) != champion:
         raise ValueError("champion_version does not match the current champion.")
-    effective = training._candidate_config(
+    effective = training.candidate_config(
         spec,
         config["pipeline"],
         engine=config["engine"],
@@ -92,7 +93,7 @@ def _prepare_training_request(
         risk_category=config.get("risk_category"),
     )
     request.update(
-        spec=training._training_spec_payload(spec, config["engine"]),
+        spec=training.training_spec_payload(spec, config["engine"]),
         champion_version=champion,
         effective_config=effective,
     )
@@ -137,7 +138,7 @@ def _prepared_output(
 
 def _prepare(
     spark: Any,
-    store: _PhaseStore,
+    store: PhaseStore,
     config: dict[str, Any],
     action: str,
     experiment_name: str,
@@ -149,7 +150,7 @@ def _prepare(
     """Resolve source and champion once, then persist the complete immutable invocation."""
     if action not in {"train", "approve", "reject", "rollback"}:
         raise ValueError("Unsupported lifecycle action.")
-    _, policy = workflow._workflow_policies(config)
+    _, policy = workflow.workflow_policies(config)
     options = {
         key: asdict(value) if isinstance(value, AliasChangeReceipt) else value
         for key, value in operator_options.items()
@@ -167,7 +168,7 @@ def _prepare(
         _prepare_training_request(spark, request, config, options, policy, now)
     # JSON normalization also detaches all caller-owned editable dictionaries.
     request = json.loads(json.dumps(request, allow_nan=False))
-    experiment = _get_or_create_experiment(store.client, experiment_name)
+    experiment = get_or_create_experiment(store.client, experiment_name)
     if store.client.search_runs(
         [experiment],
         filter_string=(
@@ -203,12 +204,12 @@ def _prepare(
         raise
 
 
-def _train(spark: Any, store: _PhaseStore) -> dict[str, Any]:
+def _train(spark: Any, store: PhaseStore) -> dict[str, Any]:
     """Run the SDK's shared fitting computation and upload its fitted package."""
     request = store.request
     config: dict[str, Any] = request["config"]
     source = config["pipeline"].get("project_python_source")
-    spec = _spec(request["spec"], source)
+    spec = phase_training_spec(request["spec"], source)
     selection = None
     with TemporaryDirectory(prefix="skyulf-phase-fit-") as directory:
         path = Path(directory) / "artifact"
@@ -221,7 +222,7 @@ def _train(spark: Any, store: _PhaseStore) -> dict[str, Any]:
             config = {**config, "pipeline": pipeline}
         else:
             fitted = _fit_single_candidate(spark, store, spec, path)
-        training._log_fitted_candidate(
+        training.log_fitted_candidate(
             store.run,
             fitted,
             config["pipeline"],
@@ -230,29 +231,29 @@ def _train(spark: Any, store: _PhaseStore) -> dict[str, Any]:
         )
         if selection is not None:
             fitted.tags["competition_winner"] = selection["winner"]
-        model_uri = training._log_local_model(
+        model_uri = training.log_local_model(
             path, run_id=store.run_id, tracking_uri=config["tracking_uri"]
         )
     output = {
         "model_uri": model_uri,
         "model_digest": fitted.artifact.manifest.pipeline_sha256,
         "project_source_sha256": fitted.artifact.manifest.project_source_sha256,
-        "spec": training._training_spec_payload(fitted.spec, config["engine"]),
+        "spec": training.training_spec_payload(fitted.spec, config["engine"]),
         "training_rows": fitted.training_rows,
         "holdout_rows": fitted.holdout_rows,
         "unavailable_labels": fitted.unavailable_labels,
         "tags": fitted.tags,
-        **_training_summary(store, fitted.artifact, config=config),
+        **training_summary(store, fitted.artifact, config=config),
     }
     if selection is not None:
         output.update(competition=selection, competition_sha256=evidence_digest(selection))
     return output
 
 
-def _fit_single_candidate(spark: Any, store: _PhaseStore, spec: Any, path: Path) -> Any:
+def _fit_single_candidate(spark: Any, store: PhaseStore, spec: Any, path: Path) -> Any:
     """Keep the original single-model fit path independent from competition orchestration."""
     config = store.request["config"]
-    return training._fit_candidate(
+    return training.fit_candidate(
         spark,
         spec,
         config["pipeline"],
@@ -266,26 +267,26 @@ def _fit_single_candidate(spark: Any, store: _PhaseStore, spec: Any, path: Path)
     )
 
 
-def _prepared_fit_options(store: _PhaseStore) -> dict[str, Any]:
+def _prepared_fit_options(store: PhaseStore) -> dict[str, Any]:
     """Use staged partitions only for invocations pinned to the readable graph."""
     if store.request.get("graph_version", 2) == 3:
         return {"prepared_data": data_stages.training_partitions(store)}
     return {}
 
 
-def _load_data(spark: Any, store: _PhaseStore) -> dict[str, Any]:
+def _load_data(spark: Any, store: PhaseStore) -> dict[str, Any]:
     """Read the pinned source in its own visible data-loading stage."""
     source = store.request["config"]["pipeline"].get("project_python_source")
-    return data_stages.load_source(spark, store, _spec(store.request["spec"], source))
+    return data_stages.load_source(spark, store, phase_training_spec(store.request["spec"], source))
 
 
-def _prepare_dataset(spark: Any, store: _PhaseStore) -> dict[str, Any]:
+def _prepare_dataset(spark: Any, store: PhaseStore) -> dict[str, Any]:
     """Persist fixed-cleanup results and split membership before learned transforms."""
     source = store.request["config"]["pipeline"].get("project_python_source")
-    return data_stages.prepare_dataset(store, _spec(store.request["spec"], source))
+    return data_stages.prepare_dataset(store, phase_training_spec(store.request["spec"], source))
 
 
-def _select_best_model(spark: Any, store: _PhaseStore) -> dict[str, Any]:
+def _select_best_model(spark: Any, store: PhaseStore) -> dict[str, Any]:
     """Verify the selected fitted candidate and expose its training-side leaderboard."""
     verified = _load_training_evidence(store)
     if "competition" in store.request:
@@ -318,7 +319,7 @@ def _validate_pinned_spec(fitted_spec: dict[str, Any], pinned_spec: dict[str, An
         raise ValueError("Saved training source differs from pinned invocation.")
 
 
-def _load_training_evidence(store: _PhaseStore) -> _ReplayEvidence:
+def _load_training_evidence(store: PhaseStore) -> _ReplayEvidence:
     """Verify saved fit, invocation and filter evidence before any source replay."""
     fitted = store.receipt("train")["output"]
     config, effective_config = selected_request(store)
@@ -340,14 +341,14 @@ def _load_training_evidence(store: _PhaseStore) -> _ReplayEvidence:
         )
     if store.read("candidate_training_spec.json") != fitted["spec"]:
         raise ValueError("Saved candidate training spec differs from phase receipt.")
-    spec = _spec(fitted["spec"], source)
+    spec = phase_training_spec(fitted["spec"], source)
     _validate_pinned_spec(fitted["spec"], store.request["spec"])
     evidence = store.read("training_filter_evidence.json")
     validate_training_evidence(evidence, spec, project_source_sha256=source_sha)
     return _ReplayEvidence(artifact, spec, fitted, evidence)
 
 
-def _replay(spark: Any, store: _PhaseStore) -> tuple[_ReplayEvidence, Any]:
+def _replay(spark: Any, store: PhaseStore) -> tuple[_ReplayEvidence, Any]:
     """Reconstruct exact heldout membership from freshly verified phase evidence."""
     verified = _load_training_evidence(store)
     engine = store.request["config"]["engine"]
@@ -363,7 +364,7 @@ def _replay(spark: Any, store: _PhaseStore) -> tuple[_ReplayEvidence, Any]:
     return verified, native
 
 
-def _lifecycle(store: _PhaseStore) -> ChallengerLifecycle:
+def _lifecycle(store: PhaseStore) -> ChallengerLifecycle:
     """Bind lifecycle status handling to the request's exact expected champion."""
     config = store.request["config"]
     return ChallengerLifecycle(
@@ -375,7 +376,7 @@ def _lifecycle(store: _PhaseStore) -> ChallengerLifecycle:
     )
 
 
-def _registered(store: _PhaseStore) -> Any:
+def _registered(store: PhaseStore) -> Any:
     """Resolve the persisted version and verify its source run and package identity."""
     config = store.request["config"]
     payload = store.read("lifecycle/registration.json")
@@ -395,8 +396,8 @@ def _registered(store: _PhaseStore) -> Any:
         tracking_uri=config["tracking_uri"],
         registry_uri=config.get("registry_uri", "databricks-uc"),
     )
-    client = workflow._make_client(
-        workflow._require_mlflow(),
+    client = workflow.make_registry_client(
+        workflow.require_mlflow(),
         config["tracking_uri"],
         config.get("registry_uri", "databricks-uc"),
     )
@@ -410,12 +411,12 @@ def _registered(store: _PhaseStore) -> Any:
     return candidate
 
 
-def _evaluate_register(spark: Any, store: _PhaseStore) -> dict[str, Any]:
+def _evaluate_register(spark: Any, store: PhaseStore) -> dict[str, Any]:
     """Evaluate first and record mutation intent before registering and nominating."""
     verified, holdout = _replay(spark, store)
     spec = verified.spec
     config = store.request["config"]
-    metrics = training._evaluate_candidate(
+    metrics = training.evaluate_candidate(
         verified.artifact, holdout, spec=spec, metric=config["metric"]
     )
     store.run.log_metrics(metrics)
@@ -425,7 +426,7 @@ def _evaluate_register(spark: Any, store: _PhaseStore) -> dict[str, Any]:
     # Recheck the chain after evaluation and immediately before registration intent.
     fitted = store.receipt("train")["output"]
     store.client.set_tag(store.run_id, "skyulf.lifecycle.registration_intent", "started")
-    registered = training._register_candidate(
+    registered = training.register_candidate(
         fitted["model_uri"],
         config["model_name"],
         tracking_uri=config["tracking_uri"],
@@ -450,11 +451,11 @@ def _evaluate_register(spark: Any, store: _PhaseStore) -> dict[str, Any]:
         "metrics": metrics,
         "dataset_id": spec.dataset_id,
     }
-    return output | _training_summary(store, verified.artifact)
+    return output | training_summary(store, verified.artifact)
 
 
-def _training_summary(
-    store: _PhaseStore, artifact: Any, *, config: dict[str, Any] | None = None
+def training_summary(
+    store: PhaseStore, artifact: Any, *, config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Expose the same fitted search and explanation evidence in training and registry reports."""
     if config is None:
@@ -483,7 +484,7 @@ def _training_summary(
     return output
 
 
-def _compare(spark: Any, store: _PhaseStore) -> dict[str, Any]:
+def _compare(spark: Any, store: PhaseStore) -> dict[str, Any]:
     """Compare pinned versions through the same registered-model computation as the SDK."""
     verified, holdout = _replay(spark, store)
     spec = verified.spec
@@ -501,7 +502,7 @@ def _compare(spark: Any, store: _PhaseStore) -> dict[str, Any]:
         )
     )
     fitted = verified.fitted
-    result = training._compare_candidate(
+    result = training.compare_candidate(
         candidate,
         champion,
         holdout,
@@ -529,15 +530,15 @@ def _candidate(payload: dict[str, Any]) -> training.LocalCandidateResult:
     return training.LocalCandidateResult(**values)
 
 
-def _decide(spark: Any, store: _PhaseStore) -> dict[str, Any]:
+def _decide(spark: Any, store: PhaseStore) -> dict[str, Any]:
     """Reuse strict automatic replay for promotion or the saved manual-review decision."""
     config = store.request["config"]
     candidate = _candidate(store.receipt("compare")["output"])
-    _, policy = workflow._workflow_policies(config)
+    _, policy = workflow.workflow_policies(config)
     # Verify invocation/package pins here; the decision service replays the source
     # and checks membership against registered evidence before any alias mutation.
     verified = _load_training_evidence(store)
-    receipt = workflow._automatic_promotion(
+    receipt = workflow.automatic_promotion(
         spark, config, verified.spec, candidate, promote=policy == "automatic"
     )
     return {
@@ -547,7 +548,7 @@ def _decide(spark: Any, store: _PhaseStore) -> dict[str, Any]:
     }
 
 
-def _operator(spark: Any, store: _PhaseStore) -> dict[str, Any]:
+def _operator(spark: Any, store: PhaseStore) -> dict[str, Any]:
     """Execute a saved operator action without reading current project Python or fitting."""
     options = dict(store.request["operator_options"])
     if "promotion_receipt" in options:
@@ -556,7 +557,7 @@ def _operator(spark: Any, store: _PhaseStore) -> dict[str, Any]:
     return {"action": store.request["action"], "result": asdict(result)}
 
 
-def _finalize(store: _PhaseStore) -> dict[str, Any]:
+def _finalize(store: PhaseStore) -> dict[str, Any]:
     """Treat missing or failed training phases as failure independently of later scoring."""
     try:
         store.receipt("decide")
@@ -574,7 +575,7 @@ def _finalize(store: _PhaseStore) -> dict[str, Any]:
     return {"status": "FINISHED", "registration_outcome": "recorded"}
 
 
-def _result(store: _PhaseStore) -> dict[str, Any]:
+def _result(store: PhaseStore) -> dict[str, Any]:
     """Publish a Bundle result only from successful finalized branch receipts."""
     request = store.request
     if (
@@ -606,7 +607,7 @@ def _result(store: _PhaseStore) -> dict[str, Any]:
 
 def _complete_invocation(
     spark: Any,
-    store: _PhaseStore,
+    store: PhaseStore,
     tracking_uri: str,
     reference: dict[str, str],
     task_states: dict[str, str] | None,
@@ -639,7 +640,7 @@ def _complete_invocation(
     )
 
 
-def _validate_active_phase(store: _PhaseStore, phase: str) -> None:
+def validate_active_phase(store: PhaseStore, phase: str) -> None:
     """Reject the wrong branch or inactive attempts before starting durable work."""
     training_action = store.request["action"] == "train"
     if (
@@ -668,7 +669,7 @@ def _validate_active_phase(store: _PhaseStore, phase: str) -> None:
         raise ValueError("Lifecycle is no longer active; inspect evidence and start a fresh run.")
 
 
-def _record_phase_failure(store: _PhaseStore, phase: str) -> None:
+def record_phase_failure(store: PhaseStore, phase: str) -> None:
     """Best-effort cleanup preserves the original error and any committed alias change."""
     with suppress(Exception):
         store.client.set_tag(store.run_id, f"skyulf.lifecycle.{phase}.attempt", "failed")
@@ -683,7 +684,7 @@ def _record_phase_failure(store: _PhaseStore, phase: str) -> None:
 
 
 def _execute_phase(
-    spark: Any, store: _PhaseStore, phase: str, reference: dict[str, str]
+    spark: Any, store: PhaseStore, phase: str, reference: dict[str, str]
 ) -> LifecyclePhaseResult:
     """Execute one phase and persist its receipt, termination or failure evidence."""
     store.begin(phase)
@@ -710,7 +711,7 @@ def _execute_phase(
             store.client.set_tag(store.run_id, "skyulf.lifecycle.status", status)
         return completed
     except BaseException:
-        _record_phase_failure(store, phase)
+        record_phase_failure(store, phase)
         raise
 
 
@@ -729,7 +730,7 @@ def _validate_phase_inputs(
         "initialize",
         "model_decision",
         "complete",
-        *_PREDECESSORS,
+        *PHASE_PREDECESSORS,
         *_GROUPED_PHASES,
     }:
         raise ValueError("Unsupported fixed lifecycle phase.")
@@ -743,7 +744,7 @@ def _validate_phase_inputs(
 
 def _run_prepare_phase(
     spark: Any,
-    store: _PhaseStore,
+    store: PhaseStore,
     reference: dict[str, str] | None,
     config: dict[str, Any] | None,
     action: str | None,
@@ -811,7 +812,7 @@ def run_lifecycle_phase(
             )
             reference = completed.reference
         return completed
-    store = _PhaseStore(tracking_uri, context)
+    store = PhaseStore(tracking_uri, context)
     if phase in {"prepare", "initialize"}:
         return _run_prepare_phase(
             spark,
@@ -838,12 +839,12 @@ def run_lifecycle_phase(
         return _run_model_decision(spark, store, tracking_uri, reference)
     if phase == "complete":
         return _complete_invocation(spark, store, tracking_uri, reference, task_states)
-    _validate_active_phase(store, phase)
+    validate_active_phase(store, phase)
     return _execute_phase(spark, store, phase, reference)
 
 
 def _selection_reference(
-    store: _PhaseStore, phase: str, reference: dict[str, str]
+    store: PhaseStore, phase: str, reference: dict[str, str]
 ) -> dict[str, str]:
     """Join named candidate tasks only at the competition selection boundary."""
     if (
@@ -858,7 +859,7 @@ def _selection_reference(
 
 
 def _run_model_decision(
-    spark: Any, store: _PhaseStore, tracking_uri: str, reference: dict[str, str]
+    spark: Any, store: PhaseStore, tracking_uri: str, reference: dict[str, str]
 ) -> LifecyclePhaseResult:
     """Route saved policy/operator intent through one visible decision task."""
     phase = "operator"

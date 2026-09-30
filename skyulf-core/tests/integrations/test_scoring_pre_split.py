@@ -289,7 +289,7 @@ def test_reuse_fixed_changes_do_not_double_transform_saved_model(tmp_path, engin
     from skyulf.inference.local_scoring import score_local_pipeline
     from skyulf.integrations.databricks.local_batch import fit_local_workflow
     from skyulf.integrations.databricks.local_cv import LocalCVSpec
-    from skyulf.integrations.databricks.local_retraining import LocalTrainingSpec, _candidate_config
+    from skyulf.integrations.databricks.local_retraining import LocalTrainingSpec, candidate_config
 
     steps = [
         {
@@ -313,7 +313,7 @@ def test_reuse_fixed_changes_do_not_double_transform_saved_model(tmp_path, engin
         max_bytes=10000,
         pre_split_steps=tuple(config["pre_split_steps"]),
     )
-    pipeline = _candidate_config(
+    pipeline = candidate_config(
         spec,
         config["pipeline"],
         engine=engine,

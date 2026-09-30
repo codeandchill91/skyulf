@@ -130,3 +130,6 @@ on every function, tests included. Nothing will remind you, so:
   whitespace looks wrong but is load-bearing. That is why
   `__snapshots__/*.ambr` is excluded from the auto-fix hooks in
   `.pre-commit-config.yaml`; if a snapshot looks malformed, regenerate it.
+- **USE new python code styles** from __future__ import annotations something like
+  this we   do not need to use the old style of python code anymore keep the
+  code clean and simple and use the new style of python code.

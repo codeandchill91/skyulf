@@ -23,6 +23,8 @@ import pandas as pd
 import polars as pl
 from sklearn.model_selection import GroupShuffleSplit
 
+from skyulf.integrations.databricks._local_frames import frame_bytes
+
 from ...data.dataset import SplitDataset
 from ...inference.local_evaluation import evaluate_local_holdout
 from ...inference.project_code import is_registered_project_step
@@ -40,7 +42,7 @@ from ..mlflow.validation import (
     validate_quality_policy,
 )
 from ._contracts import column_name, table_name
-from .local_batch import _frame_bytes, fit_local_workflow
+from .local_batch import fit_local_workflow
 from .local_cv import CV_FIELDS, LocalCVSpec, evaluate_training_cv
 from .local_explanations import log_training_explanations, validate_explanation_config
 from .local_pre_split import (
@@ -375,7 +377,7 @@ def _pre_split_step_columns(
     raise ValueError(f"pre_split_steps[{index}] permits only fixed normalization or row filters.")
 
 
-def _validate_pre_split_step(
+def validate_pre_split_step(
     step: Any, index: int, target_column: str, protected: tuple[str | None, ...]
 ) -> tuple[str, ...] | list[str]:
     """Reject learned or malformed steps before accepting their source dependencies."""
@@ -404,7 +406,7 @@ def _pre_split_columns(
         raise ValueError("pre_split_steps must be an ordered sequence of Core steps.")
     columns: list[str] = []
     for index, step in enumerate(steps, 1):
-        columns.extend(_validate_pre_split_step(step, index, target_column, protected))
+        columns.extend(validate_pre_split_step(step, index, target_column, protected))
     for column in columns:
         column_name(column)
     return tuple(dict.fromkeys(columns))
@@ -709,7 +711,7 @@ def split_labeled_snapshot(
     return train_frame, holdout_frame, unavailable
 
 
-def _log_local_model(artifact_path: str | Path, *, run_id: str, tracking_uri: str) -> str:
+def log_local_model(artifact_path: str | Path, *, run_id: str, tracking_uri: str) -> str:
     """Import the optional MLflow pyfunc package only for a tracked run."""
     from ..mlflow.local_model import log_local_model  # noqa: PLC0415
 
@@ -718,7 +720,7 @@ def _log_local_model(artifact_path: str | Path, *, run_id: str, tracking_uri: st
     )
 
 
-def _training_spec_payload(spec: LocalTrainingSpec, engine: str) -> dict[str, Any]:
+def training_spec_payload(spec: LocalTrainingSpec, engine: str) -> dict[str, Any]:
     """Serialize concrete selection settings before and after membership enrichment."""
     payload = asdict(spec)
     for field in ("start", "holdout_start", "cutoff", "result_cutoff"):
@@ -744,7 +746,7 @@ class _FittedCandidate:
     evidence_holdout: pd.DataFrame
 
 
-def _candidate_config(
+def candidate_config(
     spec: LocalTrainingSpec,
     config: dict[str, Any],
     *,
@@ -774,7 +776,7 @@ def _candidate_config(
             spec.group_column,
         ),
     )
-    _validate_cv_holdout_policy(spec, cv)
+    validate_cv_holdout_policy(spec, cv)
     validate_explanation_config(config)
     pipeline_config = prepare_search_pipeline(
         config, cv, target_column=spec.target_column, event_column=spec.event_column
@@ -834,7 +836,7 @@ def _candidate_cv(
     return None
 
 
-def _fit_candidate(
+def fit_candidate(
     spark: Any,
     spec: LocalTrainingSpec,
     config: dict[str, Any],
@@ -852,9 +854,9 @@ def _fit_candidate(
     run.log_config(pipeline_config, artifact_file="pipeline_config.json")
     run.client.log_dict(run.run_id, config, "training_pipeline_config.json")
     run.log_params({key: getattr(cv, field) for key, field in CV_FIELDS.items()})
-    run.client.log_dict(run.run_id, _training_spec_payload(spec, engine), "training_snapshot.json")
+    run.client.log_dict(run.run_id, training_spec_payload(spec, engine), "training_snapshot.json")
     temporal_cv = cv.enabled and cv.temporal
-    frame, train_frame, holdout, unavailable = prepared_data or _read_training_partitions(
+    frame, train_frame, holdout, unavailable = prepared_data or read_training_partitions(
         spark, spec, temporal_cv=temporal_cv, engine=engine
     )
     spec = replace(
@@ -910,7 +912,7 @@ def _fit_candidate(
     )
 
 
-def _read_training_partitions(
+def read_training_partitions(
     spark: Any, spec: LocalTrainingSpec, *, temporal_cv: bool, engine: str
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, int]:
     """Retain the sequential SDK read/split path alongside prepared lifecycle data."""
@@ -921,7 +923,7 @@ def _read_training_partitions(
     return frame, train, holdout, unavailable
 
 
-def _log_fitted_candidate(
+def log_fitted_candidate(
     run: Any,
     fitted: _FittedCandidate,
     config: dict[str, Any],
@@ -1020,12 +1022,12 @@ def _log_fitted_candidate(
         "holdout_membership.json",
     )
     run.client.log_dict(
-        run.run_id, _training_spec_payload(spec, engine), "candidate_training_spec.json"
+        run.run_id, training_spec_payload(spec, engine), "candidate_training_spec.json"
     )
     fitted.tags = tags
 
 
-def _evaluate_candidate(
+def evaluate_candidate(
     artifact: Any, native_holdout: Any, *, spec: LocalTrainingSpec, metric: str
 ) -> dict[str, float]:
     """Require a finite initial holdout metric before any registration."""
@@ -1035,7 +1037,7 @@ def _evaluate_candidate(
     return metrics
 
 
-def _compare_candidate(
+def compare_candidate(
     candidate: ResolvedModel,
     champion: ResolvedModel | None,
     native_holdout: Any,
@@ -1089,7 +1091,7 @@ def _compare_candidate(
     )
 
 
-def _register_candidate(
+def register_candidate(
     model_uri: str,
     model_name: str,
     *,
@@ -1139,7 +1141,7 @@ def train_local_candidate(
     contender without making the generic training service an alias writer.
     """
     cv = LocalCVSpec() if cv is None else cv
-    pipeline_config = _candidate_config(
+    pipeline_config = candidate_config(
         spec,
         config,
         engine=engine,
@@ -1171,7 +1173,7 @@ def train_local_candidate(
         if run.run_id is None:
             raise RuntimeError("MLflow did not provide a run ID.")
         run.set_tags(run_tags or {})
-        fitted = _fit_candidate(
+        fitted = fit_candidate(
             spark,
             spec,
             config,
@@ -1182,16 +1184,16 @@ def train_local_candidate(
             cv=cv,
             risk_category=risk_category,
         )
-        metrics = _evaluate_candidate(
+        metrics = evaluate_candidate(
             fitted.artifact,
             fitted.holdout,
             spec=fitted.spec,
             metric=metric,
         )
-        _log_fitted_candidate(run, fitted, config, engine=engine, risk_category=risk_category)
+        log_fitted_candidate(run, fitted, config, engine=engine, risk_category=risk_category)
         run.log_metrics(metrics)
-        model_uri = _log_local_model(artifact_path, run_id=run.run_id, tracking_uri=tracking_uri)
-    registered = _register_candidate(
+        model_uri = log_local_model(artifact_path, run_id=run.run_id, tracking_uri=tracking_uri)
+    registered = register_candidate(
         model_uri,
         model_name,
         tracking_uri=tracking_uri,
@@ -1206,7 +1208,7 @@ def train_local_candidate(
     )
     if on_registered is not None:
         on_registered(candidate)
-    return _compare_candidate(
+    return compare_candidate(
         candidate,
         champion,
         fitted.holdout,
@@ -1311,7 +1313,7 @@ def _materialize_training_rows(
             raise ValueError("Training source exceeds max_bytes.")
         records.append(record)
     frame = pd.DataFrame.from_records(records, columns=names)
-    if _frame_bytes(frame) > spec.max_bytes:
+    if frame_bytes(frame) > spec.max_bytes:
         raise ValueError("Training frame exceeds max_bytes.")
     return frame
 
@@ -1443,7 +1445,7 @@ def _validate_labeled_snapshot(frame: pd.DataFrame, spec: LocalTrainingSpec, eng
         raise ValueError(
             f"Training snapshot is missing required source columns: {missing_columns}."
         )
-    if len(frame) > spec.max_rows or _frame_bytes(frame) > spec.max_bytes:
+    if len(frame) > spec.max_rows or frame_bytes(frame) > spec.max_bytes:
         raise ValueError("Training snapshot exceeds max_rows or max_bytes.")
     if frame.loc[:, list(spec.record_key_columns)].isna().any().any():
         raise ValueError("Training row keys must not be null.")
@@ -1534,7 +1536,7 @@ def _group_split_evidence(
     }
 
 
-def _validate_cv_holdout_policy(spec: LocalTrainingSpec, cv: LocalCVSpec) -> None:
+def validate_cv_holdout_policy(spec: LocalTrainingSpec, cv: LocalCVSpec) -> None:
     """Require final holdout boundaries that match the requested nested split policy."""
     if (
         cv.enabled

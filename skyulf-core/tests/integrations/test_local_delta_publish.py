@@ -739,7 +739,7 @@ def test_incremental_local_batch_lost_acknowledgement_is_noop(local_delta_case, 
         [(3, datetime(2026, 1, 6, tzinfo=UTC), 6.0)],
         "id long, event_time timestamp, x double",
     ).write.format("delta").mode("append").saveAsTable(source)
-    original = local_incremental._last_receipt
+    original = local_incremental.last_receipt
     calls = 0
 
     def lose_reply(*args):
@@ -751,7 +751,7 @@ def test_incremental_local_batch_lost_acknowledgement_is_noop(local_delta_case, 
         return original(*args)
 
     with monkeypatch.context() as patch:
-        patch.setattr(local_incremental, "_last_receipt", lose_reply)
+        patch.setattr(local_incremental, "last_receipt", lose_reply)
         with pytest.raises(RuntimeError, match="lost acknowledgement"):
             run_incremental_local_batch(
                 spark,

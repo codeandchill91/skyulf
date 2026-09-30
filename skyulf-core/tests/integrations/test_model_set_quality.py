@@ -196,7 +196,7 @@ def test_set_baseline_overrides_independent_component_aliases(monkeypatch):
         )
     )
     monkeypatch.setattr(module, "controlled_champion_version", Mock(return_value="9"))
-    monkeypatch.setattr(module, "_champion_artifact", Mock(return_value=champion))
+    monkeypatch.setattr(module, "champion_artifact", Mock(return_value=champion))
     settings, pins = module.pin_model_set_baseline(
         {"model_name": "a.b.set"}, {"risk": {"model_name": "a.b.risk"}}, {}
     )
@@ -259,8 +259,8 @@ def test_quality_proof_cannot_omit_or_contradict_a_component(result):
 
 def test_failed_release_next_actions_require_new_training():
     """A failed candidate must not be presented as manually approvable without new evidence."""
-    from skyulf.integrations.databricks.branch_notebook import _set_next_actions
+    from skyulf.integrations.databricks.branch_notebook import set_next_actions
 
-    actions = _set_next_actions({"quality": {"passed": False}, "alias_change": None})
+    actions = set_next_actions({"quality": {"passed": False}, "alias_change": None})
     assert any("train a new candidate" in action for action in actions)
     assert not any("Run approve" in action for action in actions)

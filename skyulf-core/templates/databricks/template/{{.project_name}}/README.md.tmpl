@@ -841,3 +841,12 @@ enter lag/rolling history; an all-excluded batch retains the previous tail.
 Input schema validation still applies to every request. Business callbacks are
 trusted saved project code: keep them deterministic and free of mutable network,
 clock or filesystem state. Use the saved asset helper for lookup data.
+
+## Offline checks
+
+Run `python src/tools/smoke.py` without credentials. This reads workflow settings
+and parses Python syntax; it does not execute project hooks, train, access cloud
+data, or write resources. It validates the shared configuration, not resolved
+candidate/branch recipes. Use the existing preview tool for trusted recipe
+inspection and separate runtime tests for training/scoring behavior. A training
+row sample does not prevent writes and is not a smoke mode.

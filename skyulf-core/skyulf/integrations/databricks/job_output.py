@@ -12,7 +12,7 @@ def _text(value: Any) -> str:
     return escape(str(value))
 
 
-def _table(headers: tuple[str, ...], rows: list[tuple[Any, ...]]) -> str:
+def output_table(headers: tuple[str, ...], rows: list[tuple[Any, ...]]) -> str:
     """Render small comparison and parameter tables without injecting dynamic markup."""
     head = "".join(f"<th>{_text(value)}</th>" for value in headers)
     body = "".join(
@@ -49,7 +49,7 @@ def _comparison_summary(candidate: dict[str, Any]) -> list[str]:
         f"{_text(comparison.get('min_improvement', 0))}<br>"
         f"<strong>Eligible:</strong> {_text(comparison['eligible'])}<br>"
         f"<strong>Reason:</strong> {_text(comparison['reason'])}</p>",
-        _table(
+        output_table(
             ("Metric", "Candidate", "Champion"),
             [(key, value, champion.get(key, "No champion")) for key, value in challenger.items()],
         ),
@@ -67,7 +67,7 @@ def _comparison_summary(candidate: dict[str, Any]) -> list[str]:
             "metric_unavailable_or_non_finite": "Failed: metric unavailable or non-finite on this holdout",
         }
         sections.append(
-            _table(
+            output_table(
                 ("Quality metric", "Candidate", "Required", "Result"),
                 [
                     (
@@ -90,7 +90,7 @@ def _nested_search_output(tuning: dict[str, Any]) -> list[str]:
         return []
     return [
         "<h3>Nested CV evaluation</h3>",
-        _table(
+        output_table(
             ("Setting", "Value"),
             [
                 ("Outer folds", nested["outer_folds"]),
@@ -107,7 +107,7 @@ def _nested_search_output(tuning: dict[str, Any]) -> list[str]:
                 ("Threshold metric", tuning.get("decision_threshold_metric")),
             ],
         ),
-        _table(
+        output_table(
             (
                 "Fold",
                 "Inner best score",
@@ -158,7 +158,10 @@ def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
         for key, value in payload.items()
         if isinstance(value, (str, int, float, bool)) and not key.endswith(("sha256", "digest"))
     ]
-    sections = [f"<h2>{_text(titles.get(phase, phase))}</h2>", _table(("Result", "Value"), rows)]
+    sections = [
+        f"<h2>{_text(titles.get(phase, phase))}</h2>",
+        output_table(("Result", "Value"), rows),
+    ]
     _append_training_output(sections, payload)
     _append_competition_output(sections, payload)
     candidate = payload.get("candidate", payload)
@@ -188,7 +191,7 @@ def _append_competition_output(sections: list[str], payload: dict[str, Any]) -> 
         return
     sections.append(f"<h3>Model competition: {_text(competition['selection_metric'])}</h3>")
     sections.append(
-        _table(
+        output_table(
             ("Candidate", "Model", "Search", "CV mean", "CV std", "Evaluation", "Training run"),
             [
                 (
@@ -257,12 +260,12 @@ def _append_training_output(sections: list[str], payload: dict[str, Any]) -> Non
     """Render measured training metrics, tuning evidence and optional explanations."""
     metrics = payload.get("metrics")
     if isinstance(metrics, dict):
-        sections.append(_table(("Metric", "Value"), list(metrics.items())))
+        sections.append(output_table(("Metric", "Value"), list(metrics.items())))
     tuning = payload.get("tuning")
     if isinstance(tuning, dict):
         sections.append("<h3>Training search</h3>")
         sections.append(
-            _table(
+            output_table(
                 ("Setting", "Value"),
                 [
                     ("Strategy", tuning.get("strategy")),
@@ -284,7 +287,7 @@ def _append_training_output(sections: list[str], payload: dict[str, Any]) -> Non
     explanation = payload.get("explanations")
     if isinstance(explanation, dict):
         sections.append("<h3>Model explanations</h3>")
-        sections.append(_table(("Result", "Value"), list(explanation.items())))
+        sections.append(output_table(("Result", "Value"), list(explanation.items())))
 
 
 def _append_lifecycle_actions(sections: list[str], phase: str, payload: dict[str, Any]) -> None:
@@ -321,7 +324,7 @@ def _append_scoring_output(sections: list[str], result: dict[str, Any]) -> None:
         else "<p><strong>Prediction write completed.</strong></p>"
     )
     sections.append(
-        _table(
+        output_table(
             ("Result", "Value"),
             [
                 (label, result[key])
@@ -359,7 +362,7 @@ def _append_operator_options(
                 "Rollback is optional and does not run automatically.</p>"
             )
             sections.append(
-                _table(
+                output_table(
                     ("Rollback", "Version"),
                     [
                         ("Required current champion", "v" + expected),
@@ -381,7 +384,7 @@ def _append_operator_options(
         rows = list(parameters.items())
         if next_action == "reject":
             rows.append(("rejection_reason", "Enter your reason"))
-        sections.append(_table(("Parameter", "Value"), rows))
+        sections.append(output_table(("Parameter", "Value"), rows))
         if rollback:
             sections.append("</details>")
 
@@ -397,4 +400,4 @@ def _append_scoring_coverage(sections: list[str], manifest: dict[str, Any]) -> N
         if key in manifest
     ]
     if rows:
-        sections.append(_table(("Scoring coverage", "Rows"), rows))
+        sections.append(output_table(("Scoring coverage", "Rows"), rows))

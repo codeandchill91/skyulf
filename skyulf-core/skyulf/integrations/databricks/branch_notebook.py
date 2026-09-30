@@ -12,17 +12,17 @@ from typing import Any
 from ...inference.project_code import load_project_module
 from ._project_files import read_source, renamed_modeling_hook
 from .job_runtime import (
-    _lifecycle_widget_context,
-    _notebook_output,
-    _operator_options,
-    _read_notebook_config,
+    lifecycle_widget_context,
+    notebook_output,
+    operator_options,
+    read_notebook_config,
 )
 from .local_workflow import resolve_target_config
 from .model_set_project import (
-    _endpoints,
     capture_set_rules,
     load_project_model_set,
     package_training_model_set,
+    project_endpoints,
     render_model_set_result,
 )
 from .project import load_project_workflow
@@ -97,7 +97,7 @@ def load_training_branch_configs(values: dict[str, str]) -> dict[str, dict[str, 
     They never merge nested model settings from a different target. All feature
     packages are captured before the service validates and reads remote data.
     """
-    base = _read_notebook_config(values)
+    base = read_notebook_config(values)
     _training_only(base, allow_set_handoff=True)
     modeling = Path(values["config_path"]).parent.parent / "src/modeling"
     return {
@@ -108,7 +108,7 @@ def load_training_branch_configs(values: dict[str, str]) -> dict[str, dict[str, 
     }
 
 
-def _render_branch_result(payload: dict[str, Any]) -> str:
+def render_branch_result(payload: dict[str, Any]) -> str:
     """Show saved component evidence without presenting unavailable activation controls."""
     return (
         "<h2>Multi-target training results</h2>"
@@ -128,16 +128,16 @@ def run_branch_training_notebook(
 ) -> str:
     """Train branch candidates or explicitly operate an enabled saved model set."""
     values = dbutils.widgets.getAll()
-    _lifecycle_widget_context(values)
+    lifecycle_widget_context(values)
     # Legacy sequential notebooks have no child score task; require the new graph.
-    _training_only(_read_notebook_config(values))
+    _training_only(read_notebook_config(values))
     action = values.get("lifecycle_action", "train")
     settings = load_project_model_set(values)
     if settings is None and action != "train":
         raise ValueError(
             "Multi-target entrypoint supports only train unless a model set is enabled."
         )
-    options = _operator_options(action, values)
+    options = operator_options(action, values)
     if action != "train":
         return _set_operator_output(
             spark,
@@ -157,7 +157,7 @@ def run_branch_training_notebook(
         from .model_set_release import pin_model_set_baseline  # noqa: PLC0415
 
         settings, champion_versions = pin_model_set_baseline(
-            settings, configs, _endpoints(next(iter(configs.values())))
+            settings, configs, project_endpoints(next(iter(configs.values())))
         )
     from .local_branches import (  # noqa: PLC0415 - load training services after preflight
         prepare_training_branches,
@@ -170,7 +170,7 @@ def run_branch_training_notebook(
         outcome = train_local_branches(
             spark,
             branches,
-            **_endpoints(base),
+            **project_endpoints(base),
             experiment_name=values["experiment_name"],
             artifact_path=directory,
         )
@@ -182,7 +182,7 @@ def run_branch_training_notebook(
             outcome,
             settings,
             composition_source=source,
-            **_endpoints(base),
+            **project_endpoints(base),
         )
         payload["model_set_candidate"] = {
             "name": candidate.name,
@@ -192,22 +192,22 @@ def run_branch_training_notebook(
         from .model_set_release import automatic_model_set_release  # noqa: PLC0415
 
         payload.update(automatic_model_set_release(spark, candidate, settings, base))
-        payload["next_actions"] = _set_next_actions(payload)
-    return _notebook_output(
+        payload["next_actions"] = set_next_actions(payload)
+    return notebook_output(
         payload,
         dbutils,
-        render=render_model_set_result if settings is not None else _render_branch_result,
+        render=render_model_set_result if settings is not None else render_branch_result,
         display_html=display_html,
         exit_notebook=exit_notebook,
         explanation_tracking_uri=(
-            _endpoints(base)["tracking_uri"]
+            project_endpoints(base)["tracking_uri"]
             if any(config["pipeline"].get("explainability") for config in configs.values())
             else None
         ),
     )
 
 
-def _set_next_actions(payload: dict) -> list[str]:
+def set_next_actions(payload: dict) -> list[str]:
     """Offer a valid next step without suggesting manual approval can bypass failed gates."""
     if payload.get("alias_change") is not None:
         return ["Run the score job using the approved model set."]
@@ -243,7 +243,7 @@ def _set_operator_output(
     from .model_set_project import run_model_set_operator  # noqa: PLC0415
 
     payload = run_model_set_operator(spark, values, settings, options)
-    return _notebook_output(
+    return notebook_output(
         payload,
         dbutils,
         render=render_model_set_result,

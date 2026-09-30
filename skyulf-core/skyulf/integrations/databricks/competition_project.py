@@ -15,8 +15,8 @@ from ._project_files import modeling_hook, project_source, read_source, renamed_
 from .competition_evaluation import competition_metric, validate_competition_preprocessing
 from .local_cv import LocalCVSpec
 from .local_search import base_model_config
-from .project import _resolve_project_workflow, _strict_json_value, _validate_project_steps
-from .workflow_config import _FIELDS, _validate_workflow_pipeline
+from .project import resolve_project_workflow, strict_json_value, validate_project_steps
+from .workflow_config import WORKFLOW_FIELDS, validate_workflow_pipeline
 
 _CANDIDATE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 
@@ -79,12 +79,12 @@ def _validate_candidate_pipeline(
     pipeline: dict[str, Any], config: dict[str, Any], cv: LocalCVSpec, metric: str
 ) -> None:
     """Validate task, preprocessing and authoritative CV without mutating saved recipes."""
-    if set(pipeline) & _FIELDS:
+    if set(pipeline) & WORKFLOW_FIELDS:
         raise ValueError("Candidate pipelines cannot override shared workflow settings.")
     validate_competition_preprocessing(pipeline)
     copied = deepcopy(pipeline)
     _bind_candidate_metric(copied, metric)
-    _validate_workflow_pipeline({"pipeline": copied}, config["task"])
+    validate_workflow_pipeline({"pipeline": copied}, config["task"])
     cv.validate_pipeline(
         copied,
         target_column=config["target_column"],
@@ -114,7 +114,7 @@ def _load_candidates(path: Path, task: str, limit: int) -> tuple[dict[str, Any],
     factory = getattr(load_project_module(source), "build_candidates", None)
     if not callable(factory):
         raise ValueError(f"{hook.name} must define build_candidates(task).")
-    candidates = _strict_json_value(factory(task=task), hook.name)
+    candidates = strict_json_value(factory(task=task), hook.name)
     if len(json.dumps(candidates, allow_nan=False).encode("utf-8")) > MAX_PROJECT_SOURCE_BYTES:
         raise ValueError(f"{hook.name} returned more than 64 KiB of configuration.")
     return _candidate_mapping(candidates, limit), source
@@ -123,7 +123,7 @@ def _load_candidates(path: Path, task: str, limit: int) -> tuple[dict[str, Any],
 def load_competition_project(config: dict[str, Any], path: str | Path) -> dict[str, Any]:
     """Resolve each model through the existing project hooks and freeze common eligibility."""
     cv, metric, limit = _competition_settings(config)
-    _validate_project_steps(config)
+    validate_project_steps(config)
     candidates, source = _load_candidates(Path(path), config["task"], limit)
     shared_source = _competition_source(project_source(Path(path)))
     result = deepcopy(config)
@@ -135,7 +135,7 @@ def load_competition_project(config: dict[str, Any], path: str | Path) -> dict[s
         local["training_layout"] = "single_model"
         local["pipeline"]["modeling"] = deepcopy(candidate["modeling"])
         _bind_candidate_metric(local["pipeline"], metric)
-        loaded = _resolve_project_workflow(
+        loaded = resolve_project_workflow(
             local,
             path,
             shared_source,

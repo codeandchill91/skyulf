@@ -92,7 +92,7 @@ def test_registration_rechecks_train_receipt_after_evaluation(staged, monkeypatc
     prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
     trained = _call(staged, "train", prepared.reference)
     run_id = prepared.reference["run_id"]
-    evaluate = local_retraining._evaluate_candidate
+    evaluate = local_retraining.evaluate_candidate
 
     def alter_receipt(*args, **kwargs):
         """Model an edit while evaluation is running, before registration intent is written."""
@@ -105,7 +105,7 @@ def test_registration_rechecks_train_receipt_after_evaluation(staged, monkeypatc
         client.log_dict(run_id, receipt, path)
         return metrics
 
-    monkeypatch.setattr(local_retraining, "_evaluate_candidate", alter_receipt)
+    monkeypatch.setattr(local_retraining, "evaluate_candidate", alter_receipt)
     with pytest.raises(ValueError, match="digest"):
         _call(staged, "evaluate_register", trained.reference)
     assert not client.search_registered_models()
@@ -990,7 +990,7 @@ def test_grouped_training_preserves_receipts_and_publishes_result(staged, engine
         ("evaluate_local_holdout", "train_register", "evaluate_register", "compare"),
         ("register_model", "train_register", "evaluate_register", "compare"),
         ("compare_registered_local_models", "compare_decide", "compare", "decide"),
-        ("_automatic_promotion", "compare_decide", "decide", "result"),
+        ("automatic_promotion", "compare_decide", "decide", "result"),
     ],
 )
 def test_group_failure_stops_later_work_and_complete_cannot_publish(
@@ -1010,7 +1010,7 @@ def test_group_failure_stops_later_work_and_complete_cannot_publish(
         """Inject one computation or transport failure without replacing receipt handling."""
         raise failure
 
-    module = local_workflow if operation == "_automatic_promotion" else local_retraining
+    module = local_workflow if operation == "automatic_promotion" else local_retraining
     monkeypatch.setattr(module, operation, fail)
     with pytest.raises(RuntimeError) as caught:
         _call(staged, group, reference)
@@ -1049,7 +1049,7 @@ def test_grouped_inputs_rejected_before_external_work(staged, monkeypatch, phase
         """Any store construction means invalid options reached external work."""
         pytest.fail("Invalid grouped inputs reached storage")
 
-    monkeypatch.setattr(adapter, "_PhaseStore", forbidden)
+    monkeypatch.setattr(adapter, "PhaseStore", forbidden)
     with pytest.raises(ValueError, match="pinned invocation"):
         _call(staged, phase, **kwargs)
 
@@ -1063,7 +1063,7 @@ def test_grouped_context_rejected_before_external_work(staged, monkeypatch, phas
         """A rejected repair must never open a lifecycle store."""
         pytest.fail("Invalid grouped context reached storage")
 
-    monkeypatch.setattr(adapter, "_PhaseStore", forbidden)
+    monkeypatch.setattr(adapter, "PhaseStore", forbidden)
     with pytest.raises(ValueError, match="repair/retry"):
         adapter.run_lifecycle_phase(
             None,
@@ -1291,7 +1291,7 @@ def test_task_states_only_accepted_by_complete_before_external_work(monkeypatch,
         """Reject invalid phase metadata before an MLflow client is created."""
         pytest.fail("Task states reached storage outside complete")
 
-    monkeypatch.setattr(adapter, "_PhaseStore", forbidden)
+    monkeypatch.setattr(adapter, "PhaseStore", forbidden)
     with pytest.raises(ValueError, match="only.*complete"):
         adapter.run_lifecycle_phase(
             None,

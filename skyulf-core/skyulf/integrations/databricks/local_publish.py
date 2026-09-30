@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import importlib
-import math
 from importlib.metadata import version
 from typing import Any
 
-import numpy as np
-import pandas as pd
+from skyulf.integrations.databricks._batch_manifest import batch_manifest
+from skyulf.integrations.databricks._local_frames import output_scalar
 
 from ...inference.local_pipeline import LocalPipelineArtifact
 from ._contracts import PREDICTION_METADATA_COLUMNS, BatchResult, BatchSpec
 from .admission import PublishAdmission, validate_admission
-from .batch import _manifest
 from .delta import history, publish_replace_period, table_identity
 from .local_batch import LocalSourceSpec, score_local_source
 from .local_history import bind_period_history, prediction_history
@@ -44,7 +42,7 @@ def _validate_request(
     return admission
 
 
-def _check_target(
+def check_target(
     spark: Any,
     source_frame: Any,
     target: Any,
@@ -72,17 +70,6 @@ def _check_target(
     if any(target.schema[name].dataType.typeName() != "string" for name in _METADATA):
         raise ValueError("Prediction target metadata columns must be strings.")
     return names
-
-
-def _scalar(value: Any) -> Any:
-    """Convert bounded pandas/NumPy scalars without changing their logical type."""
-    if value is None or value is pd.NA:
-        return None
-    if isinstance(value, np.generic):
-        value = value.item()
-    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
-        raise ValueError("Prediction output contains a nonfinite number.")
-    return value
 
 
 def run_local_batch(
@@ -121,7 +108,7 @@ def run_local_batch(
         spark.read.format("delta").option("versionAsOf", source.version).table(source.table)
     )
     target = spark.table(spec.output_table)
-    output_names = _check_target(
+    output_names = check_target(
         spark, source_frame, target, source.record_key_columns, source.period_column, prepared
     )
     bridge = _local_prediction_bridge(spark, source, scored, output_names, target)
@@ -132,7 +119,7 @@ def run_local_batch(
     ).select(*source.record_key_columns, source.period_column)
     output = bridge.join(source_period, on=list(source.record_key_columns), how="inner")
     output = _complete_local_output(output, target, spec, functions, count)
-    manifest = _manifest(spec, source_id, source.table, snapshot.committed_us, count, count)
+    manifest = batch_manifest(spec, source_id, source.table, snapshot.committed_us, count, count)
     manifest |= {
         key: scored.diagnostics[key]
         for key in ("predicted_count", "excluded_count")
@@ -228,7 +215,7 @@ def _local_prediction_bridge(
         raise ValueError("Local prediction row keys must be unique.")
     bridge_schema = target.select(*bridge_names).schema
     records = [
-        tuple(_scalar(value) for value in row)
+        tuple(output_scalar(value) for value in row)
         for row in scored.predictions.itertuples(index=False, name=None)
     ]
     bridge = spark.createDataFrame(records, schema=bridge_schema)

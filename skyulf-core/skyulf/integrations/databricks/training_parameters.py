@@ -10,7 +10,7 @@ import numpy as np
 
 from .local_ensemble import ENSEMBLE_MODELS
 from .local_search import base_model_config
-from .local_search_results import _parameter_preview
+from .local_search_results import parameter_preview
 
 if TYPE_CHECKING:
     from ...inference.local_pipeline import LocalPipelineArtifact
@@ -70,7 +70,7 @@ def _preview(value: Any, section: str) -> str:
     """Use native text for scalar strings and JSON for structured parameter values."""
     if isinstance(value, str) and len(value.encode("utf-8")) <= 500:
         return value
-    return _parameter_preview(value, section, artifact_file="training_parameters.json")
+    return parameter_preview(value, section, artifact_file="training_parameters.json")
 
 
 def log_training_parameters(

@@ -84,7 +84,7 @@ def test_failed_candidate_prevents_registration(staged, monkeypatch):
 
     _, client, config, _, _ = staged
     _competition(config)
-    fit = local_retraining._fit_candidate
+    fit = local_retraining.fit_candidate
 
     def fail_one(*args, **kwargs):
         """Fail the weak fit after the strong candidate can finish."""
@@ -92,7 +92,7 @@ def test_failed_candidate_prevents_registration(staged, monkeypatch):
             raise ValueError("deliberate candidate failure")
         return fit(*args, **kwargs)
 
-    monkeypatch.setattr(local_retraining, "_fit_candidate", fail_one)
+    monkeypatch.setattr(local_retraining, "fit_candidate", fail_one)
     prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
     with pytest.raises(ValueError, match="deliberate candidate failure"):
         _call(staged, "train", prepared.reference)
@@ -133,7 +133,7 @@ def test_cv_required_before_reading_source(staged, monkeypatch):
     _competition(config)
     config["cv_enabled"] = False
     monkeypatch.setattr(
-        local_workflow, "_prepare_training", lambda *a, **kw: pytest.fail("remote preparation")
+        local_workflow, "prepare_training", lambda *a, **kw: pytest.fail("remote preparation")
     )
     with pytest.raises(ValueError, match="cv_enabled"):
         _call(staged, "prepare", config=config, action="train", experiment_name="staged")
@@ -244,14 +244,14 @@ def test_winner_quality_failure_never_evaluates_runner_up(staged, monkeypatch):
     _competition(config)
     config["quality_threshold"] = 0.0
     evaluated = []
-    evaluate = local_retraining._evaluate_candidate
+    evaluate = local_retraining.evaluate_candidate
 
     def record_evaluation(artifact, *args, **kwargs):
         """Record real heldout evaluations without changing their computed metrics."""
         evaluated.append(artifact.manifest.pipeline_sha256)
         return evaluate(artifact, *args, **kwargs)
 
-    monkeypatch.setattr(local_retraining, "_evaluate_candidate", record_evaluation)
+    monkeypatch.setattr(local_retraining, "evaluate_candidate", record_evaluation)
     prepared = _call(staged, "prepare", config=config, action="train", experiment_name="staged")
     trained = _call(staged, "train", prepared.reference)
     assert evaluated == []

@@ -134,7 +134,7 @@ def test_candidate_search_isolates_holdout_and_logs_selected_artifact(
         "modeling": _search_model(task, "random"),
     }
     cv = LocalCVSpec(enabled=cv_enabled, folds=2)
-    effective = training._candidate_config(
+    effective = training.candidate_config(
         spec,
         pipeline,
         engine=engine,
@@ -169,7 +169,7 @@ def test_candidate_search_isolates_holdout_and_logs_selected_artifact(
         log_metrics=Mock(),
         set_tags=Mock(),
     )
-    fitted = training._fit_candidate(
+    fitted = training.fit_candidate(
         object(),
         spec,
         pipeline,
@@ -180,7 +180,7 @@ def test_candidate_search_isolates_holdout_and_logs_selected_artifact(
         cv=cv,
         risk_category=None,
     )
-    training._log_fitted_candidate(run, fitted, pipeline, engine=engine, risk_category=None)
+    training.log_fitted_candidate(run, fitted, pipeline, engine=engine, risk_category=None)
     train, heldout, _ = training.split_labeled_snapshot(source, spec, engine=engine)
     train_values, heldout_values = set(train.x), set(heldout.x)
     assert snapshots[-1] == train_values

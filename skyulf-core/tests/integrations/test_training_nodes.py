@@ -69,7 +69,7 @@ def test_competition_missing_training_blocks_selection(staged):
 
 def test_changed_child_receipt_blocks_selection(staged):
     """A modified candidate score must not be accepted by the complete-results join."""
-    from skyulf.integrations.databricks._lifecycle_state import _PhaseStore
+    from skyulf.integrations.databricks._lifecycle_state import PhaseStore
     from skyulf.integrations.databricks.training_nodes import run_competition_training
 
     _, client, config, context, _ = staged
@@ -85,7 +85,7 @@ def test_changed_child_receipt_blocks_selection(staged):
             tracking_uri=config["tracking_uri"],
             reference=split.reference,
         )
-    store = _PhaseStore(config["tracking_uri"], context)
+    store = PhaseStore(config["tracking_uri"], context)
     store.bind(split.reference)
     receipt = store.read("lifecycle/candidate_strong.json")
     receipt["output"]["evaluation"]["mean"] = 1e20

@@ -6,22 +6,22 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from skyulf.integrations.databricks._local_frames import frame_bytes, output_scalar
+
 from ..mlflow.registry import ResolvedModel
 from ._contracts import column_name, table_name
 from .admission import BatchConflictError, PublishAdmission, validate_admission
 from .delta import DeltaPublishError, table_identity
-from .local_batch import _frame_bytes
 from .local_incremental import (
     SourceChangeRequiresRebuild,
-    _bounded_frame,
-    _check_incremental_bootstrap,
-    _last_receipt,
-    _latest,
-    _require_incremental_change_feed,
-    _select_incremental_rows,
+    bounded_frame,
+    check_incremental_bootstrap,
+    last_receipt,
+    latest_source_version,
+    require_incremental_change_feed,
+    select_incremental_rows,
     validate_source_change_policy,
 )
-from .local_publish import _scalar
 from .model_set_output import (
     METADATA_COLUMNS,
     provision_publication_views,
@@ -29,7 +29,7 @@ from .model_set_output import (
     publication_policy,
     publication_views,
 )
-from .prediction_output import _OUTPUT_TYPES, _check_existing_table
+from .prediction_output import OUTPUT_TYPES, check_existing_table
 
 if TYPE_CHECKING:
     from ...inference.model_set import ModelSetArtifact
@@ -116,9 +116,9 @@ def _table_columns(
     columns = []
     for spec in model_set_output_schema(artifact):
         column_name(spec.name)
-        if spec.dtype not in _OUTPUT_TYPES:
+        if spec.dtype not in OUTPUT_TYPES:
             raise ValueError(f"Unsupported model-set Delta dtype: {spec.dtype}.")
-        kind, sql = _OUTPUT_TYPES[spec.dtype]
+        kind, sql = OUTPUT_TYPES[spec.dtype]
         columns.append((spec.name, kind, sql))
     columns.extend((name, "string", "STRING") for name in _METADATA)
     if len({name.casefold() for name, _, _ in columns}) != len(columns):
@@ -145,20 +145,20 @@ def _provision(
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {table_name(target)} ({declaration}) USING DELTA"
         ).collect()
-    _check_existing_table(spark, target, columns)
+    check_existing_table(spark, target, columns)
 
 
 def _key_type_matches(dtype: str, spark_type: str) -> bool:
     """Accept lossless Spark integer widening while keeping other key types exact."""
     if dtype == "int64":
         return spark_type in {"byte", "short", "integer", "long"}
-    expected = _OUTPUT_TYPES.get(dtype)
+    expected = OUTPUT_TYPES.get(dtype)
     return expected is not None and spark_type == expected[0]
 
 
 def _previous_set_receipt(latest: Any, source_id: str, target_id: str) -> dict | None:
     """Require complete set provenance instead of accepting single-model watermarks."""
-    previous = _last_receipt(latest, source_id, target_id)
+    previous = last_receipt(latest, source_id, target_id)
     if previous is not None:
         required = {"model_set_name", "model_set_version", "model_set_digest", "set_history"}
         if previous.get("artifact_kind") != "model_set" or not required.issubset(previous):
@@ -279,11 +279,11 @@ def _output_frame(
     frame = frame.copy(deep=True)
     for name in _METADATA:
         frame[name] = receipt[name]
-    if _frame_bytes(frame) > max_bytes:
+    if frame_bytes(frame) > max_bytes:
         raise ValueError("Model-set output exceeds max_bytes.")
     output = spark.createDataFrame(
         [
-            tuple(_scalar(value) for value in row)
+            tuple(output_scalar(value) for value in row)
             for row in frame.itertuples(index=False, name=None)
         ],
         schema=spark.table(target).select(*frame.columns).schema,
@@ -313,7 +313,7 @@ def _commit_set(
     if table_identity(spark, source) != source_id or table_identity(spark, target) != target_id:
         raise BatchConflictError("Source or target identity changed while scoring the set.")
     expected = receipt["expected_target_version"]
-    if int(_latest(spark, target)["version"]) != expected:
+    if int(latest_source_version(spark, target)["version"]) != expected:
         raise BatchConflictError("Target changed while scoring the set.")
     try:
         output.write.format("delta").mode(mode).option("mergeSchema", "false").option(
@@ -325,7 +325,7 @@ def _commit_set(
         raise DeltaPublishError(
             "Model-set write outcome unknown; inspect target receipt before retry."
         ) from exc
-    committed = _latest(spark, target)
+    committed = latest_source_version(spark, target)
     recorded = _previous_set_receipt(committed, source_id, target_id)
     if recorded != receipt:
         raise DeltaPublishError("Model-set output has no matching committed receipt.")
@@ -367,7 +367,7 @@ def run_model_set_batch(
         raise ValueError("Prediction views must differ from the source table.")
     admission = validate_admission(spark, admission)
     source_id = table_identity(spark, source_table)
-    _require_incremental_change_feed(spark, source_table)
+    require_incremental_change_feed(spark, source_table)
     _provision(spark, source_table, prediction_table, artifact, publication)
     target_id = table_identity(spark, prediction_table)
     with admission.hold(target_id):
@@ -406,10 +406,10 @@ def _run_admitted_set(
     if table_identity(spark, source) != source_id or table_identity(spark, target) != target_id:
         raise BatchConflictError("Source or target changed during model-set admission.")
     functions = importlib.import_module("pyspark.sql.functions")
-    latest = _latest(spark, target)
+    latest = latest_source_version(spark, target)
     previous = _previous_set_receipt(latest, source_id, target_id)
-    _check_incremental_bootstrap(spark, target, previous, functions)
-    upper = int(_latest(spark, source)["version"])
+    check_incremental_bootstrap(spark, target, previous, functions)
+    upper = int(latest_source_version(spark, source)["version"])
     prior, write_mode, noop = _plan_publication(
         previous,
         set_digest=artifact.manifest.set_sha256,
@@ -424,7 +424,7 @@ def _run_admitted_set(
     )
     if source_rebuilt:
         prior, write_mode = None, "overwrite"
-    frame = _bounded_frame(
+    frame = bounded_frame(
         selected,
         tuple(column.name for column in artifact.manifest.input_schema),
         artifact.manifest.record_key_columns,
@@ -470,11 +470,11 @@ def _select_set_source(
     """Recover only readable source corrections using the same pinned upper snapshot."""
     validate_source_change_policy(policy)
     try:
-        return _select_incremental_rows(spark, source, prior, upper, None, functions), False
+        return select_incremental_rows(spark, source, prior, upper, None, functions), False
     except SourceChangeRequiresRebuild:
         if policy == "reject":
             raise
-        return _select_incremental_rows(spark, source, None, upper, None, functions), True
+        return select_incremental_rows(spark, source, None, upper, None, functions), True
 
 
 def _release_changed(previous: dict | None, model: ResolvedModel) -> bool:

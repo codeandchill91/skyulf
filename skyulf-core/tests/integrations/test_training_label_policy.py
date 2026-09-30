@@ -91,7 +91,7 @@ def test_default_policy_preserves_saved_identity_and_missing_target_error():
         "workspace.test.labels@4/random/"
         "6bc58cd1cb7f093da1979997e18737fe3dada247e718d2e4b5dd274320e2af27"
     )
-    payload = retraining._training_spec_payload(spec, "pandas")
+    payload = retraining.training_spec_payload(spec, "pandas")
     payload.pop("drop_missing_labels", None)
     restored = retraining.LocalTrainingSpec.from_payload(payload)
     assert restored.drop_missing_labels is False
@@ -118,7 +118,7 @@ def test_candidate_tags_survive_fit_failure(monkeypatch, tmp_path):
         raise RuntimeError("fit failed")
 
     monkeypatch.setattr(retraining, "track_run", tracked)
-    monkeypatch.setattr(retraining, "_fit_candidate", fail_fit)
+    monkeypatch.setattr(retraining, "fit_candidate", fail_fit)
     with pytest.raises(RuntimeError, match="fit failed"):
         retraining.train_local_candidate(
             None,

@@ -4,8 +4,6 @@ The artifact is for whole-frame local batches. A pyfunc model here does not
 certify row-local HTTP serving or Spark partition safety.
 """
 
-from __future__ import annotations
-
 import inspect
 import tempfile
 from pathlib import Path
@@ -14,12 +12,17 @@ from typing import Any
 import mlflow  # ty: ignore[unresolved-import]
 import pandas as pd
 
+from skyulf.integrations.mlflow._client import make_tracking_client
+from skyulf.integrations.mlflow._model_metadata import (
+    mlflow_dtype,
+    scrub_local_artifact_uri,
+)
+
 from ...inference.local_pipeline import (
     LocalPipelineArtifact,
     load_local_pipeline,
 )
 from ...inference.local_scoring import score_local_pipeline, scoring_output_schema
-from .model import _make_client, _mlflow_dtype, _scrub_local_artifact_uri
 
 
 class SkyulfLocalPythonModel(mlflow.pyfunc.PythonModel):
@@ -61,10 +64,10 @@ def log_local_model(
     tracking_uri: str | None = None,
 ) -> str:
     """Log a fitted local pipeline under one explicit MLflow run and artifact path."""
-    _validate_local_destination(run_id, artifact_path, tracking_uri)
+    validate_local_destination(run_id, artifact_path, tracking_uri)
     local_path = Path(local_artifact_path).resolve()
     artifact = load_local_pipeline(local_path)
-    client = _make_client(tracking_uri)
+    client = make_tracking_client(tracking_uri)
     client.get_run(run_id)
     with tempfile.TemporaryDirectory(prefix="skyulf-local-mlflow-") as directory:
         model_path = Path(directory) / "model"
@@ -77,7 +80,7 @@ def log_local_model(
             artifacts={"local_pipeline": str(local_path)},
             signature=_signature(artifact),
             input_example=_input_example(artifact),
-            pip_requirements=_pip_requirements(artifact),
+            pip_requirements=pip_requirements(artifact),
             metadata={
                 "skyulf_artifact_kind": "local_pipeline",
                 "skyulf_fitted_engine": artifact.manifest.fitted_engine,
@@ -87,12 +90,12 @@ def log_local_model(
             mlflow_model=mlflow.models.Model(run_id=run_id, artifact_path=artifact_path),
             **save_options,
         )
-        _scrub_local_artifact_uri(model_path, "local_pipeline")
+        scrub_local_artifact_uri(model_path, "local_pipeline")
         client.log_artifacts(run_id, str(model_path), artifact_path=artifact_path)
     return f"runs:/{run_id}/{artifact_path}"
 
 
-def _normalized_dtype(dtype: str) -> str:
+def normalized_dtype(dtype: str) -> str:
     """Map fitted pandas/Polars labels to the supported MLflow scalar vocabulary."""
     normalized = dtype.lower()
     return {"object": "string", "str": "string", "utf8": "string", "boolean": "bool"}.get(
@@ -113,13 +116,13 @@ def _signature(artifact: LocalPipelineArtifact) -> Any:
     manifest = artifact.manifest
     inputs = Schema(
         [
-            ColSpec(_mlflow_dtype(_normalized_dtype(dtype)), name=name)
+            ColSpec(mlflow_dtype(normalized_dtype(dtype)), name=name)
             for name, dtype in zip(manifest.input_columns, manifest.input_dtypes, strict=True)
         ]
     )
     outputs = Schema(
         [
-            ColSpec(_mlflow_dtype(column.dtype), name=column.name)
+            ColSpec(mlflow_dtype(column.dtype), name=column.name)
             for column in scoring_output_schema(artifact)
         ]
     )
@@ -132,7 +135,7 @@ def _input_example(artifact: LocalPipelineArtifact) -> pd.DataFrame:
     for name, dtype in zip(
         artifact.manifest.input_columns, artifact.manifest.input_dtypes, strict=True
     ):
-        normalized = _normalized_dtype(dtype)
+        normalized = normalized_dtype(dtype)
         if normalized == "string":
             values[name] = pd.Series(["example"], dtype="object")
         elif normalized == "bool":
@@ -146,7 +149,7 @@ def _input_example(artifact: LocalPipelineArtifact) -> pd.DataFrame:
     return pd.DataFrame(values)
 
 
-def _pip_requirements(artifact: LocalPipelineArtifact) -> list[str]:
+def pip_requirements(artifact: LocalPipelineArtifact) -> list[str]:
     """Pin the fitted runtime and optional MLflow flavor for reproducible loading."""
     return list(
         dict.fromkeys(
@@ -163,7 +166,7 @@ def _pip_requirements(artifact: LocalPipelineArtifact) -> list[str]:
     )
 
 
-def _validate_local_destination(run_id: str, artifact_path: str, tracking_uri: str | None) -> None:
+def validate_local_destination(run_id: str, artifact_path: str, tracking_uri: str | None) -> None:
     """Validate the explicit run and upload destination before reading the artifact."""
     if type(run_id) is not str or not run_id.strip():
         raise ValueError("run_id must be a non-empty string.")

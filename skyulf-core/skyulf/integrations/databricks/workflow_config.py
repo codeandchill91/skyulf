@@ -16,12 +16,12 @@ from .local_cv import CV_FIELDS, LocalCVSpec
 from .local_explanations import validate_explanation_config
 from .local_sdk import ModelSelection
 from .local_search import base_model_config, prepare_search_pipeline
-from .local_workflow import _training_settings, _training_spec, _training_window_mode
-from .prediction_output import _IDENTIFIER, _TABLE_NAME
+from .local_workflow import training_settings, training_spec, training_window_mode
+from .prediction_output import IDENTIFIER_PATTERN, TABLE_NAME_PATTERN
 from .training_dates import training_date_spec
 
 _ACTIONS = {"train", "score", "approve", "reject", "rollback"}
-_FIELDS = {
+WORKFLOW_FIELDS = {
     "training_layout",
     "competition",
     "competition_max_trials",
@@ -114,7 +114,7 @@ def _validate_column_roles(names: list[Any], record_key_columns: list[str]) -> N
     """Reject ambiguous or reserved source column roles in their declared order."""
     checked: list[str] = []
     for name in names:
-        if not isinstance(name, str) or not _IDENTIFIER.fullmatch(name):
+        if not isinstance(name, str) or not IDENTIFIER_PATTERN.fullmatch(name):
             raise ValueError("Source columns must be simple column identifiers.")
         checked.append(name)
     if len({name.casefold() for name in checked}) != len(checked):
@@ -131,11 +131,11 @@ def _training_contract(config: dict[str, Any], action: str) -> None:
     """Validate training selection offline, allowing unset versions to resolve at invocation."""
     settings = dict(config)
     strategy = config.get("split_strategy", "random")
-    mode = _training_window_mode(config)
+    mode = training_window_mode(config)
     if config.get("stratify") is True and config["task"] != "classification":
         raise ValueError("stratify requires a classification task.")
     if action == "train":
-        settings = _training_settings(config, datetime(2000, 3, 1, tzinfo=UTC))
+        settings = training_settings(config, datetime(2000, 3, 1, tzinfo=UTC))
     else:
         settings["training_version"] = 0
         # These actions use saved evidence or derive fresh boundaries at invocation.
@@ -147,7 +147,7 @@ def _training_contract(config: dict[str, Any], action: str) -> None:
                 settings[key] = datetime(2000, month, 1, tzinfo=UTC).isoformat()
         if config.get("filter_unavailable_results") is True:
             settings["result_cutoff"] = datetime(2000, 3, 1, tzinfo=UTC).isoformat()
-    _training_spec(settings)
+    training_spec(settings)
 
 
 def _validate_workflow_fields(config: dict[str, Any], action: str) -> None:
@@ -162,7 +162,7 @@ def _validate_workflow_fields(config: dict[str, Any], action: str) -> None:
         raise ValueError(
             "config_version must be 1; migrate the project and regenerate/redeploy its jobs."
         )
-    unknown = set(config) - _FIELDS
+    unknown = set(config) - WORKFLOW_FIELDS
     if unknown:
         raise ValueError(f"Unknown workflow settings: {', '.join(sorted(unknown))}.")
     if action not in _ACTIONS:
@@ -173,7 +173,7 @@ def _validate_workflow_sources(config: dict[str, Any]) -> None:
     """Validate source names, input limits and column roles before any reader opens."""
     for key in ("training_table", "score_source_table", "prediction_table", "model_name"):
         value = config.get(key)
-        if not isinstance(value, str) or not _TABLE_NAME.fullmatch(value):
+        if not isinstance(value, str) or not TABLE_NAME_PATTERN.fullmatch(value):
             raise ValueError(f"{key} must be a resolved three-part Unity Catalog name.")
     if config["prediction_table"].casefold() in {
         config[key].casefold() for key in ("training_table", "score_source_table")
@@ -233,7 +233,7 @@ def _validate_workflow_quality(config: dict[str, Any], task: str, policy: str) -
         raise ValueError("Automatic promotion requires quality_threshold.")
 
 
-def _validate_workflow_pipeline(
+def validate_workflow_pipeline(
     config: dict[str, Any], task: str, *, allow_empty_model: bool = False
 ) -> None:
     """Check the model task and preprocessing types against the Core registry."""
@@ -280,7 +280,7 @@ def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str
     _validate_workflow_sources(config)
     _validate_workflow_model_selection(config, selection)
     _validate_workflow_quality(config, task, policy)
-    _validate_workflow_pipeline(
+    validate_workflow_pipeline(
         config,
         task,
         allow_empty_model=(
@@ -298,6 +298,19 @@ def validate_workflow_config(config: dict[str, Any], *, action: str) -> dict[str
             event_column=config.get("event_column"),
         )
     return deepcopy(config)
+
+
+def validate_project_settings(config: dict[str, Any]) -> dict[str, Any]:
+    """Check shared training/scoring settings without executing editable model hooks.
+
+    Generated single-model settings intentionally leave modeling empty until the
+    Python recipe is loaded. Shared training dates and CV holdout rules still
+    need their actual configured values checked during static smoke validation.
+    """
+    checked = validate_workflow_config(config, action="score")
+    _training_contract(checked, "train")
+    _validate_bundle_cv_holdout(checked, LocalCVSpec.from_workflow(checked))
+    return checked
 
 
 def _validate_layout(config: dict[str, Any], action: str) -> None:
@@ -330,7 +343,7 @@ def _validate_bundle_cv_holdout(config: dict[str, Any], cv: LocalCVSpec) -> None
 
 def _preview_window(checked: dict[str, Any]) -> tuple[str, Any, Any]:
     """Describe runtime and explicit time boundaries without reading source data."""
-    window = _training_window_mode(checked)
+    window = training_window_mode(checked)
     observation_window = f"[{checked.get('start')}, {checked.get('cutoff')})"
     holdout_start = checked.get("holdout_start")
     result_cutoff = checked.get("result_cutoff")
@@ -354,7 +367,7 @@ def _preview_window(checked: dict[str, Any]) -> tuple[str, Any, Any]:
 def _preview_training_source(checked: dict[str, Any], training_status: str) -> list[str]:
     """Describe source selection, resource bounds and the final holdout."""
     sample = checked.get("training_sample_rows")
-    window = _training_window_mode(checked)
+    window = training_window_mode(checked)
     version = checked.get("training_version")
     if version is None:
         version = "latest snapshot at invocation"

@@ -170,7 +170,7 @@ def test_log_model_uses_requested_run_with_unrelated_active_run(
     mlflow.set_tracking_uri(caller_config.tracking_uri)
     caller_client = mlflow.MlflowClient(tracking_uri=caller_config.tracking_uri)
     caller_experiment = caller_client.create_experiment("caller")
-    client = tracking._make_client(config.tracking_uri)
+    client = tracking.make_tracking_client(config.tracking_uri)
 
     with (
         mlflow.start_run(experiment_id=caller_experiment, run_name="caller") as caller,
@@ -244,7 +244,7 @@ def test_log_model_rejects_uri_delimiters(
     pipeline, _ = _regression_pipeline("pandas")
     bundle = build_bundle(pipeline, input_stage="raw", feature_order=("x", "z"))
     monkeypatch.setattr(
-        "skyulf.integrations.mlflow.model._make_client",
+        "skyulf.integrations.mlflow.model.make_tracking_client",
         lambda *args, **kwargs: pytest.fail("invalid artifact path contacted MLflow"),
     )
     with pytest.raises(ValueError, match="URI delimiters"):
@@ -264,7 +264,7 @@ def test_signature_rejects_dtypes_mlflow_cannot_preserve(
     def forbidden_client(*args: object, **kwargs: object) -> object:
         raise AssertionError("unsupported dtype must fail before contacting MLflow")
 
-    monkeypatch.setattr("skyulf.integrations.mlflow.model._make_client", forbidden_client)
+    monkeypatch.setattr("skyulf.integrations.mlflow.model.make_tracking_client", forbidden_client)
     with pytest.raises(ValueError, match="preserve this bundle dtype exactly"):
         log_model(bundle, run_id="never-contact-store", artifact_path="model")
 

@@ -16,7 +16,7 @@ from sklearn.model_selection import ShuffleSplit
 from ...inference.local_pipeline import LocalPipelineArtifact
 from ...modeling._tuning.schemas import TuningConfig, TuningResult
 from ...registry import NodeRegistry
-from .local_cv import LocalCVSpec, _validate_fold_membership, evaluate_training_cv
+from .local_cv import LocalCVSpec, evaluate_training_cv, validate_fold_membership
 
 
 def validate_search_membership(
@@ -44,7 +44,7 @@ def validate_search_membership(
                     "Each search fold needs at least two training and validation rows."
                 )
         return
-    _validate_fold_membership(frame, cv, target_column, problem_type, event_column)
+    validate_fold_membership(frame, cv, target_column, problem_type, event_column)
 
 
 def _json_value(value: Any) -> Any:
@@ -119,7 +119,7 @@ def tuning_evidence(artifact: LocalPipelineArtifact) -> dict[str, Any] | None:
     return evidence
 
 
-def _parameter_preview(value: Any, section: str, *, artifact_file: str = "tuning.json") -> str:
+def parameter_preview(value: Any, section: str, *, artifact_file: str = "tuning.json") -> str:
     """Keep parameter previews small while pointing to their complete artifact."""
     encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
     if len(encoded.encode("utf-8")) > 500:
@@ -149,13 +149,13 @@ def tuning_run_params(evidence: dict[str, Any]) -> dict[str, Any]:
     if "max_candidates" in modeling:
         params["tuning_max_candidates"] = modeling["max_candidates"]
     for name in ("strategy_params", "search_space"):
-        params[f"tuning_{name}"] = _parameter_preview(modeling.get(name, {}), f"modeling.{name}")
-    params["tuning_best_params"] = _parameter_preview(evidence["best_params"], "best_params")
+        params[f"tuning_{name}"] = parameter_preview(modeling.get(name, {}), f"modeling.{name}")
+    params["tuning_best_params"] = parameter_preview(evidence["best_params"], "best_params")
     for name, value in evidence["best_params"].items():
         key = f"tuning_best_params.{name}"
         # Long names remain available in the complete artifact and summary above.
         if len(key) <= 250:
-            params[key] = _parameter_preview(value, f"best_params.{name}")
+            params[key] = parameter_preview(value, f"best_params.{name}")
     return params
 
 

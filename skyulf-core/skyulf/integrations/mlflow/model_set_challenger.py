@@ -3,22 +3,24 @@
 from typing import Any
 from uuid import uuid4
 
+from skyulf.integrations.mlflow._client import make_registry_client, require_mlflow
+
 from .challenger import ChallengerLifecycle
 from .model_set import load_registered_model_set
 from .promotion import (
     AliasAdmission,
     AliasChangeReceipt,
     AliasConflictError,
-    _active_marker,
-    _admission,
-    _checked_challenger_event,
-    _commit_change,
-    _read_optional_alias,
+    active_marker,
     alias_resource_id,
+    checked_challenger_event,
+    commit_change,
     controlled_champion_version,
+    read_optional_alias,
+    validate_admission,
 )
-from .registry import ResolvedModel, _make_client, _require_mlflow
-from .rejection import _replayed_rejection
+from .registry import ResolvedModel
+from .rejection import replayed_rejection
 
 
 def _saved_baseline(resolved: ResolvedModel, expected: str | None, endpoints: dict) -> None:
@@ -51,12 +53,12 @@ def nominate_model_set(
 
 def verify_model_set_challenger(client: Any, resolved: ResolvedModel, *, required: bool) -> None:
     """Reject stale or manually altered contenders before quality checks or alias changes."""
-    current = _read_optional_alias(client, resolved.name, "challenger")
+    current = read_optional_alias(client, resolved.name, "challenger")
     if current is None and not required:
         return
     if current != resolved.version:
         raise AliasConflictError("Challenger alias differs from model-set candidate version.")
-    event = _checked_challenger_event(client, resolved.name, resolved.version)
+    event = checked_challenger_event(client, resolved.name, resolved.version)
     if event["k"] != "evaluation_error" and event["h"] != resolved.digest:
         raise AliasConflictError("Challenger receipt differs from the model-set digest.")
 
@@ -77,10 +79,10 @@ def reject_model_set(
     """
     if not isinstance(reason, str) or not reason.strip() or len(reason.encode("utf-8")) > 256:
         raise ValueError("Rejection reason must be nonempty text of at most 256 UTF-8 bytes.")
-    _admission(admission, registry_uri)
+    validate_admission(admission, registry_uri)
     endpoints = {"tracking_uri": tracking_uri, "registry_uri": registry_uri}
     _saved_baseline(resolved, expected_champion_version, endpoints)
-    client = _make_client(_require_mlflow(), tracking_uri, registry_uri)
+    client = make_registry_client(require_mlflow(), tracking_uri, registry_uri)
     with admission.hold(alias_resource_id(resolved.name)):
         current = controlled_champion_version(resolved.name, **endpoints)
         if current != expected_champion_version or current == resolved.version:
@@ -91,9 +93,9 @@ def reject_model_set(
 
 def _reject_current(client: Any, resolved: ResolvedModel, reason: str) -> AliasChangeReceipt:
     """Persist or replay the rejection using the common alias-event protocol."""
-    event = _checked_challenger_event(client, resolved.name, resolved.version)
+    event = checked_challenger_event(client, resolved.name, resolved.version)
     if event["k"] == "rejection":
-        return _replayed_rejection(
+        return replayed_rejection(
             client, resolved.name, resolved.version, event, str(resolved.digest), reason
         )
     receipt = AliasChangeReceipt(
@@ -104,9 +106,9 @@ def _reject_current(client: Any, resolved: ResolvedModel, reason: str) -> AliasC
         prior_version=resolved.version,
         new_version=resolved.version,
         comparison_sha256=resolved.digest,
-        parent_event_id=_active_marker(client, resolved.name, resolved.version, "challenger"),
+        parent_event_id=active_marker(client, resolved.name, resolved.version, "challenger"),
     )
-    _commit_change(
+    commit_change(
         client,
         receipt,
         [],

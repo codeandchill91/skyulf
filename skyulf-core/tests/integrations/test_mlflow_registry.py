@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import numpy as np
 import pandas as pd
@@ -49,7 +50,7 @@ def test_invalid_concrete_version_fails_before_mlflow_import(monkeypatch, versio
     """Invalid selectors must fail locally instead of reaching registry resolution."""
     from skyulf.integrations.mlflow import registry
 
-    monkeypatch.setattr(registry, "_require_mlflow", lambda: pytest.fail("MLflow import"))
+    monkeypatch.setattr(registry, "require_mlflow", lambda: pytest.fail("MLflow import"))
     with pytest.raises(ValueError, match="version"):
         resolve_model("model", version=version)
 
@@ -67,9 +68,23 @@ def test_invalid_registry_uri_fails_before_mlflow_import(monkeypatch, uri: Any) 
     """Malformed URI types must produce an actionable local validation error."""
     from skyulf.integrations.mlflow import registry
 
-    monkeypatch.setattr(registry, "_require_mlflow", lambda: pytest.fail("MLflow import"))
+    monkeypatch.setattr(registry, "require_mlflow", lambda: pytest.fail("MLflow import"))
     with pytest.raises(ValueError, match="registry_uri"):
         resolve_model("model", version="1", registry_uri=uri)
+
+
+def test_registry_dependency_sentinel_is_the_active_lookup(monkeypatch):
+    """The negative-path dependency patch must also intercept a valid request."""
+    from skyulf.integrations.mlflow import registry
+
+    dependency = Mock(side_effect=RuntimeError("dependency sentinel reached"))
+    monkeypatch.setattr(registry, "require_mlflow", dependency)
+    with pytest.raises(ValueError, match="version"):
+        registry.resolve_model("model", version="invalid")
+    dependency.assert_not_called()
+    with pytest.raises(RuntimeError, match="dependency sentinel reached"):
+        registry.resolve_model("model", version="1")
+    dependency.assert_called_once_with()
 
 
 def _config(tmp_path: Path, name: str) -> TrackingConfig:
@@ -228,7 +243,7 @@ def test_missing_model_and_permission_are_typed_failures(
             raise error
 
     monkeypatch.setattr(
-        "skyulf.integrations.mlflow.registry._make_client",
+        "skyulf.integrations.mlflow.registry.make_registry_client",
         lambda *args, **kwargs: ForbiddenClient(),
     )
     with pytest.raises(RegistryAccessError):
@@ -238,7 +253,7 @@ def test_missing_model_and_permission_are_typed_failures(
 def test_missing_mlflow_is_a_dependency_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """A missing optional package has a different remediation from registry access."""
     monkeypatch.setattr(
-        "skyulf.integrations.mlflow.registry._require_mlflow",
+        "skyulf.integrations.mlflow.registry.require_mlflow",
         lambda: (_ for _ in ()).throw(RegistryDependencyError("install mlflow")),
     )
     with pytest.raises(RegistryDependencyError):

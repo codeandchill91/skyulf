@@ -7,7 +7,18 @@
 > cases, three strict Bundle validations and 41 cloud contracts with zero skips.
 > Real training and saved notebook charts passed; final-wheel report replay also
 > passed. [Delivery121](121-sm36e-shap-delivery.md). SM-36d stays PARKED.
-> Next: SM-52 internal helper API cleanup, explicitly ordered before SM-37/38/39.
+> SM-52 is DONE (2026-09-30): shared helpers use directly named definitions;
+> compatibility aliases removed and active MLflow monkeypatch targets verified.
+> User scope correction (2026-09-30): acceptance, monitoring and cost tools are
+> removed and deferred to later work, including their dedicated code/tests and
+> acceptance-only CI settings. Static smoke remains; SM-40 is PARTIAL, SM-23a LATER.
+> [Delivery129](129-reference-followups-delivery.md) records the earlier checkpoint
+> and this removal; its earlier full-suite totals predate the removal.
+> Removal checks: 105 affected tests and 93 CLI generation tests passed;
+> all 2,370 remaining integration cases collect; Ruff, full Ty and CCN 10 passed.
+> Next: SM-37 (READY). [Plan128](128-reference-followups-plan.md).
+> [Review126](126-sm52-reference-review.md) maps the supplied dbml template to
+> current tasks and records additional acceptance proposals; quality gates stay parked.
 > Approved SM-36e follow-up (2026-09-30): separate real training tasks and leaf
 > SHAP reports are now in the Bundle template. Single/competition/multi-model
 > live training, saved notebook output audits and all three score jobs passed
@@ -242,10 +253,10 @@ on an existing candidate without retraining or reuploading the model.
 | SM-36h | Nested group cross-validation | SM-36f | DONE | Group/stratified-group policies preserve metadata and isolate inner/outer/final holdouts; split identifiers excluded from features. Final local 291 tests; frontend134; cloud16/16 +384 replay rows; independent persisted audit passed. Included in the nested-policy delivery commit. [Evidence and limits](101-sm36ghi-nested-policy-acceptance.md) |
 | SM-36i | Nested decision-threshold tuning | SM-36f | DONE | Binary training-only inner OOF thresholds, threshold-aware outer scoring, separate final threshold and persisted provenance/artifact parity. Final local 291 tests; frontend134; cloud16/16 +384 replay rows; independent persisted audit passed. Included in the nested-policy delivery commit. [Evidence and limits](101-sm36ghi-nested-policy-acceptance.md) |
 | SM-54 | Single-job candidate competition and one champion | SM-35, SM-36f | DONE | Single target only; shared snapshot/folds, candidate tuning/recipes/runs, deterministic CV winner, winner-only registration and existing lifecycle. Guided model-owned Python settings verified on both engines: 419 local + 511 final-wheel cloud tests and real single/competition/multi-model lifecycle/scoring acceptance. Signed delivery includes reports115-119. [Final evidence119](119-model-layout-live-delivery.md), [Delivery116](116-sm54-model-competition-delivery.md), [Plan115](115-sm54-model-competition-plan.md). |
-| SM-37 | Production identities and enforced writer ownership | SM-32, SM-33 | WAIT | Per-target run_as/permissions/hosts/roots; one lifecycle writer; scoring cannot move aliases; actual denial and lifecycle queue evidence; report93 additions: optional UC `registered_models`/`schemas` grants, experiment permissions, operator `CAN_MANAGE_RUN`, optional per-target host/catalog prompts; shared non-home `root_path` for syst/prod (today `~/<project>/<target>`, so the experiment lands in the deployer's home) ([report93](93-dbml-reference-recomparison.md)) |
+| SM-37 | Production identities and enforced writer ownership | SM-32, SM-33 | READY | Per-target run_as/permissions/hosts/roots; one lifecycle writer; scoring cannot move aliases; actual denial and lifecycle queue evidence; report93 additions: optional UC `registered_models`/`schemas` grants, experiment permissions, operator `CAN_MANAGE_RUN`, optional per-target host/catalog prompts; shared non-home `root_path` for syst/prod (today `~/<project>/<target>`, so the experiment lands in the deployer's home) ([report93](93-dbml-reference-recomparison.md)) |
 | SM-38 | Operational limits, retry/recovery and run summaries | SM-34, SM-37 | WAIT | Configurable timeouts/retries/notifications; source/model/count/no-op summaries; score-only recovery and no blind alias retry; report93 additions: email/webhook notifications, `health.rules` duration limits, task `timeout_seconds` ([report93](93-dbml-reference-recomparison.md)) |
 | SM-39 | Reproducible packaging and per-target compute | SM-33 | WAIT | Central compatible wheel/runtime pins, clean install/load, configurable policy/worker/cost settings and strict target validation; report93 additions: DAB `artifacts:` wheel build, one Skyulf/MLflow version variable, automatic Optuna dependencies, serverless `budget_policy_id` and job tags ([report93](93-dbml-reference-recomparison.md)) |
-| SM-40 | Generated-project tests and generic CI/CD | SM-37, SM-38, SM-39 | WAIT | Standalone project tests/build/validate and optional company adapter; explicit deployment approvals; no default chargeable PR runs; report93 additions: `ci` target, generated recipe/preflight tests and lint config, credential-free render of every init example checked against the Bundle schema in repository CI; per-project working directory for several generated projects in one repository ([report93](93-dbml-reference-recomparison.md)) |
+| SM-40 | Generated-project tests and generic CI/CD | SM-37, SM-38, SM-39 | PARTIAL | Standalone project tests/build/validate and optional company adapter; explicit deployment approvals; no default chargeable PR runs; report93 additions: `ci` target, generated recipe/preflight tests and lint config, credential-free render of every init example checked against the Bundle schema in repository CI; per-project working directory for several generated projects in one repository ([report93](93-dbml-reference-recomparison.md)); static smoke delivered locally; isolated CI runner removed/deferred by user, remaining CI/CD scope open ([report129](129-reference-followups-delivery.md)) |
 | SM-41 | CDF recovery, full refresh and generation retention | SM-31, SM-33, SM-38 | WAIT | Explicit CDF-expiry/source-change recovery; preserve active outputs/grants and rollback generations; update/delete policy never silently inferred |
 | SM-42 | Complete modular setup, scenario examples and operator guide | SM-30 through SM-41 | WAIT | Progressive setup sections with optional custom/multi-model scenarios; registry-backed parameters, editable config, execution preview and both-engine lifecycle/recovery examples; report93 additions: optional demo source setup so a first deploy runs end to end; generated README links pinned to the docs version matching the wheel ([report93](93-dbml-reference-recomparison.md)) |
 | SM-43a | Combined personal-workspace acceptance | SM-42 | WAIT | Representative real-data FE/models, both engines, manual/auto, retained challenger, new rows, no-op, failure/rollback/queue; exact run/resource evidence |
@@ -351,7 +362,7 @@ install, not code. Details: ([report94](94-integrations-code-quality-review.md))
 
 | Task | Status | Dependency / scope |
 | --- | --- | --- |
-| SM-52 | READY | None; declare the ~20 cross-module underscore helpers as one internal API (shared private helper module or explicit package-internal names); do it before SM-37/38/39 edit those modules; behavior-preserving |
+| SM-52 | DONE | Four shared modules and directly named domain helpers replace borrowed-private access without helper aliases; 2,149 integration tests passed, 256 skipped; active monkeypatch controls, optional imports, static gates and installed wheel verified. [Delivery129](129-reference-followups-delivery.md) |
 | SM-53 | WAIT | SM-36g, SM-36h, SM-36i, SM-52; split `local_retraining.py` (1525 lines) along snapshot read, split, fit and evidence boundaries; `promotion.py` stays as designed (report64) |
 
 Rules for every task touching integrations: 88 functions sit at CCN 9–10, so
@@ -484,7 +495,7 @@ See [the delivery contract](39-serving-and-feature-lookup-delivery-plan.md).
 | SM-19d | LATER | SM-19a; A/B/canary routing, endpoint update/rollback; batch rollout separately explicit |
 | SM-21a | LATER | SM-43a; UC feature lookup, keys and point-in-time correctness |
 | SM-21b | LATER | SM-21a/19a; optional online publication, freshness and serving lookup |
-| SM-23a | LATER | SM-43a; batch quality/drift/delayed-label reporting and optional dashboards; SM-38 covers basic operations first; report93 additions: reuse Core `DriftCalculator`, delayed-label performance join on record keys, optional `quality_monitors` InferenceLog and dashboard ([report93](93-dbml-reference-recomparison.md)) |
+| SM-23a | LATER | SM-43a; batch quality/drift/delayed-label reporting and optional dashboards; SM-38 covers basic operations first; report93 additions: reuse Core `DriftCalculator`, delayed-label performance join on record keys, optional `quality_monitors` InferenceLog and dashboard ([report93](93-dbml-reference-recomparison.md)); drift/freshness and job cost tools removed/deferred by user; monitoring, reporting and performance joins remain future work ([report129](129-reference-followups-delivery.md)) |
 | SM-23b | LATER | SM-19a; endpoint inference tables and version-aware model-performance monitoring |
 | SM-23c | LATER | SM-23a, SM-37; optional drift/performance-triggered retraining through the existing train job; gates unchanged, never approves ([report93](93-dbml-reference-recomparison.md)) |
 | SM-19c | PARKED | Continuous streaming remains outside the current user-approved implementation sequence |
@@ -545,7 +556,7 @@ SM-17/24c/20b remain later Spark enhancements after SM-43a. SM-18 stays parked.
 | SM-49 | Generated-project upgrade path | SM-39, SM-48 | WAIT | Regenerate from saved init answers into a temporary directory, reviewed diff, `migrate_workflow_config` and deployed-contract checks; same job IDs after upgrade; guide section; ([report93](93-dbml-reference-recomparison.md)) |
 | SM-50 | Explicit period backfill action | SM-41 | WAIT | Optional operator action on the score job reusing `publish_replace_period`; rows outside the period preserved, pinned model version, receipt, no-op replay; ([report93](93-dbml-reference-recomparison.md)) |
 | SM-51 | Production model/run retention | SM-37, SM-41 | WAIT | Preview then scoped delete of old registry versions/runs; champion, previous_champion, challenger and receipt-referenced versions protected; rollback still works; ([report93](93-dbml-reference-recomparison.md)) |
-| SM-52 | Integrations internal-helper boundary | — | READY | Cross-module underscore imports replaced by one declared internal API; no behavior change; integration suite, Ruff, ty 0.0.75 and Lizard pass; ([report94](94-integrations-code-quality-review.md)) |
+| SM-52 | Integrations internal-helper boundary | — | DONE | Shared primitives and directly named domain helpers without aliases; 2,149 passed, 256 skipped; Ruff, full CI Ty, Lizard and installed wheel passed. [Delivery129](129-reference-followups-delivery.md); original [report94](94-integrations-code-quality-review.md) |
 | SM-53 | Split `local_retraining.py` | SM-36g/h/i, SM-52 | WAIT | Cohesive modules for snapshot read, split, fit and evidence; public imports and saved evidence unchanged; complexity not increased; ([report94](94-integrations-code-quality-review.md)) |
 | SM-55 | Optional prediction columns on an existing source table | SM-41 | LATER | Low priority, after the current Bundle work: separate prediction table remains the default; optional keyed updates of prediction/provenance columns on the source. Validate unique keys, column ownership, stale-row checks, CDF feedback prevention, permissions, idempotency and rollback; consider a joined view for unified reading. Not implemented. |
 
@@ -584,6 +595,73 @@ are prerequisites for the first Bundle. SM-28b only
 wires their optional monthly schedule after the Bundle exists. SM-27 remains
 post-Bundle and independent. Endpoint, feature lookup and monitoring remain
 optional; broad Spark expansion follows the local Bundle.
+
+## SM-52 closure record - 2026-09-30
+
+The original checkpoint below is superseded by the direct-name follow-up in
+[delivery129](129-reference-followups-delivery.md). Historical private-name
+compatibility is not claimed after the requested removal of helper aliases.
+
+Inspected baseline: `bffb5bc4`; implementation is uncommitted. Four shared helper
+modules and declared domain entrypoints preserve existing workflow behavior,
+public exports and saved identities. User Python-style edits were retained.
+The complete 102-file integration suite passed 2,110 cases with 252 explicit
+environment/opt-in skips and zero failures/errors. Missing-MLflow subprocess
+checks, static gates and installed-wheel verification passed. Python 3.12.10,
+MLflow 3.16.1, Ty 0.0.75 and Core wheel 0.9.1 were used. Exact commands,
+negative-scenario coverage, baseline fixture repairs and skip breakdown are in
+[delivery127](127-sm52-internal-api-delivery.md). No new cloud run or deployment;
+SM-37 is READY. SM-36d and configurable data-quality gates remain PARKED.
+
+## Reference follow-ups and direct-name closure - 2026-09-30
+
+**Superseded scope:** The user subsequently deferred acceptance, monitoring and
+cost tools. Their scripts, dedicated library code/tests and acceptance-only CI
+settings were removed. Static smoke and SM-52 direct helper names remain.
+The following results describe the earlier checkpoint, not the reduced scope.
+
+Inspected baseline: `bffb5bc4`; changes remain uncommitted. Shared helpers now
+have one directly defined name; callers and tests use it. Active MLflow sentinel
+tests verify that patches are reached, and structural checks reject new helper
+aliases. Static smoke, run-isolated opt-in acceptance, optional job-attributed
+cost reporting and bounded drift/freshness reports are implemented locally.
+
+All 106 integration test files ran exactly once: 2,149 passed, 256 skipped,
+zero failures/errors. Separately, 94 real CLI generation tests and seven strict
+Bundle validations passed. Ruff check/format, full CI Ty, Lizard CCN 10 and an
+isolated installed-wheel check passed. Review findings on CI schedule overrides
+and smoke training-date validation were fixed and regression-covered.
+See [delivery129](129-reference-followups-delivery.md) for commands and limits.
+No live acceptance deploy/train/score or billing-system query was executed;
+SM-40 and SM-23a remain PARTIAL, and SM-37 remains the next READY task.
+
+## Supplied dbml reference review - 2026-09-30
+
+[Review126](126-sm52-reference-review.md) inspects the user's supplied local
+`dbml-mlops-template` copy against the current implementation and this queue.
+Production operations, CI/CD, serving load tests, feature lookup, resource
+isolation and monitoring already have owners; no duplicate tasks were added.
+
+The user subsequently deferred acceptance, cost and monitoring implementation.
+Keep these requirements for later tasks; only static smoke remains delivered.
+Historical implementation and the removal are recorded in
+[delivery129](129-reference-followups-delivery.md):
+
+- **SM-40:** distinguish credential-free/no-write smoke execution from opt-in
+  live acceptance; sampling alone is not a no-write guarantee. Isolate concurrent
+  CI runs by run identity, including runs by the same service principal.
+- **SM-23a with SM-38/39:** optional project/target/run-scoped infrastructure
+  cost reporting; system-table permission handling and list-price estimate
+  labeling. Cost tags and budget settings alone are not a report.
+- **SM-23a:** real timestamp/freshness semantics; failed or missing observations
+  cannot look healthy; explicit monitor types and optional slices; retain
+  Core's KS-statistic contract when translating reference thresholds.
+
+Current delivered slice: generated static smoke. Isolated CI acceptance, cost
+reporting and drift/freshness monitoring are deferred at the user's request;
+their added tools and implementation have been removed. SM-40 remains PARTIAL
+because smoke is retained; SM-23a returns to LATER. Configurable data-quality
+rejection gates remain PARKED by the existing user decision.
 
 ## SM-27/SM-29 closure record - 2026-09-24
 

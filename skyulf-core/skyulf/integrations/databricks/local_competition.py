@@ -49,7 +49,7 @@ def prepare_competition(
     total = 0
     for name, candidate in sorted(config["competition"]["candidates"].items()):
         pipeline = _bound_metric(candidate["pipeline"], config)
-        effective = training._candidate_config(
+        effective = training.candidate_config(
             spec,
             pipeline,
             engine=config["engine"],

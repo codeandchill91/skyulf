@@ -150,12 +150,12 @@ def _saved_candidate(workflow, monkeypatch, config, report: Any):
         comparison_sha256="b" * 64,
         holdout_key_sha256="c" * 64,
     )
-    monkeypatch.setattr(workflow, "_require_mlflow", lambda: object())
-    monkeypatch.setattr(workflow, "_make_client", lambda *args: object())
+    monkeypatch.setattr(workflow, "require_mlflow", lambda: object())
+    monkeypatch.setattr(workflow, "make_registry_client", lambda *args: object())
     monkeypatch.setattr(
         workflow,
-        "_load_evidence",
-        lambda *args, **kwargs: (report, workflow._training_spec(config), config["engine"], None),
+        "load_candidate_evidence",
+        lambda *args, **kwargs: (report, workflow.training_spec(config), config["engine"], None),
     )
     return candidate
 
@@ -189,7 +189,7 @@ def test_training_policy_and_scoring_selection_are_independent(
     prepare = Mock(return_value=object())
     score = Mock(return_value=SimpleNamespace(input_count=2))
     monkeypatch.setattr(workflow, "train_local_candidate", train)
-    monkeypatch.setattr(workflow, "_automatic_promotion", decision)
+    monkeypatch.setattr(workflow, "automatic_promotion", decision)
     monkeypatch.setattr(workflow, "controlled_champion_version", controlled)
     monkeypatch.setattr(workflow, "resolve_model", Mock(side_effect=AssertionError("raw alias")))
     monkeypatch.setattr(workflow, "prepare_local_workflow", prepare)
@@ -327,7 +327,7 @@ def test_legacy_model_selection_has_an_explicit_compatible_migration(legacy, exp
     """Old projects must keep their behavior while receiving a concrete migration warning."""
     workflow = _workflow()
     with pytest.warns(DeprecationWarning, match="model_selection_mode is deprecated"):
-        assert workflow._workflow_policies({"model_selection_mode": legacy}) == expected
+        assert workflow.workflow_policies({"model_selection_mode": legacy}) == expected
 
 
 def test_train_preserves_selected_polars_engine_and_never_promotes(monkeypatch, tmp_path):
@@ -335,7 +335,7 @@ def test_train_preserves_selected_polars_engine_and_never_promotes(monkeypatch, 
     workflow = _workflow()
     train = Mock(return_value=SimpleNamespace(model_version="2"))
     monkeypatch.setattr(workflow, "train_local_candidate", train)
-    monkeypatch.setattr(workflow, "_automatic_promotion", Mock(return_value=None))
+    monkeypatch.setattr(workflow, "automatic_promotion", Mock(return_value=None))
     monkeypatch.setattr(workflow, "resolve_model", Mock(return_value=SimpleNamespace(version="1")))
     result = workflow.run_action(
         object(),
@@ -362,7 +362,7 @@ def test_rolling_window_pins_current_delta_version_across_year_boundary():
     config.update(
         training_window_mode="rolling_calendar", window_timezone="UTC", training_version=None
     )
-    spec = workflow._resolve_training_spec(
+    spec = workflow.resolve_training_spec(
         spark, config, datetime(2027, 1, 3, 5, tzinfo=timezone(timedelta(hours=2)))
     )
     assert (spec.version, spec.start, spec.holdout_start, spec.cutoff) == (
@@ -385,22 +385,22 @@ def test_training_rejects_missing_source_history_and_invalid_lookback():
         training_window_mode="rolling_calendar", window_timezone="UTC", training_version=None
     )
     with pytest.raises(ValueError, match="monthly_lookback_months"):
-        workflow._resolve_training_spec(spark, config, datetime(2027, 1, 3, tzinfo=UTC))
+        workflow.resolve_training_spec(spark, config, datetime(2027, 1, 3, tzinfo=UTC))
     config["monthly_lookback_months"] = 3
     with pytest.raises(ValueError, match="version"):
-        workflow._resolve_training_spec(spark, config, datetime(2027, 1, 3, tzinfo=UTC))
+        workflow.resolve_training_spec(spark, config, datetime(2027, 1, 3, tzinfo=UTC))
 
 
 def test_train_compares_pinned_champion_without_activation(monkeypatch, tmp_path):
     """Candidate nomination must not activate a model or change the scorer's pin."""
     workflow = _workflow()
-    spec = workflow._training_spec(_config())
+    spec = workflow.training_spec(_config())
     train = Mock(return_value=SimpleNamespace(model_version="3"))
     champion = Mock(return_value=SimpleNamespace(version="2"))
-    monkeypatch.setattr(workflow, "_resolve_training_spec", lambda *args: spec)
+    monkeypatch.setattr(workflow, "resolve_training_spec", lambda *args: spec)
     monkeypatch.setattr(workflow, "resolve_model", champion)
     monkeypatch.setattr(workflow, "train_local_candidate", train)
-    monkeypatch.setattr(workflow, "_automatic_promotion", Mock(return_value=None))
+    monkeypatch.setattr(workflow, "automatic_promotion", Mock(return_value=None))
     config = _config()
     config["champion_version"] = None
     original_version = config["model_version"]
@@ -582,7 +582,7 @@ def test_bundle_records_error_during_final_comparison(monkeypatch, tmp_path):
     monkeypatch.setattr(workflow, "resolve_model", Mock(return_value=SimpleNamespace(version="1")))
     monkeypatch.setattr(workflow, "train_local_candidate", Mock(return_value=object()))
     monkeypatch.setattr(
-        workflow, "_automatic_promotion", Mock(side_effect=RuntimeError("recheck failed"))
+        workflow, "automatic_promotion", Mock(side_effect=RuntimeError("recheck failed"))
     )
     with pytest.raises(RuntimeError, match="recheck failed"):
         workflow.run_action(
@@ -624,7 +624,7 @@ def test_auto_champion_score_pins_resolved_version_before_target_selection(monke
     monkeypatch.setattr(workflow, "prepare_local_workflow", prepare)
     monkeypatch.setattr(workflow, "provision_prediction_table", provision)
     monkeypatch.setattr(workflow, "run_incremental_local_batch", Mock(return_value=object()))
-    monkeypatch.setattr(workflow, "_activate_prediction_view", Mock())
+    monkeypatch.setattr(workflow, "activate_prediction_view", Mock())
     spark = Mock()
     spark.catalog.tableExists.return_value = False
     workflow.run_action(spark, config, "score")
@@ -675,7 +675,7 @@ def test_full_rebuild_scores_new_generation_before_view_activation(monkeypatch):
         Mock(side_effect=lambda *args, **kwargs: events.append("score") or object()),
     )
     activate = Mock(side_effect=lambda *args: events.append("activate"))
-    monkeypatch.setattr(workflow, "_activate_prediction_view", activate)
+    monkeypatch.setattr(workflow, "activate_prediction_view", activate)
     spark = Mock()
     spark.catalog.tableExists.return_value = False
     workflow.run_action(spark, config, "score")
@@ -698,7 +698,7 @@ def test_full_rebuild_does_not_activate_a_failed_generation(monkeypatch):
         workflow, "run_incremental_local_batch", Mock(side_effect=RuntimeError("score failed"))
     )
     activate = Mock()
-    monkeypatch.setattr(workflow, "_activate_prediction_view", activate)
+    monkeypatch.setattr(workflow, "activate_prediction_view", activate)
     spark = Mock()
     spark.catalog.tableExists.return_value = False
     with pytest.raises(RuntimeError, match="score failed"):
@@ -733,7 +733,7 @@ def test_scoring_rejects_unsafe_model_change_selection(mode, version):
     config = _config()
     config.update(model_change_mode=mode, model_version=version)
     with pytest.raises(ValueError):
-        workflow._scoring_target(config)
+        workflow.scoring_target(config)
 
 
 def test_full_rebuild_refuses_existing_table_at_logical_view_name():
@@ -744,7 +744,7 @@ def test_full_rebuild_refuses_existing_table_at_logical_view_name():
     spark.catalog.getTable.return_value.tableType = "MANAGED"
     spark.table.return_value.limit.return_value.count.return_value = 2
     with pytest.raises(ValueError, match="view name"):
-        workflow._activate_prediction_view(
+        workflow.activate_prediction_view(
             spark, "workspace.test.predictions", "workspace.test.predictions_v2"
         )
     spark.sql.assert_not_called()
@@ -759,7 +759,7 @@ def test_full_rebuild_refuses_foreign_view_and_incompatible_schema():
     spark.table.return_value.limit.return_value.count.return_value = 2
     spark.sql.return_value.first.return_value = {"value": "other"}
     with pytest.raises(ValueError, match="Skyulf"):
-        workflow._activate_prediction_view(
+        workflow.activate_prediction_view(
             spark, "workspace.test.predictions", "workspace.test.predictions_v2"
         )
     spark.sql.reset_mock()
@@ -772,7 +772,7 @@ def test_full_rebuild_refuses_foreign_view_and_incompatible_schema():
         SimpleNamespace(schema=_one_column_schema("string")),
     ]
     with pytest.raises(ValueError, match="schema"):
-        workflow._activate_prediction_view(
+        workflow.activate_prediction_view(
             spark, "workspace.test.predictions", "workspace.test.predictions_v2"
         )
     assert all(not call.args[0].startswith("ALTER VIEW") for call in spark.sql.call_args_list)
@@ -792,10 +792,10 @@ def test_full_rebuild_creates_owned_view_then_preserves_grants_on_switch():
             "createtab_stmt": "CREATE VIEW workspace.test.predictions AS SELECT * FROM workspace.test.predictions_v1"
         },
     ]
-    workflow._activate_prediction_view(
+    workflow.activate_prediction_view(
         spark, "workspace.test.predictions", "workspace.test.predictions_v1"
     )
-    workflow._activate_prediction_view(
+    workflow.activate_prediction_view(
         spark, "workspace.test.predictions", "workspace.test.predictions_v2"
     )
     statements = [call.args[0] for call in spark.sql.call_args_list]
@@ -932,7 +932,7 @@ def test_score_does_not_require_labeled_training_table(monkeypatch):
         "properties": {"delta.enableChangeDataFeed": "true"}
     }
     monkeypatch.setattr(workflow, "_prediction_columns", Mock(return_value=()))
-    monkeypatch.setattr(workflow, "_check_existing_table", Mock())
+    monkeypatch.setattr(workflow, "check_existing_table", Mock())
     prepared = SimpleNamespace(preflight=SimpleNamespace(ready=True))
     assert workflow.provision_prediction_table(spark, config, prepared) is False
 
@@ -953,7 +953,7 @@ def test_score_replay_validates_existing_output_without_recounting_source(monkey
         "properties": {"delta.enableChangeDataFeed": "true"}
     }
     check_target = Mock()
-    monkeypatch.setattr(workflow, "_check_existing_table", check_target)
+    monkeypatch.setattr(workflow, "check_existing_table", check_target)
     prepared = SimpleNamespace(
         artifact=SimpleNamespace(manifest=SimpleNamespace(input_columns=("x",))),
         preflight=SimpleNamespace(
@@ -1078,7 +1078,7 @@ def test_full_rebuild_rejects_unrelated_or_changed_generation(monkeypatch, chang
     ]
     monkeypatch.setattr(workflow, "_prediction_columns", Mock(return_value=()))
     check_target = Mock()
-    monkeypatch.setattr(workflow, "_check_existing_table", check_target)
+    monkeypatch.setattr(workflow, "check_existing_table", check_target)
     prepared = SimpleNamespace(preflight=SimpleNamespace(ready=True, model_digest="a" * 64))
     with pytest.raises(ValueError, match="another model or workflow"):
         workflow.provision_prediction_table(spark, config, prepared)

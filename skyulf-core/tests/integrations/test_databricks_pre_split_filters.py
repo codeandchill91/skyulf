@@ -224,6 +224,7 @@ def test_empty_recipe_preserves_legacy_dataset_identity():
         "survivor_key_sha256",
         "training_evidence_sha256",
         "group_column",
+        "drop_missing_labels",
     ):
         old.pop(key)
     for key in ("start", "holdout_start", "cutoff", "result_cutoff"):
@@ -232,6 +233,7 @@ def test_empty_recipe_preserves_legacy_dataset_identity():
     saved = asdict(spec)
     saved.pop("pre_split_steps")
     saved.pop("group_column")
+    saved.pop("drop_missing_labels")
     saved["event_time_parsing"] = spec.event_time_parsing
     saved["result_time_parsing"] = spec.result_time_parsing
     restored = training.LocalTrainingSpec(**saved)
@@ -506,11 +508,11 @@ def test_automatic_promotion_replays_saved_filter_spec(monkeypatch, engine):
         comparison_sha256="b" * 64,
         holdout_key_sha256=expected.attrs["holdout_key_sha256"],
     )
-    monkeypatch.setattr(local_workflow, "_require_mlflow", lambda: object())
-    monkeypatch.setattr(local_workflow, "_make_client", lambda *args: object())
+    monkeypatch.setattr(local_workflow, "require_mlflow", lambda: object())
+    monkeypatch.setattr(local_workflow, "make_registry_client", lambda *args: object())
     monkeypatch.setattr(
         local_workflow,
-        "_load_evidence",
+        "load_candidate_evidence",
         lambda *args, **kwargs: (
             report,
             training.replace(restored, holdout_key_sha256=expected.attrs["holdout_key_sha256"]),
@@ -527,7 +529,7 @@ def test_automatic_promotion_replays_saved_filter_spec(monkeypatch, engine):
 
     monkeypatch.setattr(local_workflow, "stage_challenger", capture_stage)
     assert (
-        local_workflow._automatic_promotion(
+        local_workflow.automatic_promotion(
             object(), {"engine": engine}, restored, candidate, promote=False
         )
         is None
@@ -549,7 +551,7 @@ def test_automatic_replay_refuses_candidate_without_saved_receipt(monkeypatch):
         local_workflow, "read_training_snapshot", lambda *args: pytest.fail("source read")
     )
     with pytest.raises(ValueError, match="saved comparison|candidate result"):
-        local_workflow._automatic_promotion(
+        local_workflow.automatic_promotion(
             object(), {"engine": "pandas"}, spec, candidate, promote=False
         )
 

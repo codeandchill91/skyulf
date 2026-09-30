@@ -63,12 +63,12 @@ def _transport(monkeypatch, query, previous=None):
     metadata = __import__("json").dumps(previous) if previous else None
     monkeypatch.setattr(
         batch,
-        "_latest",
+        "latest_source_version",
         lambda spark, name: {"version": 0, "userMetadata": metadata if name == "target" else None},
     )
-    monkeypatch.setattr(batch, "_check_incremental_bootstrap", lambda *args: None)
-    monkeypatch.setattr(batch, "_select_incremental_rows", lambda *args: query)
-    monkeypatch.setattr(batch, "_bounded_frame", lambda *args: query)
+    monkeypatch.setattr(batch, "check_incremental_bootstrap", lambda *args: None)
+    monkeypatch.setattr(batch, "select_incremental_rows", lambda *args: query)
+    monkeypatch.setattr(batch, "bounded_frame", lambda *args: query)
     monkeypatch.setattr(batch, "_output_frame", lambda spark, frame, *args: frame)
     commit = Mock(return_value=1)
     monkeypatch.setattr(batch, "_commit_set", commit)

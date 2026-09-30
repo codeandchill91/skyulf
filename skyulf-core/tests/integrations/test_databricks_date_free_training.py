@@ -240,7 +240,7 @@ def test_available_null_target_fails_and_temporal_cutoffs_are_independent():
 
 def test_date_free_monthly_pins_full_latest_snapshot_and_invocation_result_cutoff():
     """Monthly execution dates must not create an implicit event window for random training."""
-    from skyulf.integrations.databricks.local_workflow import _resolve_training_spec
+    from skyulf.integrations.databricks.local_workflow import resolve_training_spec
 
     config = {
         "training_table": "workspace.test.labels",
@@ -255,13 +255,13 @@ def test_date_free_monthly_pins_full_latest_snapshot_and_invocation_result_cutof
         "version": 8
     }
     now = datetime(2026, 9, 25, 12, 34, tzinfo=UTC)
-    spec = _resolve_training_spec(spark, config, now)
+    spec = resolve_training_spec(spark, config, now)
     assert spec.version == 8 and spec.start is None and spec.event_column is None
     config.update(filter_unavailable_results=True, result_available_at_column="available")
-    spec = _resolve_training_spec(spark, config, now)
+    spec = resolve_training_spec(spark, config, now)
     assert spec.result_cutoff == now and spec.cutoff is None
     with pytest.raises(ValueError, match="monthly_lookback_months"):
-        _resolve_training_spec(spark, {**config, "monthly_lookback_months": 4}, now)
+        resolve_training_spec(spark, {**config, "monthly_lookback_months": 4}, now)
 
 
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
@@ -354,7 +354,9 @@ def test_random_candidate_approval_replays_saved_membership_after_config_changes
         candidate.run_id, {**saved, "holdout_key_sha256": "a" * 64}, "candidate_training_spec.json"
     )
     with pytest.raises(ValueError, match="Saved training snapshot"):
-        local_approval._load_evidence(client, "random_model", candidate.model_version, digest)
+        local_approval.load_candidate_evidence(
+            client, "random_model", candidate.model_version, digest
+        )
     client.log_dict(candidate.run_id, saved, "candidate_training_spec.json")
     config.update(
         training_table="workspace.changed.table",

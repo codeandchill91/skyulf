@@ -5,8 +5,10 @@ from typing import Any
 
 import polars as pl
 
+from skyulf.integrations.mlflow._client import make_registry_client, require_mlflow
+
 from ...inference.model_set import ModelSetArtifact
-from ..mlflow.registry import _make_client, _require_mlflow, resolve_model
+from ..mlflow.registry import resolve_model
 from ..mlflow.validation import (
     ModelComparisonReport,
     compare_registered_local_models,
@@ -75,7 +77,9 @@ def _evaluate_component(
     **endpoints: Any,
 ) -> dict:
     """Compare one candidate against its counterpart from the pinned champion set."""
-    client = _make_client(_require_mlflow(), endpoints["tracking_uri"], endpoints["registry_uri"])
+    client = make_registry_client(
+        require_mlflow(), endpoints["tracking_uri"], endpoints["registry_uri"]
+    )
     ref = component.reference
     report, spec, engine, evidence = load_candidate_evidence(
         client, ref.name, ref.version, digest, registry_uri=endpoints["registry_uri"]

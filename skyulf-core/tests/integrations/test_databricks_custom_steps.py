@@ -121,7 +121,10 @@ def _configure(root, *, pre_split, preprocessing):
     (root / "scoring.py").write_text(
         '"""Keep this fixture focused on fitted custom preprocessing."""\n\n'
         'def build_scoring():\n    """Opt out of prediction eligibility rules."""\n'
-        "    return None\n",
+        "    return None\n\n"
+        "build_model_rules = build_scoring\n\n"
+        'def build_combined_rules():\n    """Disable composition for this fixture."""\n'
+        "    return []\n",
         encoding="utf-8",
     )
     recipes = [

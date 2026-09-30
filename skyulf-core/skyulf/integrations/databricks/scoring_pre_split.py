@@ -43,9 +43,11 @@ def resolve_pre_split_scoring(
 
 def _step_columns(step: dict[str, Any], target: str) -> list[str]:
     """Use the existing admission rules so scoring cannot admit learned pre-split steps."""
-    from .local_retraining import _validate_pre_split_step  # noqa: PLC0415 - avoid import cycle
+    from .local_retraining import (  # noqa: PLC0415 - preserve lazy dependency boundary
+        validate_pre_split_step,
+    )
 
-    return list(_validate_pre_split_step(step, 0, target, ()))
+    return list(validate_pre_split_step(step, 0, target, ()))
 
 
 def _select_steps(

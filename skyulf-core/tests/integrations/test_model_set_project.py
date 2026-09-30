@@ -82,7 +82,7 @@ def test_source_correction_policy_reaches_the_score_notebook(
     _enable(tmp_path, source_change_policy="rebuild_on_change")
     artifact, model, _ = _saved_set(tmp_path / "artifact")
     values["score_model_version"] = "1"
-    monkeypatch.setattr(module, "_validate_job_parameters", lambda values: None)
+    monkeypatch.setattr(module, "validate_job_parameters", lambda values: None)
     monkeypatch.setattr(module, "resolve_model", lambda *args, **kwargs: model)
     monkeypatch.setattr(model_set, "load_registered_model_set", lambda *args, **kwargs: artifact)
     batch = Mock(return_value=model_set_batch.ModelSetBatchResult(1, 2, 2, 0, {}, False))
@@ -161,10 +161,12 @@ def test_approval_frame_pins_integer_version_and_saved_columns(monkeypatch):
             record_key_columns=("id",),
         )
     )
-    monkeypatch.setattr(module, "_latest", lambda *args: {"version": 17, "userMetadata": None})
+    monkeypatch.setattr(
+        module, "latest_source_version", lambda *args: {"version": 17, "userMetadata": None}
+    )
     bounded = Mock(return_value="frame")
-    monkeypatch.setattr(module, "_bounded_frame", bounded)
-    result = module._approval_frame(
+    monkeypatch.setattr(module, "bounded_frame", bounded)
+    result = module.approval_frame(
         spark, artifact, {"score_source_table": "a.b.source", "max_rows": 80, "max_input_mb": 4}
     )
     spark.read.option.assert_called_once_with("versionAsOf", 17)

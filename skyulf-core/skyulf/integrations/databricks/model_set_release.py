@@ -6,12 +6,14 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from skyulf.integrations.mlflow._client import make_registry_client, require_mlflow
+
 from ...inference.model_set import ModelSetArtifact
 from ..mlflow.model_set import load_registered_model_set
 from ..mlflow.model_set_challenger import nominate_model_set
 from ..mlflow.model_set_lifecycle import approve_model_set
 from ..mlflow.promotion import ExclusiveAliasWriterAdmission, controlled_champion_version
-from ..mlflow.registry import ResolvedModel, _make_client, _require_mlflow, resolve_model
+from ..mlflow.registry import ResolvedModel, resolve_model
 from ._contracts import input_budget_bytes
 from .model_set_quality import evaluate_model_set_quality
 
@@ -27,7 +29,7 @@ class ModelSetQualityError(ValueError):
         )
 
 
-def _champion_artifact(name: str, version: str | None, endpoints: dict) -> ModelSetArtifact | None:
+def champion_artifact(name: str, version: str | None, endpoints: dict) -> ModelSetArtifact | None:
     """Load the one captured set version instead of resolving component champion aliases."""
     if version is None:
         return None
@@ -40,7 +42,7 @@ def pin_model_set_baseline(
     """Pin one champion set before training and require compatible component identities."""
     _automatic_thresholds(settings, configs)
     version = controlled_champion_version(settings["model_name"], **endpoints)
-    champion = _champion_artifact(settings["model_name"], version, endpoints)
+    champion = champion_artifact(settings["model_name"], version, endpoints)
     previous = {c.branch: c.reference for c in champion.manifest.components} if champion else {}
     if champion and set(previous) != set(configs):
         raise ValueError(
@@ -64,11 +66,11 @@ def _automatic_thresholds(settings: dict, configs: dict[str, dict]) -> None:
             )
 
 
-def _persist_decision(
-    resolved: ResolvedModel, decision: dict, policy: str, endpoints: dict
-) -> None:
+def persist_decision(resolved: ResolvedModel, decision: dict, policy: str, endpoints: dict) -> None:
     """Keep inspectable passing or failed decisions without using tags as metric evidence."""
-    client = _make_client(_require_mlflow(), endpoints["tracking_uri"], endpoints["registry_uri"])
+    client = make_registry_client(
+        require_mlflow(), endpoints["tracking_uri"], endpoints["registry_uri"]
+    )
     run_id = client.get_model_version(resolved.name, resolved.version).run_id
     if not run_id:
         raise ValueError("Model-set quality decision requires a producing run.")
@@ -103,11 +105,14 @@ def approve_project_model_set(
     policy: str,
 ) -> Any:
     """Run functional and saved holdout checks inside the common alias admission."""
-    from .model_set_project import _approval_frame, _endpoints  # noqa: PLC0415
+    from .model_set_project import (  # noqa: PLC0415 - lazy dependency  # noqa: PLC0415 - lazy dependency
+        approval_frame,
+        project_endpoints,
+    )
 
-    endpoints = _endpoints(config)
+    endpoints = project_endpoints(config)
     artifact = load_registered_model_set(resolved, **endpoints)
-    champion = _champion_artifact(resolved.name, expected_champion_version, endpoints)
+    champion = champion_artifact(resolved.name, expected_champion_version, endpoints)
 
     def validate(saved: ModelSetArtifact) -> dict:
         """Reject failed gates before the alias writer records any transition intent."""
@@ -120,14 +125,14 @@ def approve_project_model_set(
             max_bytes=input_budget_bytes(config.get("max_input_mb")),
             **endpoints,
         )
-        _persist_decision(resolved, decision, policy, endpoints)
+        persist_decision(resolved, decision, policy, endpoints)
         if not decision["passed"]:
             raise ModelSetQualityError(decision)
         return decision
 
     return approve_model_set(
         resolved,
-        _approval_frame(spark, artifact, config),
+        approval_frame(spark, artifact, config),
         expected_champion_version=expected_champion_version,
         admission=ExclusiveAliasWriterAdmission(),
         max_rows=config["max_rows"],
@@ -141,13 +146,15 @@ def automatic_model_set_release(
     spark: Any, candidate: ResolvedModel, settings: dict, config: dict
 ) -> dict:
     """Nominate every complete set and automatically activate it only when configured."""
-    from .model_set_project import _endpoints  # noqa: PLC0415
+    from .model_set_project import (  # noqa: PLC0415 - lazy dependency
+        project_endpoints,
+    )
 
     nominate_model_set(
         candidate,
         expected_champion_version=settings["expected_champion_version"],
         admission=ExclusiveAliasWriterAdmission(),
-        **_endpoints(config),
+        **project_endpoints(config),
     )
     if settings.get("promotion_policy", "manual_approval") != "automatic":
         return {"promotion_policy": "manual_approval", "alias_change": None}

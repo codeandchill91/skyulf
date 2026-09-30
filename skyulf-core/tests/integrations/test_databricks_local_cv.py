@@ -191,7 +191,7 @@ def test_workflow_rejects_cv_before_monthly_source_or_registry_access(monkeypatc
     from skyulf.integrations.databricks import local_workflow
 
     history = Mock(side_effect=AssertionError("source history accessed"))
-    monkeypatch.setattr(local_workflow, "_resolve_training_spec", history)
+    monkeypatch.setattr(local_workflow, "resolve_training_spec", history)
     with pytest.raises(ValueError, match="classification"):
         local_workflow.run_action(
             None,

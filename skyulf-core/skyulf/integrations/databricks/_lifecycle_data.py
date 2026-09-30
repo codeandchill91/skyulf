@@ -8,11 +8,11 @@ from typing import Any
 import pandas as pd
 
 from . import local_retraining as training
-from ._lifecycle_state import _PhaseStore
+from ._lifecycle_state import PhaseStore
 from .local_cv import LocalCVSpec
 
 
-def save_frame(store: _PhaseStore, name: str, frame: pd.DataFrame) -> dict[str, Any]:
+def save_frame(store: PhaseStore, name: str, frame: pd.DataFrame) -> dict[str, Any]:
     """Log Parquet and its digest; keep pandas row-membership attributes in the receipt."""
     with TemporaryDirectory(prefix="skyulf-stage-data-") as directory:
         path = Path(directory) / f"{name}.parquet"
@@ -22,7 +22,7 @@ def save_frame(store: _PhaseStore, name: str, frame: pd.DataFrame) -> dict[str, 
     return {"sha256": digest, "rows": len(frame), "attrs": frame.attrs}
 
 
-def load_frame(store: _PhaseStore, name: str, evidence: dict[str, Any]) -> pd.DataFrame:
+def load_frame(store: PhaseStore, name: str, evidence: dict[str, Any]) -> pd.DataFrame:
     """Check saved bytes before reading a partition, then restore verified metadata."""
     with TemporaryDirectory(prefix="skyulf-stage-read-") as directory:
         path = Path(
@@ -39,7 +39,7 @@ def load_frame(store: _PhaseStore, name: str, evidence: dict[str, Any]) -> pd.Da
     return frame
 
 
-def load_source(spark: Any, store: _PhaseStore, spec: training.LocalTrainingSpec) -> dict[str, Any]:
+def load_source(spark: Any, store: PhaseStore, spec: training.LocalTrainingSpec) -> dict[str, Any]:
     """Materialize the bounded pinned source before any splitting or fitting."""
     frame = training.read_training_snapshot(spark, spec)
     return {
@@ -50,7 +50,7 @@ def load_source(spark: Any, store: _PhaseStore, spec: training.LocalTrainingSpec
     }
 
 
-def prepare_dataset(store: _PhaseStore, spec: training.LocalTrainingSpec) -> dict[str, Any]:
+def prepare_dataset(store: PhaseStore, spec: training.LocalTrainingSpec) -> dict[str, Any]:
     """Apply fixed eligibility/cleanup and persist raw training/holdout partitions."""
     config = store.request["config"]
     cv = LocalCVSpec.from_workflow(config)
@@ -73,7 +73,7 @@ def prepare_dataset(store: _PhaseStore, spec: training.LocalTrainingSpec) -> dic
 
 
 def training_partitions(
-    store: _PhaseStore,
+    store: PhaseStore,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, int]:
     """Load all verified partitions without repeating source reads or split work."""
     prepared = store.receipt("prepare_dataset")["output"]

@@ -222,7 +222,7 @@ def fold_evidence(train: Any, test: Any, metadata: dict[str, np.ndarray]) -> dic
     return evidence
 
 
-def _validate_classes(y: np.ndarray, train: Any, test: Any, problem_type: str) -> None:
+def validate_class_membership(y: np.ndarray, train: Any, test: Any, problem_type: str) -> None:
     """Require complete class coverage before any candidate can win on partial evidence."""
     if problem_type != "classification":
         return
@@ -265,7 +265,7 @@ def policy_splitter(
     for train, test in parts:
         if len(train) < 2 or len(test) < 2:
             raise ValueError("Each CV fold requires at least two training and validation rows.")
-        _validate_classes(labels, train, test, problem_type)
+        validate_class_membership(labels, train, test, problem_type)
         evidence.append(fold_evidence(train, test, metadata))
     return FrozenSplit(parts, evidence)
 

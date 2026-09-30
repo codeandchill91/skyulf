@@ -29,14 +29,16 @@ def fit_competition(
     request = store.request
     config = request["config"]
     cv = LocalCVSpec.from_workflow(config)
-    partitions = prepared_data or training._read_training_partitions(
+    partitions = prepared_data or training.read_training_partitions(
         spark, spec, temporal_cv=cv.temporal, engine=config["engine"]
     )
     rows: list[dict[str, Any]] = []
     best = None
     candidates = request["competition"]["candidates"]
     for name, recipe in sorted(candidates.items()):
-        fitted, row = _fit_one(spark, store, spec, partitions, directory / name, name, recipe)
+        fitted, row = fit_training_pipeline(
+            spark, store, spec, partitions, directory / name, name, recipe
+        )
         rows.append(row)
         store.log("competition/progress.json", {"completed": rows, "requested": list(candidates)})
         winner = choose_winner(rows, {item["candidate"] for item in rows})["winner"]
@@ -65,7 +67,7 @@ def _restore_source(pipeline: dict[str, Any]) -> None:
             factory()
 
 
-def _fit_one(
+def fit_training_pipeline(
     spark: Any,
     store: Any,
     spec: training.LocalTrainingSpec,
@@ -85,7 +87,7 @@ def _fit_one(
     child = TrackingRun(client=store.client, run_id=created.info.run_id, enabled=True)
     try:
         _restore_source(recipe["pipeline"])
-        fitted = training._fit_candidate(
+        fitted = training.fit_candidate(
             spark,
             spec,
             recipe["pipeline"],
@@ -98,14 +100,14 @@ def _fit_one(
             prepared_data=deepcopy(partitions),
             evaluate_cv=False,
         )
-        training._log_fitted_candidate(
+        training.log_fitted_candidate(
             child,
             fitted,
             recipe["pipeline"],
             engine=config["engine"],
             risk_category=config.get("risk_category"),
         )
-        model_uri = training._log_local_model(
+        model_uri = training.log_local_model(
             path, run_id=created.info.run_id, tracking_uri=config["tracking_uri"]
         )
         frame = pl.from_pandas(partitions[1]) if config["engine"] == "polars" else partitions[1]

@@ -24,13 +24,13 @@ from .local_cv import LocalCVSpec
 from .local_retraining import (
     LocalCandidateResult,
     LocalTrainingSpec,
-    _candidate_config,
-    _training_spec_payload,
-    _validate_cv_holdout_policy,
+    candidate_config,
     train_local_candidate,
+    training_spec_payload,
+    validate_cv_holdout_policy,
 )
-from .local_workflow import _resolve_training_spec, _training_settings, _training_spec
-from .prediction_output import _TABLE_NAME
+from .local_workflow import resolve_training_spec, training_settings, training_spec
+from .prediction_output import TABLE_NAME_PATTERN
 from .workflow_config import validate_workflow_config
 
 
@@ -112,9 +112,11 @@ def _validate_shared(branches: tuple[TrainingBranch, ...]) -> None:
 def _validate_branch(branch: TrainingBranch) -> None:
     """Run all single-candidate checks without opening readers or creating runs."""
     _branch_name(branch.name)
-    if not isinstance(branch.model_name, str) or not _TABLE_NAME.fullmatch(branch.model_name):
+    if not isinstance(branch.model_name, str) or not TABLE_NAME_PATTERN.fullmatch(
+        branch.model_name
+    ):
         raise ValueError("Branch model_name must be a resolved three-part Unity Catalog name.")
-    _candidate_config(
+    candidate_config(
         branch.spec,
         branch.pipeline,
         engine=branch.engine,
@@ -126,7 +128,7 @@ def _validate_branch(branch: TrainingBranch) -> None:
         quality_gates=branch.quality_gates,
         risk_category=branch.risk_category,
     )
-    _validate_cv_holdout_policy(branch.spec, branch.cv)
+    validate_cv_holdout_policy(branch.spec, branch.cv)
     if not branch.spec.drop_missing_labels:
         raise ValueError("Training branches require drop_missing_labels=True.")
     for field in ("tracking_uri", "registry_uri"):
@@ -152,7 +154,7 @@ def _from_config(name: str, config: dict[str, Any], now: datetime) -> TrainingBr
     """Translate validated workflow policy without resolving any remote identities."""
     return TrainingBranch(
         name=name,
-        spec=replace(_training_spec(_training_settings(config, now)), drop_missing_labels=True),
+        spec=replace(training_spec(training_settings(config, now)), drop_missing_labels=True),
         pipeline=deepcopy(config["pipeline"]),
         model_name=config["model_name"],
         metric=config["metric"],
@@ -255,7 +257,7 @@ def prepare_training_branches(
         tuple(_from_config(name, config, instant) for name, config in checked.items())
     )
     branch_training_payload(branches)
-    resolved = _resolve_training_spec(spark, checked[branches[0].name], instant)
+    resolved = resolve_training_spec(spark, checked[branches[0].name], instant)
     pinned = tuple(
         replace(branch, spec=replace(branch.spec, version=resolved.version)) for branch in branches
     )
@@ -283,7 +285,7 @@ def _set_champion_pins(
 def _branch_payload(branch: TrainingBranch) -> dict[str, Any]:
     """Serialize every branch decision, including concrete UTC selection boundaries."""
     payload = asdict(branch)
-    payload["spec"] = _training_spec_payload(branch.spec, branch.engine)
+    payload["spec"] = training_spec_payload(branch.spec, branch.engine)
     payload["spec"].pop("engine")
     return payload
 
@@ -368,7 +370,7 @@ def _validate_run_endpoints(
                 raise ValueError(f"Branch {branch.name} {field} differs from its saved endpoint.")
 
 
-def _log_progress(
+def log_progress(
     run: TrackingRun,
     completed: dict[str, LocalCandidateResult],
     *,
@@ -388,7 +390,7 @@ def _log_progress(
     run.set_tags({"skyulf.training.status": status})
 
 
-def _train_branch(
+def train_branch(
     spark: Any,
     branch: TrainingBranch,
     *,
@@ -461,10 +463,10 @@ def train_local_branches(
         run.log_config(plan, artifact_file="branch_training_plan.json")
         run.set_tags({"skyulf.training.plan_sha256": digest})
         completed: dict[str, LocalCandidateResult] = {}
-        _log_progress(run, completed, status="running")
+        log_progress(run, completed, status="running")
         for branch in checked:
             try:
-                completed[branch.name] = _train_branch(
+                completed[branch.name] = train_branch(
                     spark,
                     branch,
                     run=run,
@@ -474,14 +476,14 @@ def train_local_branches(
                     registry_uri=registry_uri,
                     experiment_name=experiment_name,
                 )
-                _log_progress(run, completed, status="running")
+                log_progress(run, completed, status="running")
             except BaseException:
                 with suppress(Exception):
-                    _log_progress(run, completed, status="failed", failed_branch=branch.name)
+                    log_progress(run, completed, status="failed", failed_branch=branch.name)
                 raise
         result = BranchTrainingResult(
             run.run_id, checked[0].spec.table, checked[0].spec.version, completed, digest
         )
         run.client.log_dict(run.run_id, asdict(result), "branch_training_result.json")
-        _log_progress(run, completed, status="complete")
+        log_progress(run, completed, status="complete")
     return result

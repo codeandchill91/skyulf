@@ -7,11 +7,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from ..mlflow.registry import _make_client, _require_mlflow
+from skyulf.integrations.mlflow._client import make_registry_client, require_mlflow
+
 from ..mlflow.tracking import TrackingRun
 from .local_training_evidence import evidence_digest
 
-_PREDECESSORS = {
+PHASE_PREDECESSORS = {
     "load_data": "prepare",
     "prepare_dataset": "load_data",
     "select_best_model": "train",
@@ -64,13 +65,13 @@ class LifecyclePhaseResult:
     output: dict[str, Any]
 
 
-class _PhaseStore:
+class PhaseStore:
     """Read and write explicit client artifacts without a fluent active MLflow run."""
 
     def __init__(self, tracking_uri: str, context: LifecycleContext) -> None:
         """Keep the client store and validated invocation fixed across each operation."""
         self.context = context
-        self.client = _make_client(_require_mlflow(), tracking_uri, None)
+        self.client = make_registry_client(require_mlflow(), tracking_uri, None)
         self.run_id = ""
         self.request_digest = ""
         self.request: dict[str, Any] = {}
@@ -181,7 +182,7 @@ class _PhaseStore:
             overrides = {"train": "prepare_dataset", "evaluate_register": "select_best_model"}
             if phase in overrides:
                 return overrides[phase]
-        return _PREDECESSORS.get(phase)
+        return PHASE_PREDECESSORS.get(phase)
 
     def reference(self, receipt: dict[str, Any]) -> dict[str, str]:
         """Expose only durable identity and digest strings to task values."""

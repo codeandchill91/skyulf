@@ -85,7 +85,7 @@ def test_schema_offers_multi_model_handoff():
 
 def test_initialization_saves_parent_handoff_separately(workflow_config, tracked):
     """A frozen parent policy must survive independently of disabled component handoff."""
-    from skyulf.integrations.databricks._lifecycle_state import LifecycleContext, _PhaseStore
+    from skyulf.integrations.databricks._lifecycle_state import LifecycleContext, PhaseStore
     from skyulf.integrations.databricks.branch_tasks import initialize_branch_training
 
     uri, _ = tracked
@@ -101,7 +101,7 @@ def test_initialization_saves_parent_handoff_separately(workflow_config, tracked
         action="approve",
         score_handoff="after_alias_change",
     )
-    store = _PhaseStore(uri, context)
+    store = PhaseStore(uri, context)
     store.bind(initialized.reference)
     assert store.request["score_handoff"] == "after_alias_change"
     assert store.request["config"]["score_handoff"] == "disabled"

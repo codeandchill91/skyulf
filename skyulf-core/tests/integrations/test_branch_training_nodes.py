@@ -73,7 +73,7 @@ def test_branch_failure_finalizes_parent_without_partial_set(workflow_config, tr
         """Represent a failure before a branch has a complete registered candidate."""
         raise ValueError("deliberate failure")
 
-    monkeypatch.setattr(branch_tasks, "_train_branch", fail)
+    monkeypatch.setattr(branch_tasks, "train_branch", fail)
     with pytest.raises(ValueError, match="deliberate"):
         branch_tasks.run_branch_training(
             None,
@@ -127,7 +127,7 @@ def test_branch_operator_uses_frozen_configuration(workflow_config, tracked, mon
     configs["amount"]["score_source_table"] = "changed.table.name"
     operator = Mock(return_value={"action": action})
     monkeypatch.setattr(model_set_project, "run_model_set_operator", operator)
-    monkeypatch.setattr(job_runtime, "_operator_options", lambda *args: {})
+    monkeypatch.setattr(job_runtime, "operator_options", lambda *args: {})
     result = model_set_stages.run_model_set_phase(
         None,
         phase="model_decision",

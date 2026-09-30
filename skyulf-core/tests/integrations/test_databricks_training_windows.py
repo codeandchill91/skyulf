@@ -7,16 +7,16 @@ import pandas as pd
 import pytest
 
 from skyulf.integrations.databricks.local_retraining import split_labeled_snapshot
-from skyulf.integrations.databricks.local_workflow import _resolve_training_spec, _training_spec
+from skyulf.integrations.databricks.local_workflow import resolve_training_spec, training_spec
 
 
 @pytest.mark.parametrize("version", [None, 0, 7])
 def test_train_resolves_latest_only_when_version_is_unset(version):
     """A trigger must never override an explicit snapshot or require a second action."""
-    from skyulf.integrations.databricks.local_workflow import _resolve_training_spec
+    from skyulf.integrations.databricks.local_workflow import resolve_training_spec
 
     spark = _spark()
-    spec = _resolve_training_spec(
+    spec = resolve_training_spec(
         spark, _config(training_version=version), datetime(2026, 9, 26, tzinfo=UTC)
     )
     assert spec.version == (9 if version is None else version)
@@ -25,9 +25,9 @@ def test_train_resolves_latest_only_when_version_is_unset(version):
 
 def test_train_preserves_explicit_result_cutoff():
     """An explicit maturity cutoff must survive both manual and cron invocations."""
-    from skyulf.integrations.databricks.local_workflow import _resolve_training_spec
+    from skyulf.integrations.databricks.local_workflow import resolve_training_spec
 
-    spec = _resolve_training_spec(
+    spec = resolve_training_spec(
         _spark(),
         _config(
             training_version=None,
@@ -46,7 +46,7 @@ def test_invalid_explicit_version_never_falls_back_to_latest(version):
     """Bad pins must fail before history lookup instead of selecting unintended data."""
     spark = _spark()
     with pytest.raises(ValueError, match="training_version"):
-        _resolve_training_spec(spark, _config(training_version=version), datetime.now(UTC))
+        resolve_training_spec(spark, _config(training_version=version), datetime.now(UTC))
     spark.sql.assert_not_called()
 
 
@@ -57,8 +57,8 @@ def test_latest_is_resolved_again_for_each_new_invocation():
     history.side_effect = [{"version": 9}, {"version": 10}]
     config = _config(training_version=None)
     now = datetime(2026, 9, 26, tzinfo=UTC)
-    first = _resolve_training_spec(spark, config, now)
-    second = _resolve_training_spec(spark, config, now)
+    first = resolve_training_spec(spark, config, now)
+    second = resolve_training_spec(spark, config, now)
     assert (first.version, second.version) == (9, 10)
     assert config["training_version"] is None
 
@@ -100,7 +100,7 @@ def test_rolling_calendar_uses_named_zone_and_includes_holdout_month(strategy):
         window_timezone="Europe/Vilnius",
     )
     # Already January in Vilnius, still December in UTC.
-    spec = _resolve_training_spec(_spark(), config, datetime(2026, 12, 31, 22, 30, tzinfo=UTC))
+    spec = resolve_training_spec(_spark(), config, datetime(2026, 12, 31, 22, 30, tzinfo=UTC))
     assert spec.start is not None and spec.cutoff is not None
     assert spec.start.isoformat() == "2026-09-01T00:00:00+03:00"
     assert spec.cutoff.isoformat() == "2027-01-01T00:00:00+02:00"
@@ -120,7 +120,7 @@ def test_random_split_can_select_a_fixed_event_window():
         start="2026-01-01T00:00:00+00:00",
         cutoff="2026-02-01T00:00:00+00:00",
     )
-    spec = _training_spec(config)
+    spec = training_spec(config)
     frame = pd.DataFrame(
         {
             "id": range(20),
@@ -132,8 +132,8 @@ def test_random_split_can_select_a_fixed_event_window():
     train, holdout, _ = split_labeled_snapshot(frame, spec)
     assert len(train) == 16 and len(holdout) == 4
     assert set(train.x).isdisjoint(holdout.x)
-    first = _resolve_training_spec(_spark(), config, datetime(2026, 3, 15, tzinfo=UTC))
-    later = _resolve_training_spec(_spark(), config, datetime(2026, 4, 20, tzinfo=UTC))
+    first = resolve_training_spec(_spark(), config, datetime(2026, 3, 15, tzinfo=UTC))
+    later = resolve_training_spec(_spark(), config, datetime(2026, 4, 20, tzinfo=UTC))
     assert first.start == later.start == spec.start
     assert first.cutoff == later.cutoff == spec.cutoff
 
@@ -161,7 +161,7 @@ def test_invalid_selection_policy_fails_before_history(changes):
     """A monthly job cannot invent source dates, silently shift calendars or ignore typos."""
     spark = _spark()
     with pytest.raises(ValueError):
-        _resolve_training_spec(spark, _config(**changes), datetime(2026, 9, 25, tzinfo=UTC))
+        resolve_training_spec(spark, _config(**changes), datetime(2026, 9, 25, tzinfo=UTC))
     spark.sql.assert_not_called()
 
 
@@ -190,7 +190,7 @@ def test_invalid_selection_policy_fails_before_history(changes):
 )
 def test_two_month_holdout_preserves_calendar_boundaries(instant, start, holdout, cutoff):
     """Holdout months belong to total lookback across leap years, DST and local rollover."""
-    spec = _resolve_training_spec(
+    spec = resolve_training_spec(
         _spark(),
         _config(
             training_window_mode="rolling_calendar",
@@ -213,7 +213,7 @@ def test_invalid_rolling_holdout_fails_before_source_history(value):
     """Temporal holdout requires an exact integer leaving at least one training month."""
     spark = _spark()
     with pytest.raises(ValueError, match="holdout_months"):
-        _resolve_training_spec(
+        resolve_training_spec(
             spark,
             _config(
                 training_window_mode="rolling_calendar",
@@ -233,7 +233,7 @@ def test_invalid_rolling_holdout_fails_before_source_history(value):
 def test_result_lag_uses_elapsed_utc_hours_without_event_column(instant, lag):
     """Result maturity is independent of event windows and DST wall-clock changes."""
     now = datetime.fromisoformat(instant)
-    spec = _resolve_training_spec(
+    spec = resolve_training_spec(
         _spark(),
         _config(
             filter_unavailable_results=True,
@@ -251,7 +251,7 @@ def test_invalid_result_lag_fails_before_source_history(value):
     """Bad result lag cannot cause external reads or silently coerce a different cutoff."""
     spark = _spark()
     with pytest.raises(ValueError, match="result_availability_lag_hours"):
-        _resolve_training_spec(
+        resolve_training_spec(
             spark,
             _config(
                 filter_unavailable_results=True,
@@ -269,12 +269,12 @@ def test_invalid_result_lag_fails_before_source_history(value):
 def test_inactive_window_controls_require_null(field, value):
     """Inactive controls must not be silently ignored in date-free workflows."""
     with pytest.raises(ValueError, match=field):
-        _training_spec(_config(**{field: value}))
+        training_spec(_config(**{field: value}))
 
 
 def test_manual_training_keeps_explicit_result_cutoff_with_lag():
     """A manual replay must preserve its saved cutoff regardless of the scheduled lag."""
-    spec = _training_spec(
+    spec = training_spec(
         _config(
             filter_unavailable_results=True,
             result_available_at_column="confirmed_at",
@@ -288,7 +288,7 @@ def test_manual_training_keeps_explicit_result_cutoff_with_lag():
 @pytest.mark.parametrize("engine", ["pandas", "polars"])
 def test_lagged_result_cutoff_is_inclusive_and_event_window_half_open(engine):
     """A mature label at cutoff participates, a later label and cutoff event cannot."""
-    spec = _resolve_training_spec(
+    spec = resolve_training_spec(
         _spark(),
         _config(
             training_window_mode="rolling_calendar",

@@ -204,7 +204,7 @@ def test_legacy_notebook_converts_result_before_publishing_score_request(monkeyp
             raise RuntimeError("cannot copy result")
 
     outcome = job_runtime.BundleActionResult("train", {"value": Uncopyable()}, True, {})
-    monkeypatch.setattr(job_runtime, "_read_notebook_config", lambda values: {})
+    monkeypatch.setattr(job_runtime, "read_notebook_config", lambda values: {})
     monkeypatch.setattr(job_runtime, "run_bundle_action", lambda *args, **kwargs: outcome)
     task_values = Mock()
     dbutils = SimpleNamespace(

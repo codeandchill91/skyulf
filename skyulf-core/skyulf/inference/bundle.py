@@ -118,7 +118,7 @@ def build_bundle(
     )
     manifest = manifest.model_copy(update={"semantic_digest": semantic_digest(manifest)})
     bundle = InferenceBundle(manifest, feature_state, payload)
-    _validate_bundle(bundle, budget)
+    validate_bundle_contract(bundle, budget)
     return bundle
 
 
@@ -185,7 +185,7 @@ def _options(options: ExecutionOptions | None) -> ExecutionOptions:
     return options if options is not None else ExecutionOptions("pandas")
 
 
-def _validate_bundle(bundle: InferenceBundle, options: ExecutionOptions) -> None:
+def validate_bundle_contract(bundle: InferenceBundle, options: ExecutionOptions) -> None:
     """Check all metadata and byte identities before any estimator deserialization."""
     if not isinstance(bundle, InferenceBundle):
         raise TypeError("Expected InferenceBundle.")
@@ -240,7 +240,7 @@ def predict_local(
     if not isinstance(frame, pd.DataFrame | pl.DataFrame):
         raise TypeError("predict_local requires a pandas or Polars DataFrame.")
     budget = _options(options)
-    _validate_bundle(bundle, budget)
+    validate_bundle_contract(bundle, budget)
     manifest = bundle.manifest
     _validate_frame(frame, manifest.input_schema, "bundle input")
     features = frame
@@ -291,7 +291,7 @@ def save_bundle(
     bundle: InferenceBundle, path: str | Path, *, options: ExecutionOptions | None = None
 ) -> None:
     """Write a new bundle directory; refuse to overwrite an existing path."""
-    _validate_bundle(bundle, _options(options))
+    validate_bundle_contract(bundle, _options(options))
     write_payloads(
         path, manifest_bytes(bundle.manifest), bundle.feature_state, bundle.model_payload
     )
@@ -306,6 +306,6 @@ def load_bundle(path: str | Path, *, options: ExecutionOptions | None = None) ->
     budget = _options(options)
     manifest, features, model = read_payloads(path, budget)
     bundle = InferenceBundle(manifest, features, model)
-    _validate_bundle(bundle, budget)
+    validate_bundle_contract(bundle, budget)
     load_model(model, manifest)
     return bundle

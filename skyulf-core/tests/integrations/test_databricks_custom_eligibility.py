@@ -369,7 +369,7 @@ def test_registered_custom_recipe_reloads_from_saved_source_in_fresh_process(tmp
     """Approval and score replay must work after project code changes on disk."""
     mlflow = pytest.importorskip("mlflow")
     from skyulf.inference.local_pipeline import load_local_pipeline
-    from skyulf.integrations.databricks.local_approval import _load_evidence
+    from skyulf.integrations.databricks.local_approval import load_candidate_evidence
 
     monkeypatch.chdir(tmp_path)
     workflow = _project(tmp_path)
@@ -401,11 +401,11 @@ def test_registered_custom_recipe_reloads_from_saved_source_in_fresh_process(tmp
     )
     code = """
 import json, sys, mlflow, pandas as pd
-from skyulf.integrations.databricks.local_approval import _load_evidence
+from skyulf.integrations.databricks.local_approval import load_candidate_evidence
 mlflow.set_tracking_uri(sys.argv[1])
 mlflow.set_registry_uri(sys.argv[1])
 client = mlflow.MlflowClient(tracking_uri=sys.argv[1], registry_uri=sys.argv[1])
-report, spec, engine, evidence = _load_evidence(
+report, spec, engine, evidence = load_candidate_evidence(
     client, sys.argv[2], sys.argv[3], sys.argv[4], registry_uri=sys.argv[1]
 )
 model = mlflow.pyfunc.load_model(f"models:/{sys.argv[2]}/{sys.argv[3]}")
@@ -444,7 +444,7 @@ print(json.dumps({"engine": engine, "steps": len(spec.pre_split_steps),
     original["pre_split_steps"][-1]["pre_split"]["required_columns"] = ["changed_flag"]
     client.log_dict(candidate.run_id, original, "candidate_training_spec.json")
     with pytest.raises(ValueError, match="pre.split|source|recipe|evidence|dataset"):
-        _load_evidence(
+        load_candidate_evidence(
             client,
             candidate.model_name,
             candidate.model_version,

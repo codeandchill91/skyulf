@@ -98,7 +98,7 @@ class LocalCVSpec:
         FeatureEngineerFoldAdapter(steps, target_column)
 
 
-def _validate_fold_membership(
+def validate_fold_membership(
     frame: pd.DataFrame | pl.DataFrame,
     spec: LocalCVSpec,
     target_column: str,
@@ -175,7 +175,7 @@ def evaluate_training_cv(
     model = config["modeling"]
     calculator = NodeRegistry.get_calculator(model["type"])()
     applier = NodeRegistry.get_applier(model["type"])()
-    _validate_fold_membership(frame, spec, target_column, calculator.problem_type, event_column)
+    validate_fold_membership(frame, spec, target_column, calculator.problem_type, event_column)
     adapter = AuditedFoldPreprocessor(
         FeatureEngineerFoldAdapter(config.get("preprocessing", []), target_column)
     )

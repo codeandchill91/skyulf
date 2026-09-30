@@ -6,14 +6,14 @@ closing a run owned by a caller. MLflow is imported only after tracking is
 enabled.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+from skyulf.integrations.mlflow._client import get_or_create_experiment, make_tracking_client
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,8 +120,8 @@ def track_run(config: TrackingConfig, *, run_name: str) -> Iterator[TrackingRun]
         return
 
     try:
-        client = _make_client(config.tracking_uri)
-        experiment_id = _get_or_create_experiment(client, config.experiment_name)
+        client = make_tracking_client(config.tracking_uri)
+        experiment_id = get_or_create_experiment(client, config.experiment_name)
         created = client.create_run(experiment_id=experiment_id, run_name=run_name)
         run = TrackingRun(
             client=client,
@@ -147,37 +147,6 @@ def track_run(config: TrackingConfig, *, run_name: str) -> Iterator[TrackingRun]
         raise
     else:
         run._terminate("FINISHED")
-
-
-def _make_client(tracking_uri: str | None) -> Any:
-    """Construct an MLflow client lazily, keeping the base import dependency-free."""
-    from mlflow import (  # noqa: PLC0415 - optional dependency is lazy by design  # ty: ignore[unresolved-import]
-        MlflowClient,  # ty: ignore[unresolved-import]
-    )
-
-    return MlflowClient(tracking_uri=tracking_uri)
-
-
-def _get_or_create_experiment(client: Any, experiment_name: str | None) -> str:
-    """Resolve an experiment through the supplied client without global MLflow state."""
-    if experiment_name is None:
-        return "0"
-    existing = client.get_experiment_by_name(experiment_name)
-    if existing is not None:
-        return existing.experiment_id
-    from mlflow.exceptions import (  # noqa: PLC0415 - optional dependency loaded on enabled tracking  # ty: ignore[unresolved-import]
-        MlflowException,  # ty: ignore[unresolved-import]
-    )
-
-    try:
-        return client.create_experiment(experiment_name)
-    except MlflowException as exc:
-        if exc.error_code != "RESOURCE_ALREADY_EXISTS":
-            raise
-        existing = client.get_experiment_by_name(experiment_name)
-        if existing is None:
-            raise
-        return existing.experiment_id
 
 
 def _items(values: Mapping[str, Any], label: str) -> list[tuple[str, Any]]:

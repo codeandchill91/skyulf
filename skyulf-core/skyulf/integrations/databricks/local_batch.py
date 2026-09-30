@@ -16,6 +16,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import pandas as pd
 import polars as pl
 
+from skyulf.integrations.databricks._local_frames import frame_bytes
+
 from ...data.dataset import SplitDataset
 from ...inference.local_evaluation import evaluate_local_holdout as evaluate_local_holdout
 from ...inference.local_pipeline import (
@@ -67,13 +69,6 @@ class LocalScoreResult:
 
     predictions: pd.DataFrame
     diagnostics: dict[str, str | int]
-
-
-def _frame_bytes(frame: pd.DataFrame | pl.DataFrame) -> int:
-    """Count the actual local frame allocation used for the memory guard."""
-    if isinstance(frame, pd.DataFrame):
-        return int(frame.memory_usage(index=True, deep=True).sum())
-    return int(frame.estimated_size())
 
 
 def fit_local_workflow(
@@ -130,7 +125,7 @@ def read_local_source(spark: Any, spec: LocalSourceSpec) -> pd.DataFrame:
             raise ValueError("Source exceeds max_bytes.")
         records.append(record)
     frame = pd.DataFrame.from_records(records, columns=names)
-    if _frame_bytes(frame) > spec.max_bytes:
+    if frame_bytes(frame) > spec.max_bytes:
         raise ValueError("Source local frame exceeds max_bytes.")
     if frame.loc[:, list(spec.record_key_columns)].isna().any().any():
         raise ValueError("Source row keys must not be null.")
@@ -159,7 +154,7 @@ def score_local_source(
         ],
         axis=1,
     )
-    if _frame_bytes(result) > spec.max_bytes:
+    if frame_bytes(result) > spec.max_bytes:
         raise ValueError("Prediction result exceeds max_bytes.")
     diagnostics: dict[str, str | int] = {
         "source_table": spec.table,
@@ -199,7 +194,7 @@ def _validate_training_frames(data: SplitDataset, max_rows: int, max_bytes: int)
     present = [frame for frame in frames if isinstance(frame, pd.DataFrame | pl.DataFrame)]
     if sum(len(frame) for frame in present) > max_rows:
         raise ValueError("Training input exceeds max_rows.")
-    if sum(_frame_bytes(frame) for frame in present) > max_bytes:
+    if sum(frame_bytes(frame) for frame in present) > max_bytes:
         raise ValueError("Training input exceeds max_bytes.")
 
 

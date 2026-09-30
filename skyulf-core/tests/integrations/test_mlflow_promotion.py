@@ -23,11 +23,11 @@ from skyulf.integrations.mlflow.promotion import (
     AliasOutcomeUnknownError,
     ExclusiveAliasWriterAdmission,
     LocalAliasAdmission,
-    _admission,
     alias_resource_id,
     promote_candidate,
     rollback_promotion,
     stage_challenger,
+    validate_admission,
 )
 from skyulf.integrations.mlflow.registry import (
     RegistryAccessError,
@@ -62,7 +62,7 @@ def champion_reader_client(monkeypatch):
         raise error
 
     client.get_model_version_by_alias.side_effect = read_alias
-    monkeypatch.setattr(promotion, "_make_client", lambda *args: client)
+    monkeypatch.setattr(promotion, "make_registry_client", lambda *args: client)
     return client
 
 
@@ -738,7 +738,9 @@ def test_partial_challenger_status_write_keeps_pending_receipt(case, monkeypatch
         return original(model_name, version, key, value)
 
     monkeypatch.setattr(client, "set_model_version_tag", fail_reason)
-    monkeypatch.setattr("skyulf.integrations.mlflow.promotion._make_client", lambda *args: client)
+    monkeypatch.setattr(
+        "skyulf.integrations.mlflow.promotion.make_registry_client", lambda *args: client
+    )
     with pytest.raises(AliasOutcomeUnknownError, match="Alias may have changed"):
         _stage(case)
     with pytest.raises(AliasConflictError, match="pending"):
@@ -897,7 +899,9 @@ def test_partial_promotion_reports_unknown_outcome(case, monkeypatch) -> None:
         return original(model_name, alias, version)
 
     monkeypatch.setattr(client, "set_registered_model_alias", deny_champion)
-    monkeypatch.setattr("skyulf.integrations.mlflow.promotion._make_client", lambda *args: client)
+    monkeypatch.setattr(
+        "skyulf.integrations.mlflow.promotion.make_registry_client", lambda *args: client
+    )
     with pytest.raises(AliasOutcomeUnknownError, match="inspect prepared event"):
         _promote(case)
     assert str(client.get_model_version_by_alias(name, "champion").version) == "1"
@@ -1098,7 +1102,7 @@ def test_controlled_champion_rejects_alias_without_receipt(case) -> None:
 def test_exclusive_alias_writer_requires_external_serialization() -> None:
     """A table-free UC writer opts into an explicit alias resource contract."""
     admission = ExclusiveAliasWriterAdmission()
-    assert _admission(admission, "databricks-uc") is admission
+    assert validate_admission(admission, "databricks-uc") is admission
     with admission.hold(alias_resource_id("catalog.schema.model")):
         assert admission.local_only is False
     with pytest.raises(ValueError, match="alias resource ID"), admission.hold("not-an-alias"):
@@ -1133,7 +1137,9 @@ def test_permission_denial_does_not_move_alias(case, monkeypatch) -> None:
 
     _stage(case)
     monkeypatch.setattr(client, "set_registered_model_alias", denied)
-    monkeypatch.setattr("skyulf.integrations.mlflow.promotion._make_client", lambda *args: client)
+    monkeypatch.setattr(
+        "skyulf.integrations.mlflow.promotion.make_registry_client", lambda *args: client
+    )
     with pytest.raises(RegistryAccessError):
         _promote(case)
     assert str(client.get_model_version_by_alias(name, "champion").version) == "1"
@@ -1152,7 +1158,9 @@ def test_lost_alias_write_response_is_reported_as_unknown(case, monkeypatch) -> 
             raise mlflow.exceptions.MlflowException("response lost")
 
     monkeypatch.setattr(client, "set_registered_model_alias", move_then_fail)
-    monkeypatch.setattr("skyulf.integrations.mlflow.promotion._make_client", lambda *args: client)
+    monkeypatch.setattr(
+        "skyulf.integrations.mlflow.promotion.make_registry_client", lambda *args: client
+    )
     with pytest.raises(AliasOutcomeUnknownError, match="inspect prepared event"):
         _promote(case)
     assert str(client.get_model_version_by_alias(name, "champion").version) == "2"
@@ -1193,12 +1201,12 @@ def test_global_uc_registry_rejects_local_admission(tmp_path, monkeypatch) -> No
     """Implicit UC registry configuration must still require distributed admission."""
     monkeypatch.setattr(mlflow, "get_registry_uri", lambda: "databricks-uc")
     with pytest.raises(ValueError, match="distributed"):
-        _admission(LocalAliasAdmission(tmp_path / "locks"), None)
+        validate_admission(LocalAliasAdmission(tmp_path / "locks"), None)
 
 
 def test_receipt_rejects_conflicting_version_field_names() -> None:
     """Legacy and current field names must never silently choose different prior versions."""
-    from skyulf.integrations.mlflow.promotion import _read_event
+    from skyulf.integrations.mlflow.promotion import read_event
 
     with pytest.raises(ValueError, match="[Dd]uplicate|[Aa]mbiguous"):
-        _read_event(json.dumps({"action": "promotion", "from": "1", "from_version": "2"}))
+        read_event(json.dumps({"action": "promotion", "from": "1", "from_version": "2"}))

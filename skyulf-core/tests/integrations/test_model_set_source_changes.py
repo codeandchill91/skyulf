@@ -37,16 +37,16 @@ def _changed_source(monkeypatch, batch, previous, snapshot, error=None):
             raise error or SourceChangeRequiresRebuild("source correction")
         return snapshot
 
-    monkeypatch.setattr(batch, "_select_incremental_rows", select)
+    monkeypatch.setattr(batch, "select_incremental_rows", select)
     monkeypatch.setattr(
         batch,
-        "_latest",
+        "latest_source_version",
         lambda spark, name: {
             "version": 1 if name == "source" else 0,
             "userMetadata": json.dumps(previous) if name == "target" else None,
         },
     )
-    monkeypatch.setattr(batch, "_bounded_frame", lambda selected, *args: selected)
+    monkeypatch.setattr(batch, "bounded_frame", lambda selected, *args: selected)
 
 
 def _run(batch, model, artifact, policy="rebuild_on_change"):
@@ -105,7 +105,7 @@ def test_snapshot_limit_failure_preserves_previous_publication(tmp_path, monkeyp
     batch, commit = _transport(monkeypatch, query, previous)
     _changed_source(monkeypatch, batch, previous, query)
     monkeypatch.setattr(
-        batch, "_bounded_frame", Mock(side_effect=ValueError("Source increment exceeds max_rows."))
+        batch, "bounded_frame", Mock(side_effect=ValueError("Source increment exceeds max_rows."))
     )
     with pytest.raises(ValueError, match="max_rows"):
         _run(batch, model, artifact)
@@ -119,7 +119,7 @@ def test_rebuild_policy_keeps_insert_batches_as_appends(tmp_path, monkeypatch):
     batch, commit = _transport(monkeypatch, query, previous)
     monkeypatch.setattr(
         batch,
-        "_latest",
+        "latest_source_version",
         lambda spark, name: {
             "version": 1 if name == "source" else 0,
             "userMetadata": json.dumps(previous) if name == "target" else None,

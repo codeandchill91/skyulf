@@ -57,6 +57,24 @@ def _generate_project(tmp_path, **overrides):
 
 
 @pytest.mark.parametrize("layout", ["single_model", "model_competition", "multi_target"])
+def test_smoke_renders_without_cloud_operations(tmp_path, layout):
+    """Every layout must retain runnable offline checks without cloud operations."""
+    project = _generate_project(tmp_path, training_layout=layout)
+    result = subprocess.run(
+        [sys.executable, "src/tools/smoke.py"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["status"] == "passed"
+    assert report["project_hooks_executed"] is False
+    assert report["remote_operations"] is False
+
+
+@pytest.mark.parametrize("layout", ["single_model", "model_competition", "multi_target"])
 @pytest.mark.parametrize("compute", ["serverless", "policy_cluster"])
 @pytest.mark.parametrize("enabled", ["false", "true"])
 def test_shap_generation_matches_training_dependencies(tmp_path, layout, compute, enabled):

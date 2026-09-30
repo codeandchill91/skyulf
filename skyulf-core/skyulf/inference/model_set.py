@@ -28,7 +28,7 @@ from ._model_set_manifest import (
     validate_components,
     validate_keys,
 )
-from .local_pipeline import _read_bounded, load_local_pipeline
+from .local_pipeline import load_local_pipeline, read_bounded_artifact
 from .local_scoring import scoring_output_schema
 
 _MAX_PACKAGE_BYTES = 256 * 1024 * 1024
@@ -98,7 +98,10 @@ def _component(path: Path, branch: str, reference: ComponentReference) -> Compon
         output_schema=scoring_output_schema(artifact),
         files=tuple(
             ComponentFile.model_validate(
-                {"name": file.name, "sha256": checksum(_read_bounded(file, _MAX_PACKAGE_BYTES))}
+                {
+                    "name": file.name,
+                    "sha256": checksum(read_bounded_artifact(file, _MAX_PACKAGE_BYTES)),
+                }
             )
             for file in sorted(files)
         ),
@@ -218,7 +221,7 @@ def _copy_components(
 
 def _read_manifest(source: Path) -> ModelSetManifest:
     """Reject duplicate keys and nonfinite JSON before strict schema parsing."""
-    metadata = _read_bounded(source / "manifest.json", _MAX_MANIFEST_BYTES)
+    metadata = read_bounded_artifact(source / "manifest.json", _MAX_MANIFEST_BYTES)
     document = json.loads(metadata, object_pairs_hook=_unique_object, parse_constant=_bad_constant)
     if type(document) is not dict or type(document.get("format_version")) is not int:
         raise ValueError("Invalid model set format_version.")
@@ -236,7 +239,10 @@ def _verify_files(source: Path, manifest: ModelSetManifest, files: tuple[Path, .
         for file in component.files:
             relative = f"components/{component.branch}/{file.name}"
             expected.add(relative)
-            if checksum(_read_bounded(source / relative, _MAX_PACKAGE_BYTES)) != file.sha256:
+            if (
+                checksum(read_bounded_artifact(source / relative, _MAX_PACKAGE_BYTES))
+                != file.sha256
+            ):
                 raise ValueError("Model set component file checksum mismatch.")
     actual = {file.relative_to(source).as_posix() for file in files}
     if actual != expected:
@@ -249,7 +255,7 @@ def _verified_contents(source: Path) -> tuple[ModelSetManifest, bytes]:
     manifest = _read_manifest(source)
     validate_components(manifest.components)
     _verify_files(source, manifest, files)
-    code = _read_bounded(source / "composition.py", _MAX_SOURCE_BYTES)
+    code = read_bounded_artifact(source / "composition.py", _MAX_SOURCE_BYTES)
     code.decode("utf-8")
     if checksum(code) != manifest.composition_source_sha256:
         raise ValueError("Composition source checksum mismatch.")

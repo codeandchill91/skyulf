@@ -421,7 +421,7 @@ def test_post_fit_comparison_failure_marks_parent_failed(
         "read_training_snapshot",
         lambda spark, spec: _data().loc[:, list(spec.source_columns)].copy(),
     )
-    original = training._compare_candidate
+    original = training.compare_candidate
 
     def compare(*args, **kwargs):
         """Inject an error after the second branch has produced an immutable model version."""
@@ -429,7 +429,7 @@ def test_post_fit_comparison_failure_marks_parent_failed(
             raise RuntimeError("comparison unavailable")
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(training, "_compare_candidate", compare)
+    monkeypatch.setattr(training, "compare_candidate", compare)
     with pytest.raises(RuntimeError, match="comparison unavailable"):
         branches.train_local_branches(
             None,
@@ -489,7 +489,7 @@ def test_failure_logging_cannot_replace_original_error(
     """A tracking outage during cleanup must preserve the actionable training failure."""
     store, client = tracked
     prepared = branches.prepare_training_branches(None, _configs(workflow_config, store=store))
-    original = branches._log_progress
+    original = branches.log_progress
 
     def progress(*args, **kwargs):
         """Emulate only the failed-progress logging outage."""
@@ -501,8 +501,8 @@ def test_failure_logging_cannot_replace_original_error(
         """Emulate a training error whose message must survive tracking cleanup."""
         raise RuntimeError("original training failure")
 
-    monkeypatch.setattr(branches, "_log_progress", progress)
-    monkeypatch.setattr(branches, "_train_branch", train)
+    monkeypatch.setattr(branches, "log_progress", progress)
+    monkeypatch.setattr(branches, "train_branch", train)
     with pytest.raises(RuntimeError, match="original training failure"):
         branches.train_local_branches(
             None,

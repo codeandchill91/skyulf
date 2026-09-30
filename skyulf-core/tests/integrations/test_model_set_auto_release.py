@@ -38,7 +38,7 @@ def test_mixed_models_auto_release_replacement_failure_and_rollback(
         "read_training_snapshot",
         lambda spark, spec: data.loc[:, list(spec.source_columns)].copy(),
     )
-    monkeypatch.setattr(project, "_approval_frame", lambda *args: data[["id", "x"]].copy())
+    monkeypatch.setattr(project, "approval_frame", lambda *args: data[["id", "x"]].copy())
     spark = Mock()
     spark.read.option.return_value.table.return_value = SimpleNamespace(dtypes=[("id", "bigint")])
     configs = _configs(workflow_config, engine=engine, store=uri)

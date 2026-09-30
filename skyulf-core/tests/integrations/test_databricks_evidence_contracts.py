@@ -50,7 +50,7 @@ def _spec(temporal=False):
 def test_saved_spec_roundtrip_preserves_identity_and_input(temporal, engine):
     """Both replay adapters need identical dates, tuples and defaults from immutable JSON."""
     spec = _spec(temporal)
-    payload = json.loads(json.dumps(training._training_spec_payload(spec, engine)))
+    payload = json.loads(json.dumps(training.training_spec_payload(spec, engine)))
     payload.pop("pre_split_steps")  # Existing approval evidence permits this absent field.
     original = deepcopy(payload)
     restored = training.LocalTrainingSpec.from_payload(payload)
@@ -103,7 +103,7 @@ def test_shared_loader_verifies_named_candidate_evidence(tmp_path, change):
         json.dumps(comparison_payload(report)), encoding="utf-8"
     )
     (tmp_path / "candidate_training_spec.json").write_text(
-        json.dumps(training._training_spec_payload(spec, "pandas")), encoding="utf-8"
+        json.dumps(training.training_spec_payload(spec, "pandas")), encoding="utf-8"
     )
     client = Mock()
     client.get_model_version.return_value.run_id = "saved-run"

@@ -11,7 +11,13 @@ from typing import Any
 import mlflow  # ty: ignore[unresolved-import]
 import pandas as pd
 
-from ...inference.local_pipeline import _read_bounded, load_local_pipeline
+from skyulf.integrations.mlflow._client import make_tracking_client
+from skyulf.integrations.mlflow._model_metadata import (
+    mlflow_dtype,
+    scrub_local_artifact_uri,
+)
+
+from ...inference.local_pipeline import load_local_pipeline, read_bounded_artifact
 from ...inference.model_set import ModelSetArtifact, load_model_set
 from ...inference.model_set_scoring import model_set_output_schema, predict_model_set
 from ...inference.project_code import MAX_PROJECT_SOURCE_BYTES
@@ -19,15 +25,14 @@ from ...inference.project_dependencies import (
     parse_project_requirements,
     source_project_requirements,
 )
-from .local_model import _normalized_dtype, _pip_requirements, _validate_local_destination
-from .model import _make_client, _mlflow_dtype, _scrub_local_artifact_uri
+from .local_model import normalized_dtype, pip_requirements, validate_local_destination
 from .registry import (
     ResolvedModel,
-    _digest_metadata,
-    _packaged_artifact_path,
-    _translate_error,
-    _validate_concrete_version,
-    _validate_registry_options,
+    digest_metadata,
+    packaged_artifact_path,
+    translate_error,
+    validate_concrete_version,
+    validate_registry_options,
 )
 
 
@@ -70,11 +75,11 @@ def log_model_set(
     tracking_uri: str | None = None,
 ) -> str:
     """Log a complete model set without selecting aliases or retaining producer paths."""
-    _validate_local_destination(run_id, artifact_path, tracking_uri)
+    validate_local_destination(run_id, artifact_path, tracking_uri)
     artifact = load_model_set(local_artifact_path)
     signature = _signature(artifact)
     requirements = _set_requirements(artifact)
-    client = _make_client(tracking_uri)
+    client = make_tracking_client(tracking_uri)
     client.get_run(run_id)
     with tempfile.TemporaryDirectory(prefix="skyulf-set-mlflow-") as directory:
         model_path = Path(directory) / "model"
@@ -95,7 +100,7 @@ def log_model_set(
             mlflow_model=mlflow.models.Model(run_id=run_id, artifact_path=artifact_path),
             **options,
         )
-        _scrub_local_artifact_uri(model_path, "model_set")
+        scrub_local_artifact_uri(model_path, "model_set")
         client.log_artifacts(run_id, str(model_path), artifact_path=artifact_path)
     return f"runs:/{run_id}/{artifact_path}"
 
@@ -108,7 +113,7 @@ def _signature(artifact: ModelSetArtifact) -> Any:
     def schema(columns: Any) -> Any:
         """Preserve names and order while rejecting lossy unsupported scalar types."""
         return Schema(
-            [ColSpec(_mlflow_dtype(_normalized_dtype(c.dtype)), name=c.name) for c in columns]
+            [ColSpec(mlflow_dtype(normalized_dtype(c.dtype)), name=c.name) for c in columns]
         )
 
     return ModelSignature(
@@ -121,11 +126,11 @@ def _set_requirements(artifact: ModelSetArtifact) -> list[str]:
     """Merge component and captured composition pins without producer URLs or conflicts."""
     requirements: dict[str, str] = {}
     for component in artifact.manifest.components:
-        pins = _pip_requirements(
+        pins = pip_requirements(
             load_local_pipeline(artifact.directory / "components" / component.branch)
         )
         _merge_requirements(requirements, pins)
-    source = _read_bounded(artifact.directory / "composition.py", MAX_PROJECT_SOURCE_BYTES)
+    source = read_bounded_artifact(artifact.directory / "composition.py", MAX_PROJECT_SOURCE_BYTES)
     _merge_requirements(requirements, source_project_requirements(source.decode("utf-8")))
     return list(requirements.values())
 
@@ -149,8 +154,8 @@ def load_registered_model_set(
     """Load one concrete trusted set and verify package kind and complete digest."""
     if not isinstance(resolved, ResolvedModel):
         raise TypeError("resolved must be a ResolvedModel.")
-    _validate_registry_options(resolved.name, tracking_uri, registry_uri)
-    _validate_concrete_version(resolved)
+    validate_registry_options(resolved.name, tracking_uri, registry_uri)
+    validate_concrete_version(resolved)
     if not isinstance(resolved.digest, str) or not resolved.digest.strip():
         raise ValueError("Resolved model set requires a digest.")
     client = mlflow.MlflowClient(tracking_uri=tracking_uri, registry_uri=registry_uri)
@@ -163,8 +168,8 @@ def load_registered_model_set(
         )
         model = mlflow.models.Model.load(Path(local))
     except Exception as exc:  # noqa: BLE001 - registry artifact transport boundary
-        raise _translate_error(exc, name=resolved.name, version=resolved.version) from exc
-    metadata = _digest_metadata(model.metadata or {})
+        raise translate_error(exc, name=resolved.name, version=resolved.version) from exc
+    metadata = digest_metadata(model.metadata or {})
     digest = metadata.get("model_set_digest")
     expected = {
         "skyulf_artifact_kind": "model_set",
@@ -174,7 +179,7 @@ def load_registered_model_set(
         metadata.get(key) != value for key, value in expected.items()
     ):
         raise ValueError("Packaged model set kind, scope or digest differs from resolved identity.")
-    artifact = load_model_set(_packaged_artifact_path(Path(local), model.flavors, "model_set"))
+    artifact = load_model_set(packaged_artifact_path(Path(local), model.flavors, "model_set"))
     if artifact.manifest.set_sha256 != resolved.digest:
         raise ValueError("Loaded model set digest differs from resolved identity.")
     return artifact

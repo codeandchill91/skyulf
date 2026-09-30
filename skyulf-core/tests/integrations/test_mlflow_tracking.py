@@ -42,7 +42,7 @@ def test_experiment_creation_recovers_forced_race() -> None:
     client = SimpleNamespace(get_experiment_by_name=lookup, create_experiment=create)
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
-            executor.submit(tracking._get_or_create_experiment, client, "shared") for _ in range(2)
+            executor.submit(tracking.get_or_create_experiment, client, "shared") for _ in range(2)
         ]
         assert [future.result(timeout=15) for future in futures] == ["7", "7"]
 
@@ -57,7 +57,7 @@ def test_experiment_creation_does_not_hide_failure(code) -> None:
     client.get_experiment_by_name.return_value = None
     client.create_experiment.side_effect = error
     with pytest.raises(mlflow.exceptions.MlflowException) as caught:
-        tracking._get_or_create_experiment(client, "shared")
+        tracking.get_or_create_experiment(client, "shared")
     assert caught.value is error
     assert client.get_experiment_by_name.call_count == (
         2 if code == "RESOURCE_ALREADY_EXISTS" else 1
@@ -73,7 +73,7 @@ def test_experiment_creation_propagates_transport_failure(failure_type) -> None:
     client.get_experiment_by_name.return_value = None
     client.create_experiment.side_effect = error
     with pytest.raises(failure_type) as caught:
-        tracking._get_or_create_experiment(client, "shared")
+        tracking.get_or_create_experiment(client, "shared")
     assert caught.value is error
     client.get_experiment_by_name.assert_called_once_with("shared")
 
@@ -84,7 +84,7 @@ def test_disabled_tracking_never_constructs_client(monkeypatch: pytest.MonkeyPat
     def forbidden(*args: object, **kwargs: object) -> object:
         raise AssertionError("MLflow client was constructed")
 
-    monkeypatch.setattr(tracking, "_make_client", forbidden)
+    monkeypatch.setattr(tracking, "make_tracking_client", forbidden)
     config = tracking.TrackingConfig()
     with tracking.track_run(config, run_name="offline") as run:
         run.log_metrics({"rmse": 0.5})
@@ -110,7 +110,7 @@ def test_enabled_tracking_reports_missing_optional_dependency(
     def missing_client(uri: str | None) -> object:
         raise ModuleNotFoundError("No module named 'mlflow'")
 
-    monkeypatch.setattr(tracking, "_make_client", missing_client)
+    monkeypatch.setattr(tracking, "make_tracking_client", missing_client)
     config = tracking.TrackingConfig(enabled=True)
     with (
         pytest.raises(ModuleNotFoundError, match="mlflow"),
@@ -141,7 +141,7 @@ def test_enabled_tracking_logs_a_real_run_and_explicit_config(tmp_path: Path) ->
         run_id = run.run_id
 
     assert run_id
-    client = tracking._make_client(uri)
+    client = tracking.make_tracking_client(uri)
     stored = client.get_run(run_id)
     assert stored.info.status == "FINISHED"
     assert stored.data.metrics["rmse"] == 0.5
@@ -172,7 +172,7 @@ def test_exception_marks_enabled_run_failed(tmp_path: Path) -> None:
         run.log_params({"step": "fit"})
         raise RuntimeError("training failed")
 
-    client = tracking._make_client(config.tracking_uri)
+    client = tracking.make_tracking_client(config.tracking_uri)
     experiment = client.get_experiment_by_name(config.experiment_name)
     stored = client.search_runs([experiment.experiment_id])[0]
     assert stored.info.status == "FAILED"
@@ -228,8 +228,8 @@ def test_tracking_does_not_close_callers_active_run(tmp_path: Path) -> None:
         tracking_uri=uri,
         experiment_name="skyulf-sm12-caller-run",
     )
-    client = tracking._make_client(uri)
-    experiment_id = tracking._get_or_create_experiment(client, config.experiment_name)
+    client = tracking.make_tracking_client(uri)
+    experiment_id = tracking.get_or_create_experiment(client, config.experiment_name)
     mlflow.set_tracking_uri(uri)
 
     with mlflow.start_run(experiment_id=experiment_id, run_name="caller") as caller:
@@ -257,7 +257,7 @@ def test_warn_policy_preserves_body_result_when_logging_fails(
         def set_terminated(self, *args: object, **kwargs: object) -> None:
             return None
 
-    monkeypatch.setattr(tracking, "_make_client", lambda uri: BrokenClient())
+    monkeypatch.setattr(tracking, "make_tracking_client", lambda uri: BrokenClient())
     config = tracking.TrackingConfig(enabled=True, failure_policy="warn")
     with tracking.track_run(config, run_name="warn") as run:
         result = 42

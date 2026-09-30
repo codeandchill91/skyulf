@@ -75,7 +75,7 @@ def _validate_axis(key: Any, values: Any) -> None:
     _validate_axis_values(values)
 
 
-def _bounded_space(space: Any) -> dict[str, list[Any]]:
+def bounded_space(space: Any) -> dict[str, list[Any]]:
     """Accept small finite JSON scalar candidate lists without implicit coercion."""
     if not isinstance(space, dict) or len(space) > _MAX_AXES:
         raise ValueError(f"search_space must be an object with at most {_MAX_AXES} axes.")
@@ -106,7 +106,7 @@ def _validate_parameter_names(calculator: BaseModelCalculator, space: dict[str, 
             raise ValueError(f"Unknown model parameter in search_space: {name}.")
 
 
-def _validate_metric(metric: Any, problem_type: str) -> None:
+def validate_metric(metric: Any, problem_type: str) -> None:
     """Apply Core's native alias and task rules without accepting heldout metrics."""
     if not isinstance(metric, str) or metric.startswith("heldout_"):
         raise ValueError("metric must be a native Core tuning metric, not a heldout metric.")
@@ -257,7 +257,7 @@ def _validate_strategy(
     if modeling.get("tune_threshold") and calculator.problem_type != "classification":
         raise ValueError("tune_threshold requires binary classification.")
     seed = _validate_search_execution(modeling)
-    _validate_metric(modeling.get("metric"), calculator.problem_type)
+    validate_metric(modeling.get("metric"), calculator.problem_type)
     modeling.update(
         strategy=strategy, n_trials=n_trials, max_candidates=max_candidates, random_state=seed
     )
@@ -381,12 +381,12 @@ def _prepare_space(
         raw_space = calculator.build_tuning_search_space(selected, strategy)
         if raw_space == {}:
             raw_space = get_default_search_space(selected["type"], strategy)
-    space = _bounded_space(raw_space)
+    space = bounded_space(raw_space)
     if automatic_space and strategy in {"halving_grid", "halving_random"}:
         space.pop(modeling.get("strategy_params", {}).get("resource", "n_samples"), None)
     _merge_fixed_axes(space, selected, calculator, automatic_space)
     merge_ensemble_fixed_space(space, selected, automatic=automatic_space)
-    space = _bounded_space(space)
+    space = bounded_space(space)
     _validate_grid_size(space, strategy, max_candidates)
     _bind_estimator_workers(space, modeling, calculator, strategy)
     _validate_parameter_names(calculator, space)

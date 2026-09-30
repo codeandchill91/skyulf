@@ -48,7 +48,7 @@ def test_preparation_pins_source_and_champion_without_changing_score_selection(
     history.return_value = {"version": 7}
     resolve = Mock(return_value=champion)
     monkeypatch.setattr(workflow, "controlled_champion_version", resolve)
-    spec, cv, selected = workflow._prepare_training(
+    spec, cv, selected = workflow.prepare_training(
         spark, config, policy=policy, now=datetime(2026, 9, 1, tzinfo=UTC)
     )
     history.return_value = {"version": 99}
@@ -76,7 +76,7 @@ def test_invalid_training_preparation_fails_before_source_or_registry(
     resolve = Mock(side_effect=AssertionError("registry accessed"))
     monkeypatch.setattr(workflow, "controlled_champion_version", resolve)
     with pytest.raises(ValueError, match=message):
-        workflow._prepare_training(spark, config, policy="automatic", now=None)
+        workflow.prepare_training(spark, config, policy="automatic", now=None)
     spark.sql.assert_not_called()
     resolve.assert_not_called()
 

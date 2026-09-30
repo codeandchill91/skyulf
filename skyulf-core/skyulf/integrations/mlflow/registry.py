@@ -7,11 +7,11 @@ MLflow remains an optional dependency and is imported only when an operation is
 requested.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any
+
+from skyulf.integrations.mlflow._client import make_registry_client, require_mlflow
 
 if TYPE_CHECKING:
     from ...inference.bundle import InferenceBundle
@@ -32,7 +32,7 @@ __all__ = [
 ]
 
 
-def _digest_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+def digest_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     """Normalize historical digest keys at the artifact read boundary."""
     return metadata | {
         key: metadata.get(key, metadata.get(f"skyulf_{key}"))
@@ -76,7 +76,7 @@ def load_registered_bundle(
     *,
     tracking_uri: str | None = None,
     registry_uri: str | None = None,
-) -> InferenceBundle:
+) -> "InferenceBundle":
     """Load a trusted packaged bundle using a previously pinned registry version.
 
     The client uses explicit stores without changing MLflow's global URIs or
@@ -91,12 +91,12 @@ def load_registered_bundle(
     """
     if not isinstance(resolved, ResolvedModel):
         raise TypeError("resolved must be a ResolvedModel.")
-    _validate_registry_options(resolved.name, tracking_uri, registry_uri)
-    _validate_concrete_version(resolved)
+    validate_registry_options(resolved.name, tracking_uri, registry_uri)
+    validate_concrete_version(resolved)
     if not isinstance(resolved.digest, str) or not resolved.digest.strip():
         raise ValueError("resolved must include the Skyulf bundle digest.")
-    mlflow = _require_mlflow()
-    client = _make_client(mlflow, tracking_uri, registry_uri)
+    mlflow = require_mlflow()
+    client = make_registry_client(mlflow, tracking_uri, registry_uri)
     try:
         version = client.get_model_version(resolved.name, resolved.version)
         source = getattr(version, "source", None)
@@ -108,8 +108,8 @@ def load_registered_bundle(
         )
         model = mlflow.models.Model.load(Path(local_path))
     except Exception as exc:  # noqa: BLE001 - translate registry and artifact transport failures
-        raise _translate_error(exc, name=resolved.name, version=resolved.version) from exc
-    metadata = _digest_metadata(model.metadata or {})
+        raise translate_error(exc, name=resolved.name, version=resolved.version) from exc
+    metadata = digest_metadata(model.metadata or {})
     if metadata.get("bundle_digest") != resolved.digest:
         raise ValueError(
             "Packaged Skyulf bundle digest is missing or differs from resolved digest."
@@ -130,7 +130,7 @@ def load_registered_local_pipeline(
     *,
     tracking_uri: str | None = None,
     registry_uri: str | None = None,
-) -> LocalPipelineArtifact:
+) -> "LocalPipelineArtifact":
     """Load a trusted local pipeline from one concrete registered-model version.
 
     The package's declared artifact path and both digests are checked before the
@@ -138,12 +138,12 @@ def load_registered_local_pipeline(
     """
     if not isinstance(resolved, ResolvedModel):
         raise TypeError("resolved must be a ResolvedModel.")
-    _validate_registry_options(resolved.name, tracking_uri, registry_uri)
-    _validate_concrete_version(resolved)
+    validate_registry_options(resolved.name, tracking_uri, registry_uri)
+    validate_concrete_version(resolved)
     if not isinstance(resolved.digest, str) or not resolved.digest.strip():
         raise ValueError("resolved must include the Skyulf local pipeline digest.")
-    mlflow = _require_mlflow()
-    client = _make_client(mlflow, tracking_uri, registry_uri)
+    mlflow = require_mlflow()
+    client = make_registry_client(mlflow, tracking_uri, registry_uri)
     try:
         version = client.get_model_version(resolved.name, resolved.version)
         source = getattr(version, "source", None)
@@ -155,8 +155,8 @@ def load_registered_local_pipeline(
         )
         model = mlflow.models.Model.load(Path(local_path))
     except Exception as exc:  # noqa: BLE001 - translate registry and transport failures
-        raise _translate_error(exc, name=resolved.name, version=resolved.version) from exc
-    return _load_local_package(Path(local_path), model, resolved.digest)
+        raise translate_error(exc, name=resolved.name, version=resolved.version) from exc
+    return load_local_package(Path(local_path), model, resolved.digest)
 
 
 def load_run_local_pipeline(
@@ -164,23 +164,23 @@ def load_run_local_pipeline(
     *,
     digest: str,
     tracking_uri: str | None = None,
-) -> LocalPipelineArtifact:
+) -> "LocalPipelineArtifact":
     """Load a trusted unregistered run package with the registered loader's checks."""
     _parse_runs_uri(model_uri)
     if not isinstance(digest, str) or not digest.strip():
         raise ValueError("Run artifact requires a concrete local pipeline digest.")
-    mlflow = _require_mlflow()
+    mlflow = require_mlflow()
     local_path = mlflow.artifacts.download_artifacts(
         artifact_uri=model_uri,
         tracking_uri=tracking_uri,
     )
     model = mlflow.models.Model.load(Path(local_path))
-    return _load_local_package(Path(local_path), model, digest)
+    return load_local_package(Path(local_path), model, digest)
 
 
-def _load_local_package(local_path: Path, model: Any, digest: str) -> LocalPipelineArtifact:
+def load_local_package(local_path: Path, model: Any, digest: str) -> "LocalPipelineArtifact":
     """Validate shared run and registry metadata, contained paths and fitted identity."""
-    metadata = _digest_metadata(model.metadata or {})
+    metadata = digest_metadata(model.metadata or {})
     if (
         metadata.get("skyulf_artifact_kind") != "local_pipeline"
         or metadata.get("skyulf_execution_scope") != "whole_frame_local"
@@ -189,7 +189,7 @@ def _load_local_package(local_path: Path, model: Any, digest: str) -> LocalPipel
         raise ValueError(
             "Packaged Skyulf local pipeline metadata differs from resolved digest or scope."
         )
-    artifact_path = _packaged_artifact_path(Path(local_path), model.flavors, "local_pipeline")
+    artifact_path = packaged_artifact_path(Path(local_path), model.flavors, "local_pipeline")
     from ...inference.local_pipeline import (  # noqa: PLC0415 - lazy pickle dependency
         load_local_pipeline,
     )
@@ -205,10 +205,10 @@ def _load_local_package(local_path: Path, model: Any, digest: str) -> LocalPipel
 
 def _packaged_bundle_path(package: Path, flavors: dict[str, Any]) -> Path:
     """Find the declared bundle directory and reject paths escaping the package."""
-    return _packaged_artifact_path(package, flavors, "bundle")
+    return packaged_artifact_path(package, flavors, "bundle")
 
 
-def _packaged_artifact_path(package: Path, flavors: dict[str, Any], key: str) -> Path:
+def packaged_artifact_path(package: Path, flavors: dict[str, Any], key: str) -> Path:
     """Locate a declared artifact directory without allowing package traversal."""
     try:
         relative = flavors["python_function"]["artifacts"][key]["path"]
@@ -249,8 +249,8 @@ def resolve_model(
     operation uses MLflow's process-global active run.
     """
     _validate_reference(name, alias, version, tracking_uri, registry_uri)
-    mlflow = _require_mlflow()
-    client = _make_client(mlflow, tracking_uri, registry_uri)
+    mlflow = require_mlflow()
+    client = make_registry_client(mlflow, tracking_uri, registry_uri)
     model_version = _resolve_version(client, name, alias, version)
 
     concrete_version = str(model_version.version)
@@ -268,8 +268,8 @@ def resolve_model(
         )
         model = mlflow.models.Model.load(Path(local_path))
     except Exception as exc:  # noqa: BLE001 - artifact metadata is another registry boundary
-        raise _translate_error(exc, name=name, version=concrete_version) from exc
-    metadata = _digest_metadata(model.metadata or {})
+        raise translate_error(exc, name=name, version=concrete_version) from exc
+    metadata = digest_metadata(model.metadata or {})
     digest = (
         metadata.get("bundle_digest")
         or metadata.get("local_pipeline_digest")
@@ -299,36 +299,20 @@ def register_model(
     implicitly during prediction. It returns MLflow's created model-version
     object so callers can persist its concrete version and status.
     """
-    _validate_registry_options(name, tracking_uri, registry_uri)
+    validate_registry_options(name, tracking_uri, registry_uri)
     run_id = _parse_runs_uri(model_uri)
-    mlflow = _require_mlflow()
-    client = _make_client(mlflow, tracking_uri, registry_uri)
+    mlflow = require_mlflow()
+    client = make_registry_client(mlflow, tracking_uri, registry_uri)
     try:
         client.create_registered_model(name)
     except Exception as exc:  # noqa: BLE001 - existing registration is the only benign result
-        if _error_code(exc) not in {"RESOURCE_ALREADY_EXISTS", "ALREADY_EXISTS"}:
-            raise _translate_error(exc, name=name, version="new") from exc
+        if error_code(exc) not in {"RESOURCE_ALREADY_EXISTS", "ALREADY_EXISTS"}:
+            raise translate_error(exc, name=name, version="new") from exc
     try:
         options = {"tags": tags} if tags is not None else {}
         return client.create_model_version(name=name, source=model_uri, run_id=run_id, **options)
     except Exception as exc:  # noqa: BLE001 - translate MLflow's backend errors at the boundary
-        raise _translate_error(exc, name=name, version="new") from exc
-
-
-def _require_mlflow() -> Any:
-    """Import the optional MLflow package and expose a typed dependency failure."""
-    try:
-        import mlflow  # noqa: PLC0415  # ty: ignore[unresolved-import]
-    except ImportError as exc:
-        raise RegistryDependencyError(
-            "MLflow registry support requires the optional 'mlflow' extra."
-        ) from exc
-    return mlflow
-
-
-def _make_client(mlflow: Any, tracking_uri: str | None, registry_uri: str | None) -> Any:
-    """Create a client with explicit tracking and registry stores."""
-    return mlflow.MlflowClient(tracking_uri=tracking_uri, registry_uri=registry_uri)
+        raise translate_error(exc, name=name, version="new") from exc
 
 
 def _validate_reference(
@@ -339,7 +323,7 @@ def _validate_reference(
     registry_uri: str | None,
 ) -> None:
     """Validate selector cardinality and UC-qualified names before any network call."""
-    _validate_registry_options(name, tracking_uri, registry_uri)
+    validate_registry_options(name, tracking_uri, registry_uri)
     if (alias is None) == (version is None):
         raise ValueError("Provide exactly one of alias or version.")
     if alias is not None and (type(alias) is not str or not alias.strip()):
@@ -353,7 +337,7 @@ def _validate_reference(
         raise ValueError("version must be a positive integer or positive ASCII decimal string.")
 
 
-def _validate_registry_options(
+def validate_registry_options(
     name: str, tracking_uri: str | None, registry_uri: str | None
 ) -> None:
     """Validate registry names and URI options without constructing an MLflow client."""
@@ -383,15 +367,15 @@ def _parse_runs_uri(model_uri: str) -> str:
     return run_id
 
 
-def _error_code(exc: Exception) -> str:
+def error_code(exc: Exception) -> str:
     """Read an MLflow error code without importing optional exception classes."""
     value = getattr(exc, "error_code", "")
     return str(getattr(value, "value", value)).upper()
 
 
-def _translate_error(exc: Exception, *, name: str, version: str) -> RegistryError:
+def translate_error(exc: Exception, *, name: str, version: str) -> RegistryError:
     """Translate backend errors into stable caller-facing registry categories."""
-    code = _error_code(exc)
+    code = error_code(exc)
     if code in {"RESOURCE_DOES_NOT_EXIST", "NOT_FOUND"}:
         return RegistryModelNotFoundError(f"Model '{name}' version '{version}' was not found.")
     if code in {"PERMISSION_DENIED", "UNAUTHENTICATED", "UNAUTHORIZED"}:
@@ -399,7 +383,7 @@ def _translate_error(exc: Exception, *, name: str, version: str) -> RegistryErro
     return RegistryOperationError(f"MLflow registry operation failed for model '{name}'.")
 
 
-def _validate_concrete_version(resolved: ResolvedModel) -> None:
+def validate_concrete_version(resolved: ResolvedModel) -> None:
     """Require a positive pinned version whose URI agrees with its identity."""
     if (
         not isinstance(resolved.version, str)
@@ -429,12 +413,12 @@ def _resolve_version(client: Any, name: str, alias: str | None, version: str | i
     except Exception as exc:  # noqa: BLE001 - translate MLflow's backend errors at the boundary
         if (
             alias is not None
-            and _error_code(exc) == "INVALID_PARAMETER_VALUE"
+            and error_code(exc) == "INVALID_PARAMETER_VALUE"
             and "alias" in str(exc).lower()
             and "not found" in str(exc).lower()
         ):
             raise RegistryModelNotFoundError(
                 f"Model '{name}' alias '{alias}' was not found."
             ) from exc
-        raise _translate_error(exc, name=name, version=str(version or alias)) from exc
+        raise translate_error(exc, name=name, version=str(version or alias)) from exc
     return model_version
