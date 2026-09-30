@@ -7,7 +7,6 @@ if __name__ == "__main__":
     output = run_model_set_score_notebook(
         globals()["spark"],
         globals()["dbutils"],
-        display_html=globals().get("displayHTML"),
         exit_notebook=False,
     )
 

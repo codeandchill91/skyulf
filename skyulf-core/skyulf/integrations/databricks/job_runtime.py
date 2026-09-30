@@ -286,6 +286,10 @@ def _prepared_notebook_request(
             config, Path(values["config_path"]).parent / preprocessing_path
         )
     config = validate_workflow_config(config, action=action)
+    if action == "train" and "competition" in config:
+        from .training_node_notebook import validate_model_task_names  # noqa: PLC0415
+
+        validate_model_task_names(values, set(config["competition"]["candidates"]))
     options = _operator_options(action, values)
     if action in {"approve", "reject"} and not options["comparison_sha256"]:
         options["comparison_sha256"] = resolve_candidate_comparison_digest(
@@ -349,6 +353,7 @@ def run_lifecycle_notebook(
     display_html: Callable[[str], Any] | None = None,
     exit_notebook: bool = True,
     preprocessing_path: str | Path | None = None,
+    separate_shap: bool = False,
 ) -> str:
     """Execute a fixed lifecycle phase using durable evidence from its predecessor.
 
@@ -387,23 +392,40 @@ def run_lifecycle_notebook(
         )
     if phase in {"result", "complete"}:
         dbutils.jobs.taskValues.set(key="score_requested", value=outcome.output["score_requested"])
+    render = _lifecycle_notebook_renderer(phase, outcome, options["tracking_uri"], separate_shap)
     return _notebook_output(
         outcome.output,
         dbutils,
-        render=(
-            render_bundle_output
-            if phase in {"result", "complete"}
-            else lambda payload: render_lifecycle_output(phase, payload)
-        ),
+        render=render,
         display_html=display_html,
         exit_notebook=exit_notebook,
         explanation_tracking_uri=(
             options["tracking_uri"]
             if phase in {"train", "train_register"}
+            and not separate_shap
             and outcome.output.get("explanations", {}).get("status") in {"completed", "unavailable"}
             else None
         ),
     )
+
+
+def _lifecycle_notebook_renderer(
+    phase: str, outcome: Any, tracking_uri: str, separate_shap: bool
+) -> Callable:
+    """Keep training settings visible when SHAP is displayed by a separate task."""
+    if phase in {"result", "complete"}:
+        return render_bundle_output
+    if phase == "select_best_model" and outcome.output.get("selection_mode") == "single_candidate":
+        return lambda payload: render_lifecycle_output("validate_model", payload)
+    if phase == "train" and separate_shap:
+        from ..mlflow.tracking import _make_client  # noqa: PLC0415
+        from .training_node_output import render_training_node  # noqa: PLC0415
+
+        client = _make_client(tracking_uri)
+        return lambda payload: render_training_node(
+            client, outcome.reference["run_id"], {"training": payload}
+        )
+    return lambda payload: render_lifecycle_output(phase, payload)
 
 
 def run_score_notebook(

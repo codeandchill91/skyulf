@@ -213,7 +213,7 @@ def test_completion_publishes_score_request_only_after_verified_result(monkeypat
     ],
 )
 def test_generated_notebooks_bind_their_own_phase_and_defer_exit(monkeypatch, filename, phase):
-    """A run parameter cannot turn a visible phase into another lifecycle operation."""
+    """Normal job nodes preserve their phase and JSON result without requesting HTML."""
     from skyulf.integrations.databricks import job_runtime
 
     path = (
@@ -225,7 +225,13 @@ def test_generated_notebooks_bind_their_own_phase_and_defer_exit(monkeypatch, fi
     monkeypatch.setattr(job_runtime, "run_lifecycle_notebook", execute)
     notebook = Mock()
     dbutils = SimpleNamespace(notebook=notebook)
-    runpy.run_path(str(path), run_name="__main__", init_globals={"spark": None, "dbutils": dbutils})
+    display = Mock()
+    runpy.run_path(
+        str(path),
+        run_name="__main__",
+        init_globals={"spark": None, "dbutils": dbutils, "displayHTML": display},
+    )
+    assert execute.call_args.kwargs.get("display_html") is None
     assert execute.call_args.kwargs["phase"] == phase
     assert execute.call_args.kwargs["exit_notebook"] is False
     assert ("preprocessing_path" in execute.call_args.kwargs) == (phase == "initialize")

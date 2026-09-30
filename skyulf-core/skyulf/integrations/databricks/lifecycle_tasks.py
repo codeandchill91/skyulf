@@ -828,6 +828,7 @@ def run_lifecycle_phase(
     if reference is None:
         raise ValueError("Lifecycle phase requires its predecessor reference.")
     store.bind(reference)
+    reference = _selection_reference(store, phase, reference)
     expected_predecessor = (
         "prepare" if phase in {"complete", "model_decision"} else store.predecessor(phase)
     )
@@ -839,6 +840,21 @@ def run_lifecycle_phase(
         return _complete_invocation(spark, store, tracking_uri, reference, task_states)
     _validate_active_phase(store, phase)
     return _execute_phase(spark, store, phase, reference)
+
+
+def _selection_reference(
+    store: _PhaseStore, phase: str, reference: dict[str, str]
+) -> dict[str, str]:
+    """Join named candidate tasks only at the competition selection boundary."""
+    if (
+        phase != "select_best_model"
+        or reference["phase"] != "prepare_dataset"
+        or "competition" not in store.request
+    ):
+        return reference
+    from .training_nodes import join_competition_training  # noqa: PLC0415
+
+    return join_competition_training(store, reference).reference
 
 
 def _run_model_decision(

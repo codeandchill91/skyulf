@@ -1,13 +1,12 @@
 # Databricks notebook source
-"""Run scoring with a fixed role that cannot dispatch lifecycle mutations."""
+"""train model using the pinned invocation and saved evidence."""
 
-from skyulf.integrations.databricks.job_runtime import run_score_notebook
+from skyulf.integrations.databricks.training_node_notebook import run_model_training_notebook
 
 if __name__ == "__main__":
-    output = run_score_notebook(
+    output = run_model_training_notebook(
         globals()["spark"],
         globals()["dbutils"],
-        exit_notebook=False,
     )
 
 # COMMAND ----------

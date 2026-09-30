@@ -24,11 +24,13 @@ resources:
 {{end}}
       tasks:
 {{if eq .training_layout "multi_target"}}
-        - task_key: train_models
+        - &branch_task
+          task_key: initialize_run
           max_retries: 0
           notebook_task:
-            notebook_path: ../src/jobs/train_models.py
-            base_parameters:
+            notebook_path: ../src/jobs/initialize_models.py
+            base_parameters: &branch_parameters
+              model_keys_json: '[{{$comma := ""}}{{range $slot := (regexp "[1-8]").FindAllString "12345678" -1}}{{if le $slot $.branch_count}}{{$comma}}{{printf "%q" (index $ (printf "branch_%s_name" $slot))}}{{$comma = ", "}}{{end}}{{end}}]'
               workflow_contract: "3"
               job_id: '{{"{{job.id}}"}}'
               job_run_id: '{{"{{job.run_id}}"}}'
@@ -62,6 +64,91 @@ resources:
                 package: matplotlib==3.10.0
 {{end}}
 {{end}}
+        - task_key: choose_action
+          depends_on:
+            - task_key: initialize_run
+          max_retries: 0
+          condition_task:
+            op: EQUAL_TO
+            left: '{{"{{tasks.initialize_run.values.training_requested}}"}}'
+            right: "true"
+        # BEGIN MODEL TASKS
+{{range $slot := (regexp "[1-8]").FindAllString "12345678" -1}}{{if le $slot $.branch_count}}
+{{$name := index $ (printf "branch_%s_name" $slot)}}
+        - <<: *branch_task
+          task_key: train_{{$name}}
+          depends_on:
+            - task_key: choose_action
+              outcome: "true"
+          notebook_task:
+            notebook_path: ../src/jobs/train_model.py
+            base_parameters:
+              <<: *branch_parameters
+              model_key: "{{$name}}"
+              reference_json: '{{"{{tasks.initialize_run.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+{{if eq $.shap_enabled "true"}}
+        - <<: *branch_task
+          task_key: shap_{{$name}}
+          depends_on:
+            - task_key: train_{{$name}}
+          notebook_task:
+            notebook_path: ../src/jobs/shap_report.py
+            base_parameters:
+              <<: *branch_parameters
+              reference_json: '{{printf "{{tasks.train_%s.values.reference_json}}" $name}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+{{end}}{{end}}{{end}}
+        # END MODEL TASKS
+        - <<: *branch_task
+          task_key: register_model_set
+          depends_on:
+            # BEGIN MODEL DEPENDENCIES
+{{range $slot := (regexp "[1-8]").FindAllString "12345678" -1}}{{if le $slot $.branch_count}}
+            - task_key: train_{{index $ (printf "branch_%s_name" $slot)}}
+{{end}}{{end}}
+            # END MODEL DEPENDENCIES
+          notebook_task:
+            notebook_path: ../src/jobs/register_model_set.py
+            base_parameters:
+              <<: *branch_parameters
+              reference_json: '{{"{{tasks.initialize_run.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+        - <<: *branch_task
+          task_key: evaluate_model_set
+          depends_on:
+            - task_key: register_model_set
+          notebook_task:
+            notebook_path: ../src/jobs/evaluate_model_set.py
+            base_parameters:
+              <<: *branch_parameters
+              reference_json: '{{"{{tasks.register_model_set.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+        - <<: *branch_task
+          task_key: model_decision
+          run_if: NONE_FAILED
+          depends_on:
+            - task_key: choose_action
+              outcome: "false"
+            - task_key: evaluate_model_set
+          notebook_task:
+            notebook_path: ../src/jobs/model_set_decision.py
+            base_parameters:
+              <<: *branch_parameters
+              reference_json: '{{"{{tasks.initialize_run.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+        - <<: *branch_task
+          task_key: training_report
+          run_if: ALL_DONE
+          depends_on:
+            - task_key: model_decision
+          notebook_task:
+            notebook_path: ../src/jobs/models_report.py
+            base_parameters:
+              <<: *branch_parameters
+              reference_json: '{{"{{tasks.initialize_run.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+              decision_result_state: '{{"{{tasks.model_decision.result_state}}"}}'
 {{else}}
         - &lifecycle_task
           task_key: initialize_run
@@ -69,6 +156,9 @@ resources:
           notebook_task:
             notebook_path: ../src/jobs/initialize_run.py
             base_parameters: &lifecycle_parameters
+{{if eq .training_layout "model_competition"}}
+              model_keys_json: '[{{$comma := ""}}{{range $slot := (regexp "[1-8]").FindAllString "12345678" -1}}{{if le $slot $.competition_candidate_count}}{{$comma}}{{printf "%q" (printf "%s_%s" (index $ (printf "competition_%s_model_%s" $.task $slot)) $slot)}}{{$comma = ", "}}{{end}}{{end}}]'
+{{end}}
               workflow_contract: "3"
               job_id: '{{"{{job.id}}"}}'
               job_run_id: '{{"{{job.run_id}}"}}'
@@ -131,6 +221,49 @@ resources:
               <<: *lifecycle_parameters
               reference_json: '{{"{{tasks.load_data.values.reference_json}}"}}'
               tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+{{if eq .training_layout "model_competition"}}
+        # BEGIN MODEL TASKS
+{{range $slot := (regexp "[1-8]").FindAllString "12345678" -1}}{{if le $slot $.competition_candidate_count}}
+{{$name := printf "%s_%s" (index $ (printf "competition_%s_model_%s" $.task $slot)) $slot}}
+        - <<: *lifecycle_task
+          task_key: train_{{$name}}
+          depends_on:
+            - task_key: prepare_dataset
+          notebook_task:
+            notebook_path: ../src/jobs/train_model.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              model_key: "{{$name}}"
+              reference_json: '{{"{{tasks.prepare_dataset.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+{{if eq $.shap_enabled "true"}}
+        - <<: *lifecycle_task
+          task_key: shap_{{$name}}
+          depends_on:
+            - task_key: train_{{$name}}
+          notebook_task:
+            notebook_path: ../src/jobs/shap_report.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{printf "{{tasks.train_%s.values.reference_json}}" $name}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+{{end}}{{end}}{{end}}
+        # END MODEL TASKS
+        - <<: *lifecycle_task
+          task_key: select_best_model
+          depends_on:
+            # BEGIN MODEL DEPENDENCIES
+{{range $slot := (regexp "[1-8]").FindAllString "12345678" -1}}{{if le $slot $.competition_candidate_count}}
+            - task_key: train_{{index $ (printf "competition_%s_model_%s" $.task $slot)}}_{{$slot}}
+{{end}}{{end}}
+            # END MODEL DEPENDENCIES
+          notebook_task:
+            notebook_path: ../src/jobs/select_best_model.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{"{{tasks.prepare_dataset.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+{{else}}
         - <<: *lifecycle_task
           task_key: train_and_tune
           depends_on:
@@ -142,24 +275,37 @@ resources:
               reference_json: '{{"{{tasks.prepare_dataset.values.reference_json}}"}}'
               tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
         - <<: *lifecycle_task
-          task_key: select_best_model
+          task_key: validate_model
           depends_on:
             - task_key: train_and_tune
           notebook_task:
-            notebook_path: ../src/jobs/select_best_model.py
+            notebook_path: ../src/jobs/validate_model.py
             base_parameters:
               <<: *lifecycle_parameters
               reference_json: '{{"{{tasks.train_and_tune.values.reference_json}}"}}'
               tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+{{if eq .shap_enabled "true"}}
+        - <<: *lifecycle_task
+          task_key: shap_model
+          depends_on:
+            - task_key: train_and_tune
+          notebook_task:
+            notebook_path: ../src/jobs/shap_report.py
+            base_parameters:
+              <<: *lifecycle_parameters
+              reference_json: '{{"{{tasks.train_and_tune.values.reference_json}}"}}'
+              tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
+{{end}}
+{{end}}
         - <<: *lifecycle_task
           task_key: register_model
           depends_on:
-            - task_key: select_best_model
+            - task_key: {{if eq .training_layout "model_competition"}}select_best_model{{else}}validate_model{{end}}
           notebook_task:
             notebook_path: ../src/jobs/register_model.py
             base_parameters:
               <<: *lifecycle_parameters
-              reference_json: '{{"{{tasks.select_best_model.values.reference_json}}"}}'
+              reference_json: '{{if eq .training_layout "model_competition"}}{{"{{tasks.select_best_model.values.reference_json}}"}}{{else}}{{"{{tasks.validate_model.values.reference_json}}"}}{{end}}'
               tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
         - <<: *lifecycle_task
           task_key: evaluate_model
@@ -196,6 +342,7 @@ resources:
               reference_json: '{{"{{tasks.initialize_run.values.reference_json}}"}}'
               tracking_uri: '{{"{{tasks.initialize_run.values.tracking_uri}}"}}'
               decision_result_state: '{{"{{tasks.model_decision.result_state}}"}}'
+{{end}}
         - task_key: scoring_requested
           depends_on:
             - task_key: training_report
@@ -213,7 +360,6 @@ resources:
             job_id: ${resources.jobs.score.id}
             job_parameters:
               score_model_version: ""
-{{end}}
 {{if eq .compute_mode "serverless"}}
       environments:
         - environment_key: skyulf

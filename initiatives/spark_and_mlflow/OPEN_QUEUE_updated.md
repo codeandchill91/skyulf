@@ -8,6 +8,32 @@
 > Real training and saved notebook charts passed; final-wheel report replay also
 > passed. [Delivery121](121-sm36e-shap-delivery.md). SM-36d stays PARKED.
 > Next: SM-52 internal helper API cleanup, explicitly ordered before SM-37/38/39.
+> Approved SM-36e follow-up (2026-09-30): separate real training tasks and leaf
+> SHAP reports are now in the Bundle template. Single/competition/multi-model
+> live training, saved notebook output audits and all three score jobs passed
+> (120 rows each). Single uses `validate_model`; multi exposes set registration,
+> evaluation and policy/operator decision as real separate tasks. Champion and
+> challenger aliases remain set-level. [Delivery122](122-training-and-shap-nodes.md).
+> Multi now supports `score_handoff=after_alias_change`: live run 418921754428153
+> passed all 14 tasks and automatically invoked score run 434291347583937,
+> which committed 120 predictions. The wizard exposes the same handoff option.
+> Final clean-schema acceptance: all three layouts and their automatic score
+> children passed (120 rows each), seven SHAP reports/28 charts and independent
+> Delta readback passed; 283 local tests passed. Active test namespace is now
+> `workspace.skyulf_clean_20260930`. Both old test schemas were deleted after
+> verification (147 tables/views, 119 models and associated functions).
+> [Final acceptance123](123-clean-final-acceptance.md).
+> Lifecycle replay124 passed: six pandas/Polars single/competition/multi scenarios,
+> 380 distinct cloud contracts, nine real approve/reject/rollback jobs and six
+> automatic score children. Full rebuild, append/no-op, quality rejection,
+> rollback, multi source corrections and all three publication modes passed.
+> Independent Delta readback verified model versions and changed predictions;
+> both old schemas remain absent. [Evidence124](124-lifecycle-revalidation.md).
+> User-requested cleanup125: only SHAP template notebooks pass displayHTML;
+> normal nodes emit JSON. 66 affected tests and static gates passed. The current
+> `workspace.skyulf_clean_20260930` schema is now empty (53 tables/views and 18
+> models with their versions/associated functions removed); historical test
+> evidence is retained locally. [Evidence125](125-json-notebooks-and-schema-cleanup.md).
 > Latest delivery [113](113-model-set-quality-promotion.md) /
 > [114](114-model-set-challenger-delivery.md): automatic/manual set quality gates,
 > model inventory tags, challenger history and explicit rejection are verified.
@@ -240,6 +266,9 @@ models rather than select one champion.
 
 Delivery: [report116](116-sm54-model-competition-delivery.md). The first delivery
 executes candidates sequentially and requires all requested candidates to finish.
+The approved 2026-09-30 Bundle follow-up uses separate candidate training tasks
+and leaf SHAP report tasks; selection still requires every candidate. The
+original sequential Core API remains available. See [report122](122-training-and-shap-nodes.md).
 Model-set nesting remains outside the user-approved single-target scope.
 
 Acceptance:

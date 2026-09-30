@@ -8,7 +8,7 @@ and model fitting run locally on the selected compute.
 
 Choose `training_layout=model_competition` to compare named candidates for one
 target and select one winner. It uses the existing `train` and `score` jobs and
-single-model promotion controls. Candidates run sequentially. Setup asks for the
+single-model promotion controls. Each candidate has its own training task. Setup asks for the
 shared target/task, source, inputs, CV policy, final metric, quality threshold and
 lifecycle settings. Choose 2-8 candidates from task-specific model lists, then
 choose their common preprocessing recipe and search strategy/settings. Selecting
@@ -95,7 +95,7 @@ during training.
 ## Optional multi-target training
 
 The initializer's `training_layout` defaults to `single_model`. Choose
-`multi_target` to use the same `train` job with one `train_models` task; the
+`multi_target` to use the same `train` job with one `train_<name>` task per model; the
 project still has exactly two jobs (`train` and `score`). Setup asks shared data,
 output selection, compute and training schedule questions, then 2-8 branches.
 For each branch choose its name, target, features, task, model, recipes, split,
@@ -103,6 +103,12 @@ CV, tuning and quality settings. Ensemble choices open that branch's base-model
 menus and controls. The initializer writes executable `src/modeling/multi_model.py`.
 Multi-target keeps branch `promotion_policy=manual_approval` and
 `score_handoff=disabled`; whole-set manual/automatic policy is in model_set.py.
+The shared `score_handoff` prompt controls the complete set separately. Choose
+`after_alias_change` to start the existing score job after successful automatic
+promotion, manual approval or rollback. `training_report -> scoring_requested
+-> run_batch_scoring` provides this handoff. A pending/rejected candidate or
+failed quality check does not trigger scoring. `disabled` keeps scoring manual
+or scheduled. Promotion alone does not enable this option.
 
 Edit the generated declarations in `src/modeling/multi_model.py` when needed.
 Classification, regression and ensemble branches can be mixed. Each branch has a
@@ -441,7 +447,10 @@ generated multi-target branches. Edit `pipeline.explainability` in
 
 Remove the field or set it to `null` (`None` in Python) to disable computation.
 For an existing project, also add the dependencies above to the training job's
-environment/libraries before enabling SHAP manually and redeploy.
+environment/libraries before enabling SHAP manually. Projects generated with
+SHAP disabled have no report tasks: regenerate with SHAP enabled, or add a
+`shap_report.py` task depending only on its matching training task and passing
+that task's `reference_json`. Validate and redeploy the updated graph.
 
 `max_samples` (1-200) bounds training rows used for computation. `max_features`
 (1-50) guards the transformed model input width: exceeding it returns unavailable;
@@ -450,7 +459,7 @@ it does **not** select the top features or drop columns. `max_display_samples`
 global importance. These settings apply per model, so an eight-model run can do
 eight times the explanation work.
 
-The training task displays a mean-absolute importance chart and expandable
+Each enabled `shap_<name>` task displays a mean-absolute importance chart and expandable
 waterfalls with transformed feature values. Red contributions increase the
 explained output; blue contributions decrease it. Base plus contributions is in
 the explainer's output units, which may be raw scores/log-odds for classifiers,
@@ -464,6 +473,73 @@ retained on the parent with its child-run provenance. Unavailable explanations
 show their reason; disabled training does not import SHAP or plotting packages.
 Inputs are bounded training rows through already fitted inference preprocessing;
 holdout rows and target/time metadata are not explanation features.
+
+### Training graph and notebook files
+
+Each `train_<name>` performs a real fit and retains its split, preprocessing,
+model, CV and tuning information. Its `shap_<name>` task is a separate leaf:
+it displays that exact run's saved report and has no outgoing dependencies.
+SHAP computation still happens during the fit; the leaf does not retrain the
+model. Unavailable explanations show their saved reason. A report-task failure
+is visible in the job but does not prevent model selection or set assembly.
+
+Only SHAP tasks display HTML charts and reports. All other notebook tasks print
+their structured JSON result, including training, comparison, model decisions
+and scoring. Task values and downstream job handoffs use the same saved results.
+
+- Competition: `initialize_run -> choose_action -> load_data -> prepare_dataset`,
+  then one training task per candidate. `select_best_model` waits for every
+  training task, adopts the fitted winner without retraining, and continues to
+  `register_model -> evaluate_model -> model_decision -> training_report`.
+  Loser runs and their reports remain in MLflow; losers are not registered.
+- Multi-model: `initialize_run -> choose_action`, then one training task per
+  target. `register_model_set` waits for every model, packages the complete set
+  and nominates its challenger. `evaluate_model_set` checks each component's
+  quality and comparison with the pinned champion. `model_decision` applies
+  the set's promotion policy or an explicit approve/reject/rollback action.
+  Champion/challenger aliases belong to the set; component versions stay pinned.
+  `training_report` closes the invocation even when a training task fails.
+  After a successful report, `scoring_requested` starts `run_batch_scoring` only
+  when the enabled handoff has a verified champion transition.
+- Single model: the existing `train_and_tune` task retains training information;
+  `validate_model` verifies the fitted candidate before `register_model`.
+  `shap_model` displays its separate report when SHAP is enabled.
+
+The graph uses meaningful model names; notebook implementation is shared:
+
+| File in `src/jobs` | Responsibility |
+| --- | --- |
+| `initialize_run.py` | Pin single/competition source, recipes and champion |
+| `initialize_models.py` | Pin every multi-model recipe, source version and set baseline |
+| `load_data.py`, `prepare_dataset.py` | Load and split the shared single/competition dataset |
+| `train_and_tune.py` | Fit a single model |
+| `train_model.py` | Fit the named competition candidate or multi-model branch |
+| `shap_report.py` | Display one training task's saved SHAP report |
+| `select_best_model.py` | Select the complete competition's winner from training-side CV |
+| `validate_model.py` | Verify the single fitted candidate before registration |
+| `register_model.py`, `evaluate_model.py`, `model_decision.py` | Existing single-model registration and alias controls |
+| `register_model_set.py` | Package the complete set and nominate its challenger |
+| `evaluate_model_set.py` | Evaluate every component against its quality policy and pinned champion |
+| `model_set_decision.py` | Apply set promotion policy or an explicit approve/reject/rollback action |
+| `training_report.py`, `models_report.py` | Final single/competition or multi-model status |
+| `score.py`, `score_models.py` | Saved single-model or model-set scoring |
+| `train_models.py` | Compatibility entrypoint for earlier sequential multi-model callers |
+
+Changing parameters or a recipe keeps the graph unchanged. After adding,
+removing or renaming entries in `src/modeling/model_competition.py` or
+`src/modeling/multi_model.py`, run:
+
+```bash
+python src/tools/refresh_training_graph.py
+databricks bundle validate --strict --target dev
+databricks bundle deploy --target dev
+```
+
+The refresh script preserves schedules, compute and operator settings. A changed
+model list with an old deployed graph is rejected before any model is trained.
+Tasks can run concurrently when compute permits; each task's row/byte/search
+limits still apply separately. Existing serialized job admission, frozen
+receipts and no-repair/no-retry rules remain in effect.
 
 ### Training parameters in MLflow
 
@@ -606,7 +682,8 @@ The `train` job has one active run, with queued training and operator actions:
 | `load_data` | Read the bounded pinned source and save its verified dataset |
 | `prepare_dataset` | Apply fixed cleanup and eligibility rules, then save training/holdout partitions |
 | `train_and_tune` | Fit preprocessing inside training folds, run configured CV/tuning, and save the fitted pipeline |
-| `select_best_model` | Verify the single candidate or show the competition leaderboard and selected winner |
+| `validate_model` | Verify the single fitted candidate |
+| `select_best_model` | Show the competition leaderboard and selected winner |
 | `register_model` | Check heldout evaluation before registering and nominating the candidate |
 | `evaluate_model` | Compare the registered candidate with the pinned champion on the same holdout |
 | `model_decision` | Apply promotion policy or execute an explicit approve/reject/rollback action |

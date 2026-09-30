@@ -162,6 +162,21 @@ class _PhaseStore:
 
     def predecessor(self, phase: str) -> str | None:
         """Use the graph pinned at initialization when validating the receipt chain."""
+        if "branch_plan" in self.request:
+            branches = {
+                f"branch_{item['name']}" for item in self.request["branch_plan"]["branches"]
+            }
+            if phase in branches | {"register_model_set"}:
+                return "prepare"
+            if phase in {"evaluate_model_set", "model_decision"}:
+                return {
+                    "evaluate_model_set": "register_model_set",
+                    "model_decision": "evaluate_model_set",
+                }[phase]
+        if phase.startswith("candidate_") and phase.removeprefix("candidate_") in self.request.get(
+            "competition", {}
+        ).get("candidates", {}):
+            return "prepare_dataset"
         if self.request.get("graph_version", 2) == 3:
             overrides = {"train": "prepare_dataset", "evaluate_register": "select_best_model"}
             if phase in overrides:

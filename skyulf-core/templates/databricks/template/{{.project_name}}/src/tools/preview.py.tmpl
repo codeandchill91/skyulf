@@ -17,7 +17,7 @@ def _preview(config, action):
     if config.get("training_layout") != "model_competition":
         return preview_workflow_config(config, action=action)
     lines = [
-        "Model competition: shared source, target and CV; sequential candidates.",
+        "Model competition: shared source, target and CV; separate candidate training tasks.",
         "Only the CV winner receives the final holdout check and registration.",
     ]
     for name, candidate in config["competition"]["candidates"].items():
@@ -32,7 +32,7 @@ def _project_preview(config, path, bindings, action):
     if config.get("training_layout") == "multi_target":
         branches = load_training_branch_configs({
             "config_path": str(path), "workflow_contract": "3",
-            "deployed_score_handoff": "disabled", **bindings,
+            "deployed_score_handoff": config["score_handoff"], **bindings,
         })
         return "\n\n".join(
             f"Branch: {name}\n{preview_workflow_config(branch, action=action)}"

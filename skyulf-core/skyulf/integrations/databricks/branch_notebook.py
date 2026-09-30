@@ -28,11 +28,12 @@ from .model_set_project import (
 from .project import load_project_workflow
 
 
-def _training_only(config: dict[str, Any]) -> None:
-    """Reject policies whose activation semantics are not implemented for branches."""
+def _training_only(config: dict[str, Any], *, allow_set_handoff: bool = False) -> None:
+    """Keep component activation manual while allowing parent-level score orchestration."""
     if config.get("promotion_policy") != "manual_approval":
         raise ValueError("Multi-target training requires promotion_policy=manual_approval.")
-    if config.get("score_handoff") != "disabled":
+    allowed = {"disabled", "after_alias_change"} if allow_set_handoff else {"disabled"}
+    if config.get("score_handoff") not in allowed:
         raise ValueError("Multi-target training requires score_handoff=disabled.")
 
 
@@ -61,7 +62,7 @@ def _branch_config(
     overlay = entry.get("workflow")
     if not isinstance(overlay, dict):
         raise ValueError("Each branch workflow must be a configuration overlay.")
-    config = {**deepcopy(base), **deepcopy(overlay)}
+    config = {**deepcopy(base), "score_handoff": "disabled", **deepcopy(overlay)}
     config["training_layout"] = "multi_target"
     _training_only(config)
     bindings = {
@@ -97,7 +98,7 @@ def load_training_branch_configs(values: dict[str, str]) -> dict[str, dict[str, 
     packages are captured before the service validates and reads remote data.
     """
     base = _read_notebook_config(values)
-    _training_only(base)
+    _training_only(base, allow_set_handoff=True)
     modeling = Path(values["config_path"]).parent.parent / "src/modeling"
     return {
         name: _branch_config(base, entry, values, modeling)
@@ -128,6 +129,8 @@ def run_branch_training_notebook(
     """Train branch candidates or explicitly operate an enabled saved model set."""
     values = dbutils.widgets.getAll()
     _lifecycle_widget_context(values)
+    # Legacy sequential notebooks have no child score task; require the new graph.
+    _training_only(_read_notebook_config(values))
     action = values.get("lifecycle_action", "train")
     settings = load_project_model_set(values)
     if settings is None and action != "train":

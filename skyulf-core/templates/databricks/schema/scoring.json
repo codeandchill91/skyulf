@@ -75,18 +75,11 @@
     "order": 726,
     "type": "string",
     "default": "disabled",
-    "description": "4. Lifecycle | Optionally run the existing score job after champion initialization, promotion or rollback; score keeps its selected model policy",
+    "description": "4. Lifecycle | Optionally start the score job after successful champion initialization, promotion or rollback (single, competition or model set). Pending approval, failed quality and rejection do not start scoring",
     "enum": [
       "disabled",
       "after_alias_change"
-    ],
-    "skip_prompt_if": {
-      "properties": {
-        "training_layout": {
-          "const": "multi_target"
-        }
-      }
-    }
+    ]
   },
   "regression_metric": {
     "order": 727,

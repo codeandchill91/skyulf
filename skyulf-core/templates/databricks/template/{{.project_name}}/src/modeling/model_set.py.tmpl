@@ -16,7 +16,11 @@ and the previous champion stays active. The first set needs absolute thresholds.
 manual_approval uses the same quality checks when approve is requested.
 Each replacement is compared with the corresponding model in the champion set,
 not independently moved component aliases. Ties do not pass. Scoring is a
-separate job. Changing quality settings requires a newly trained set.
+separate job. Set score_handoff="after_alias_change" in config/workflow.json
+and redeploy matching job definitions to start it after a successful automatic
+promotion, manual approval or rollback. With disabled, run/schedule score
+independently. Pending approval, failed gates and reject never trigger handoff.
+Changing quality settings requires a newly trained set.
 
 Each complete candidate becomes challenger; a later candidate moves it to
 previous_challenger. Approve activates the set and clears its challenger alias.

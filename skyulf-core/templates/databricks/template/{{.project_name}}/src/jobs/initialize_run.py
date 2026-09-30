@@ -9,7 +9,6 @@ if __name__ == "__main__":
         globals()["dbutils"],
         phase="initialize",
         preprocessing_path="../src/features",
-        display_html=globals().get("displayHTML"),
         exit_notebook=False,
     )
 

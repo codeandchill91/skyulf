@@ -117,13 +117,13 @@ def _bind_publication(value: Any, bindings: dict[str, str]) -> dict[str, Any]:
 
 
 def _set_policy(bound: dict[str, Any]) -> None:
-    """Allow gated activation while retaining the independently invoked score job."""
-    if (
-        bound["promotion_policy"] not in {"manual_approval", "automatic"}
-        or bound["score_handoff"] != "disabled"
-    ):
+    """Allow gated activation and optional handoff to the existing score job."""
+    if bound["promotion_policy"] not in {"manual_approval", "automatic"} or bound[
+        "score_handoff"
+    ] not in {"disabled", "after_alias_change"}:
         raise ValueError(
-            "Model sets require manual_approval or automatic and disabled score_handoff."
+            "Model sets require manual_approval or automatic and score_handoff "
+            "disabled or after_alias_change."
         )
 
 
@@ -347,13 +347,20 @@ def _approval_frame(spark: Any, artifact: Any, config: dict[str, Any]) -> Any:
 
 
 def run_model_set_operator(
-    spark: Any, values: dict[str, str], settings: dict[str, Any], options: dict[str, Any]
+    spark: Any,
+    values: dict[str, str],
+    settings: dict[str, Any],
+    options: dict[str, Any],
+    *,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Approve or roll back one complete saved set without reading editable recipes."""
     from ..mlflow.model_set_lifecycle import rollback_model_set  # noqa: PLC0415
 
     action = values["lifecycle_action"]
-    config = validate_workflow_config(_read_notebook_config(values), action=action)
+    config = validate_workflow_config(
+        _read_notebook_config(values) if config is None else config, action=action
+    )
     endpoints = _endpoints(config)
     admission = ExclusiveAliasWriterAdmission()
     if action == "rollback":

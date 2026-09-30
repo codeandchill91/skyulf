@@ -118,9 +118,7 @@ def test_branch_loader_preserves_independent_recipes_and_bindings(tmp_path, work
     assert Path(values["config_path"]).read_text() == before
 
 
-@pytest.mark.parametrize(
-    "change", [{"promotion_policy": "automatic"}, {"score_handoff": "after_alias_change"}]
-)
+@pytest.mark.parametrize("change", [{"promotion_policy": "automatic"}, {"score_handoff": "always"}])
 def test_branch_loader_rejects_unsupported_policies(tmp_path, workflow_config, change):
     """Multi-target training must never silently enable promotion or scoring."""
     from skyulf.integrations.databricks.branch_notebook import load_training_branch_configs
@@ -152,8 +150,9 @@ def test_branch_notebook_rejects_repairs_and_operator_actions(tmp_path, workflow
 )
 @pytest.mark.parametrize("compute", ["serverless", "policy_cluster"])
 @pytest.mark.parametrize("policy", ["manual_approval", "automatic"])
-def test_multi_target_cli_graph_has_same_two_jobs(tmp_path, compute, policy):
-    """Actual Go expansion must select one branch task with no alias or score handoff tasks."""
+@pytest.mark.parametrize("handoff", ["disabled", "after_alias_change"])
+def test_multi_target_cli_graph_has_same_two_jobs(tmp_path, compute, policy, handoff):
+    """Actual Go expansion must create independent fits and retain a single complete-set join."""
     from test_databricks_bundle_generation import _generate_project, _read_jobs, _synced_sources
 
     project = _generate_project(
@@ -161,17 +160,24 @@ def test_multi_target_cli_graph_has_same_two_jobs(tmp_path, compute, policy):
         training_layout="multi_target",
         compute_mode=compute,
         model_set_promotion_policy=policy,
+        score_handoff=handoff,
     )
     jobs = _read_jobs(project)
     assert set(jobs) == {"train", "score"}
     train = jobs["train"]
     assert train["max_concurrent_runs"] == 1
-    assert len(train["tasks"]) == 1
+    assert len(train["tasks"]) == 10
+    tasks = {item["task_key"]: item for item in train["tasks"]}
+    assert tasks["scoring_requested"]["depends_on"] == [{"task_key": "training_report"}]
+    assert tasks["run_batch_scoring"]["depends_on"] == [
+        {"task_key": "scoring_requested", "outcome": "true"}
+    ]
+    assert tasks["run_batch_scoring"]["run_job_task"]["job_id"] == "${resources.jobs.score.id}"
     task = train["tasks"][0]
-    assert task["task_key"] == "train_models" and task["max_retries"] == 0
-    assert task["notebook_task"]["notebook_path"] == "../src/jobs/train_models.py"
+    assert task["task_key"] == "initialize_run" and task["max_retries"] == 0
+    assert task["notebook_task"]["notebook_path"] == "../src/jobs/initialize_models.py"
     parameters = task["notebook_task"]["base_parameters"]
-    assert parameters["deployed_score_handoff"] == "disabled"
+    assert parameters["deployed_score_handoff"] == handoff
     assert parameters["repair_count"] == "{{job.repair_count}}"
     assert parameters["execution_count"] == "{{task.execution_count}}"
     assert task["environment_key" if compute == "serverless" else "job_cluster_key"] == "skyulf"

@@ -142,6 +142,7 @@ def render_lifecycle_output(phase: str, payload: dict[str, Any]) -> str:
         "load_data": "Source data loaded",
         "prepare_dataset": "Dataset prepared and split",
         "select_best_model": "Model selection completed",
+        "validate_model": "Fitted model validated",
         "model_decision": "Model decision completed",
         "train": "Candidate pipeline trained",
         "evaluate_register": "Candidate evaluated and registered",

@@ -163,7 +163,16 @@ def test_cli_multi_target_setup_defaults_omitted_branch_settings(tmp_path):
     assert config["promotion_policy"] == "manual_approval"
     assert config["score_handoff"] == "disabled"
     jobs = _read_jobs(project)
-    assert [task["task_key"] for task in jobs["train"]["tasks"]] == ["train_models"]
+    task_names = {task["task_key"] for task in jobs["train"]["tasks"]}
+    assert {
+        "initialize_run",
+        "choose_action",
+        "register_model_set",
+        "evaluate_model_set",
+        "model_decision",
+        "training_report",
+    } <= task_names
+    assert len([name for name in task_names if name.startswith("train_")]) == 2
     assert (
         jobs["score"]["tasks"][0]["notebook_task"]["notebook_path"] == "../src/jobs/score_models.py"
     )
@@ -768,7 +777,7 @@ def test_cli_emits_independent_policies_and_serialized_operator_graph(
         "load_data",
         "prepare_dataset",
         "train_and_tune",
-        "select_best_model",
+        "validate_model",
         "register_model",
         "evaluate_model",
     ]

@@ -8,7 +8,6 @@ if __name__ == "__main__":
         globals()["spark"],
         globals()["dbutils"],
         phase="evaluate_register",
-        display_html=globals().get("displayHTML"),
         exit_notebook=False,
     )
 
