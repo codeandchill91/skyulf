@@ -196,6 +196,11 @@ def run_branch_training_notebook(
         render=render_model_set_result if settings is not None else _render_branch_result,
         display_html=display_html,
         exit_notebook=exit_notebook,
+        explanation_tracking_uri=(
+            _endpoints(base)["tracking_uri"]
+            if any(config["pipeline"].get("explainability") for config in configs.values())
+            else None
+        ),
     )
 
 

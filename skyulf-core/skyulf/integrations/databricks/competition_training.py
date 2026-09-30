@@ -10,6 +10,7 @@ from ...inference.project_code import load_project_module
 from ..mlflow.tracking import TrackingRun
 from . import local_retraining as training
 from .competition_evaluation import evaluate_competition_candidate
+from .explanation_report import copy_winner_explanations
 from .local_competition import choose_winner
 from .local_cv import LocalCVSpec
 from .local_search import base_model_config
@@ -44,6 +45,8 @@ def fit_competition(
     selection = choose_winner(rows, set(candidates))
     assert best is not None
     store.log("competition/selection.json", selection)
+    if best[1].get("explainability"):
+        copy_winner_explanations(store, selection)
     store.run.set_tags(
         {"competition_winner": selection["winner"], "competition_count": str(len(rows))}
     )

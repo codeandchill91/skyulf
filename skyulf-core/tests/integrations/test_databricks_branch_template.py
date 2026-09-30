@@ -272,12 +272,22 @@ def test_branch_loader_rejects_escaping_bindings(tmp_path, workflow_config, fiel
         load_training_branch_configs(values)
 
 
-def test_branch_notebook_passes_resolved_configs_to_service(tmp_path, workflow_config, monkeypatch):
+@pytest.mark.parametrize("explanations", [False, True])
+def test_branch_notebook_passes_resolved_configs_to_service(
+    tmp_path, workflow_config, monkeypatch, explanations
+):
     """The real notebook adapter must prepare once, pass all components and display escaped output."""
-    from skyulf.integrations.databricks import local_branches
+    from skyulf.integrations.databricks import job_runtime, local_branches
     from skyulf.integrations.databricks.branch_notebook import run_branch_training_notebook
 
-    values, _ = _project(tmp_path, workflow_config)
+    values, entries = _project(tmp_path, workflow_config)
+    if explanations:
+        entries["cost"]["workflow"]["pipeline"]["explainability"] = {"method": "shap"}
+        (tmp_path / "src/modeling/branches.py").write_text(
+            f"def build_training_branches():\n    return {entries!r}\n"
+        )
+    show_explanations = Mock()
+    monkeypatch.setattr(job_runtime, "_display_training_explanations", show_explanations)
     prepared = ("prepared_revenue", "prepared_cost", "prepared_churn")
     path = Path(values["config_path"])
     path.write_text(
@@ -314,4 +324,8 @@ def test_branch_notebook_passes_resolved_configs_to_service(tmp_path, workflow_c
     assert train.call_args.kwargs["registry_uri"] == "databricks-uc"
     assert json.loads(output)["components"] == {"<cost>": {"version": "7"}}
     assert "&lt;cost&gt;" in display.call_args.args[0]
+    if explanations:
+        assert show_explanations.call_args.args[1] == "databricks"
+    else:
+        show_explanations.assert_not_called()
     dbutils.notebook.exit.assert_not_called()

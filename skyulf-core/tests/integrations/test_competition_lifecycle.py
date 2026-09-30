@@ -99,6 +99,32 @@ def test_failed_candidate_prevents_registration(staged, monkeypatch):
     assert not client.search_registered_models()
 
 
+def test_shap_competition_preserves_winner_and_child_reports(staged):
+    """Opt-in competition explanations must survive winner adoption and notebook rendering."""
+    pytest.importorskip("shap")
+    pytest.importorskip("matplotlib")
+    _, client, config, _, _ = staged
+    _competition(config)
+    for candidate in config["competition"]["candidates"].values():
+        candidate["pipeline"]["explainability"] = {
+            "method": "shap",
+            "max_samples": 3,
+            "max_display_samples": 1,
+        }
+    prepared = _call(staged, "prepare", config=config, action="train", experiment_name="shap")
+    trained = _call(staged, "train", prepared.reference)
+    assert trained.output["explanations"]["status"] == "completed"
+    parent = prepared.reference["run_id"]
+    evidence = json.loads(Path(client.download_artifacts(parent, "explanations.json")).read_text())
+    winner = next(
+        row for row in trained.output["competition"]["leaderboard"] if row["candidate"] == "strong"
+    )
+    assert evidence["run_id"] == winner["run_id"]
+    for row in trained.output["competition"]["leaderboard"]:
+        report = Path(client.download_artifacts(row["run_id"], "explanations.html")).read_text()
+        assert "data:image/png;base64," in report
+
+
 def test_cv_required_before_reading_source(staged, monkeypatch):
     """Competition cannot rank candidates by the independent final holdout."""
     from skyulf.integrations.databricks import local_workflow

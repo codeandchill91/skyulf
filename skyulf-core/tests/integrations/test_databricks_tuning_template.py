@@ -20,6 +20,21 @@ def _visible(properties, name, values):
     return not Draft7Validator(properties[name].get("skip_prompt_if", False)).is_valid(values)
 
 
+def test_shap_prompts_are_opt_in_and_bounded():
+    """Optional explanations must not ask budgets or install work by default."""
+    properties = _properties()
+    values = {name: item["default"] for name, item in properties.items()}
+    assert values["shap_enabled"] == "false"
+    budgets = ("shap_max_samples", "shap_max_features", "shap_max_display_samples")
+    assert all(not _visible(properties, name, values) for name in budgets)
+    values["shap_enabled"] = "true"
+    assert all(_visible(properties, name, values) for name in budgets)
+    assert Draft7Validator(properties["shap_max_samples"]).is_valid("200")
+    assert not Draft7Validator(properties["shap_max_samples"]).is_valid("201")
+    assert not Draft7Validator(properties["shap_max_features"]).is_valid("51")
+    assert Draft7Validator(properties["shap_max_display_samples"]).is_valid("0")
+
+
 def test_nested_policy_questions_follow_active_metadata_and_task():
     """Guided setup must expose only the metadata required by its nested policy."""
     properties = _properties()

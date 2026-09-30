@@ -419,6 +419,54 @@ compatible estimator and numeric resource limits. The resource cannot also be a
 searched parameter; generated spaces exclude it. Optuna requires optuna and
 optuna-integration; its timeout stops between fits, not during a running fit.
 
+### Optional SHAP explanations
+
+Bundle setup asks whether to enable SHAP (default: off). Enabling it adds pinned
+`shap==0.49.1` and `matplotlib==3.10.0` dependencies to the training job, on both
+serverless and policy clusters. Scoring does not compute explanations.
+
+The setup budgets apply to single models, each competition candidate and all
+generated multi-target branches. Edit `pipeline.explainability` in
+`config/workflow.json` for single/competition training, or in each
+`src/modeling/multi_model.py` branch to change its settings independently:
+
+```json
+"explainability": {
+  "method": "shap",
+  "max_samples": 100,
+  "max_features": 30,
+  "max_display_samples": 3
+}
+```
+
+Remove the field or set it to `null` (`None` in Python) to disable computation.
+For an existing project, also add the dependencies above to the training job's
+environment/libraries before enabling SHAP manually and redeploy.
+
+`max_samples` (1-200) bounds training rows used for computation. `max_features`
+(1-50) guards the transformed model input width: exceeding it returns unavailable;
+it does **not** select the top features or drop columns. `max_display_samples`
+(0-50, at most `max_samples`) controls saved sample waterfalls. Zero retains only
+global importance. These settings apply per model, so an eight-model run can do
+eight times the explanation work.
+
+The training task displays a mean-absolute importance chart and expandable
+waterfalls with transformed feature values. Red contributions increase the
+explained output; blue contributions decrease it. Base plus contributions is in
+the explainer's output units, which may be raw scores/log-odds for classifiers,
+not probabilities. Importance describes model behavior, not causal effects.
+Sample numbers identify positions in the report, not business record keys.
+
+MLflow saves `explanations.json` and a portable `explanations.html` with embedded
+PNG charts, the exact run link and fitted model URI. No JavaScript/CDN is needed.
+Competition children retain their own reports; the winner's report is also
+retained on the parent with its child-run provenance. Unavailable explanations
+show their reason; disabled training does not import SHAP or plotting packages.
+Inputs are bounded training rows through already fitted inference preprocessing;
+holdout rows and target/time metadata are not explanation features.
+
+### Training parameters in MLflow
+
 After training, open the model's MLflow experiment run and select **Parameters**.
 Competition candidates and multi-target branches each record their own settings:
 

@@ -42,7 +42,7 @@ from ..mlflow.validation import (
 from ._contracts import column_name, table_name
 from .local_batch import _frame_bytes, fit_local_workflow
 from .local_cv import CV_FIELDS, LocalCVSpec, evaluate_training_cv
-from .local_explanations import explain_training_artifact, validate_explanation_config
+from .local_explanations import log_training_explanations, validate_explanation_config
 from .local_pre_split import (
     FIXED_TYPES,
     custom_filter_columns,
@@ -886,8 +886,7 @@ def _fit_candidate(
             event_column=spec.event_column,
         )
     if pipeline_config.get("explainability"):
-        explanation = explain_training_artifact(artifact, native_train)
-        run.client.log_dict(run.run_id, explanation, "explanations.json")
+        log_training_explanations(run, artifact, native_train)
     evidence = build_training_evidence(
         spec, holdout, project_source_sha256=artifact.manifest.project_source_sha256
     )

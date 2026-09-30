@@ -228,6 +228,7 @@ def _render_default_config(record_key="entity_id", risk_category=""):
         risk_category=risk_category,
     )
     content = template.read_text(encoding="utf-8")
+    content = re.sub(r'{{if eq \.shap_enabled "true"}}.*?{{end}}', "", content, flags=re.DOTALL)
     content = (
         content[content.index("{\n") :]
         .replace("{{$window}}", "full_snapshot")

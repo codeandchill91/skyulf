@@ -69,6 +69,13 @@
   "quality_threshold": {{.quality_threshold}},
   "pipeline": {
     "preprocessing": [],
+{{if eq .shap_enabled "true"}}    "explainability": {
+      "method": "shap",
+      "max_samples": {{.shap_max_samples}},
+      "max_features": {{.shap_max_features}},
+      "max_display_samples": {{.shap_max_display_samples}}
+    },
+{{end}}
     "modeling": {{if or $competition (eq .training_layout "multi_target")}}{
       "type": "{{if eq .task "classification"}}logistic_regression{{else}}ridge_regression{{end}}",
       "params": {}

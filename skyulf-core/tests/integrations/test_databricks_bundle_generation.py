@@ -56,6 +56,43 @@ def _generate_project(tmp_path, **overrides):
     return project
 
 
+@pytest.mark.parametrize("layout", ["single_model", "model_competition", "multi_target"])
+@pytest.mark.parametrize("compute", ["serverless", "policy_cluster"])
+@pytest.mark.parametrize("enabled", ["false", "true"])
+def test_shap_generation_matches_training_dependencies(tmp_path, layout, compute, enabled):
+    """Every layout must opt in consistently without adding explanation packages to scoring."""
+    import runpy
+
+    project = _generate_project(
+        tmp_path,
+        training_layout=layout,
+        compute_mode=compute,
+        shap_enabled=enabled,
+        shap_max_samples="4",
+        shap_max_display_samples="2",
+    )
+    workflow = json.loads((project / "config/workflow.json").read_text())
+    pipelines = [workflow["pipeline"]]
+    if layout == "multi_target":
+        module = runpy.run_path(str(project / "src/modeling/multi_model.py"))
+        pipelines.extend(item["workflow"]["pipeline"] for item in module["MODELS"].values())
+    for pipeline in pipelines:
+        if enabled == "true":
+            assert pipeline["explainability"] == {
+                "method": "shap",
+                "max_samples": 4,
+                "max_features": 30,
+                "max_display_samples": 2,
+            }
+        else:
+            assert "explainability" not in pipeline
+    job = yaml.safe_load((project / "resources/train.job.yml").read_text())
+    serialized = json.dumps(job)
+    assert ("shap==0.49.1" in serialized) == (enabled == "true")
+    assert ("matplotlib==3.10.0" in serialized) == (enabled == "true")
+    assert "shap==" not in (project / "resources/score.job.yml").read_text()
+
+
 @pytest.mark.parametrize("mode", ["all", "combined_only", "separate_views"])
 def test_multi_target_output_selection_renders_custom_destinations(tmp_path, mode):
     """Initializer choices must produce callable settings with usable custom consumer names."""

@@ -96,6 +96,13 @@ MODELS = _unique_object([
             "quality_gates": {{template "python_value" (index $ (print $prefix "quality_gates"))}},
             "pipeline": {
                 "preprocessing": [],
+{{if eq $.shap_enabled "true"}}                "explainability": {
+                    "method": "shap",
+                    "max_samples": {{$.shap_max_samples}},
+                    "max_features": {{$.shap_max_features}},
+                    "max_display_samples": {{$.shap_max_display_samples}},
+                },
+{{end}}
                 "modeling": {{template "modeling" (map (pair "indent" "                ") (pair "values" $) (pair "prefix" $prefix) (pair "model" $model) (pair "task" $task) (pair "ensemble_prefix" (printf "branch_%s_ensemble_" $slot)))}}
             }
         }

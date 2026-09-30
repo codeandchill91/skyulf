@@ -473,10 +473,13 @@ def _training_summary(
         explanation = store.read("explanations.json")
         output["explanations"] = {
             key: explanation[key]
-            for key in ("status", "reason", "sample_count")
+            for key in ("status", "reason", "sample_count", "report_status", "report_reason")
             if key in explanation
         }
         output["explanations"]["artifact"] = "explanations.json"
+        output["explanations"]["report"] = "explanations.html"
+    else:
+        output["explanations"] = {"status": "disabled"}
     return output
 
 

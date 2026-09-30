@@ -168,7 +168,11 @@ def test_notebook_delegates_bound_target_and_selected_action(
         },
     }
     if action.startswith("train"):
-        resolved["pipeline"] = {**config["pipeline"], "project_python_source": project_source}
+        resolved["pipeline"] = {
+            **config["pipeline"],
+            "project_python_source": project_source,
+            "feature_recipes": {"preprocessing": "builder_default", "pre_split": "builder_default"},
+        }
         resolved["pre_split_steps"] = [
             {
                 "name": "known_target",

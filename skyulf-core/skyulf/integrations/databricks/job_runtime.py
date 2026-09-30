@@ -215,6 +215,7 @@ def _notebook_output(
     render: Callable[[dict[str, Any]], str],
     display_html: Callable[[str], Any] | None,
     exit_notebook: bool,
+    explanation_tracking_uri: str | None = None,
 ) -> str:
     """Publish readable and machine output without retrying completed side effects."""
     output = json.dumps(payload, default=str, allow_nan=False)
@@ -226,9 +227,25 @@ def _notebook_output(
             print(json.dumps(payload, indent=2, default=str, allow_nan=False))
     else:
         print(json.dumps(payload, indent=2, default=str, allow_nan=False))
+    if explanation_tracking_uri and display_html is not None:
+        _display_training_explanations(payload, explanation_tracking_uri, display_html)
     if exit_notebook:
         dbutils.notebook.exit(output)
     return output
+
+
+def _display_training_explanations(
+    payload: dict, tracking_uri: str, display_html: Callable
+) -> None:
+    """Keep optional report retrieval outside the committed training operation."""
+    from ..mlflow.tracking import _make_client  # noqa: PLC0415
+    from .explanation_report import display_explanation_reports  # noqa: PLC0415
+
+    try:
+        client = _make_client(tracking_uri)
+        display_explanation_reports(payload, client, display_html)
+    except Exception:  # noqa: BLE001 - never retry training because optional display failed
+        logging.getLogger(__name__).warning("SHAP reports unavailable; inspect MLflow artifacts.")
 
 
 def _lifecycle_widget_context(values: dict[str, str]) -> dict[str, Any]:
@@ -380,6 +397,12 @@ def run_lifecycle_notebook(
         ),
         display_html=display_html,
         exit_notebook=exit_notebook,
+        explanation_tracking_uri=(
+            options["tracking_uri"]
+            if phase in {"train", "train_register"}
+            and outcome.output.get("explanations", {}).get("status") in {"completed", "unavailable"}
+            else None
+        ),
     )
 
 
@@ -450,6 +473,11 @@ def _run_legacy_lifecycle_notebook(
         render=render_bundle_output,
         display_html=display_html,
         exit_notebook=exit_notebook,
+        explanation_tracking_uri=(
+            (config.get("tracking_uri") or "databricks")
+            if outcome.action == "train" and config.get("pipeline", {}).get("explainability")
+            else None
+        ),
     )
 
 
