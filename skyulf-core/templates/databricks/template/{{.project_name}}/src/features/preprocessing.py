@@ -52,6 +52,13 @@ def _default_recipe():
         #  "params": {"columns": ["feature_value"], "strategy": "mean"}},
         # {"name": "scale", "transformer": "StandardScaler",
         #  "params": {"columns": ["feature_value"]}},
+        # Fill each row with its own category's median (learned on training rows):
+        # {"name": "group_fill", "transformer": "GroupImputer",
+        #  "params": {"columns": ["feature_value"], "group_by": "category",
+        #             "strategy": "median"}},
+        # Cap values at fixed limits; no rows are removed:
+        # {"name": "cap", "transformer": "ClipValues",
+        #  "params": {"bounds": {"feature_value": {"lower": 0, "upper": 1000}}}},
         # Your own steps (custom/preprocessing_custom.py):
         # log_feature("feature_value"),
         # rare_categories("category", min_share=0.05),

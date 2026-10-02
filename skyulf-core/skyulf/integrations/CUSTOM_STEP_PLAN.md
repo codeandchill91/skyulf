@@ -257,6 +257,18 @@ Olası helper genişletmeleri (kullanıcı kararı bekliyor):
 
 Bu üçü yokken yukarıdaki ❌ durumlar için `advanced_class_step.py` yolu kullanılır.
 
+**Karar (gerçek proje karşılaştırmasından sonra):** Bu genişletmeler
+yapılmadı. Gerçek bir satış-lead projesindeki (dyac) adımların neredeyse hepsi
+mevcut node'larla karşılanıyordu. Eksik çıkan iki ihtiyaç helper değil, yeni
+node olarak eklendi; böylece canvas'ta ve Bundle'da kod yazmadan kullanılıyor:
+
+| İhtiyaç | Yeni node | Neden helper değil |
+|---|---|---|
+| Sektöre göre ortalama/medyan ile doldurma, görülmemiş sektöre genel değer | `GroupImputer` | Sadece eğitimde öğrenmeli; scoring batch'inde hesaplanırsa sızıntı olur |
+| Sabit sınırlara kırpma, satır silmeden | `ClipValues` | `ManualBounds` satır siler, `Winsorize` sınırı veriden öğrenir |
+
+Kullanıcı ağırlığı (`sample_weight` kolonu) ayrı bir modelleme işidir, node değildir.
+
 ## 9. Güvenlik: backend bu node'ları kabul etmez
 
 Function node'ları parametredeki fonksiyon adını çağırır. HTTP graph'ından kabul
