@@ -66,6 +66,7 @@ from .fold_adapter import (
     MergedBranchFoldAdapter,
     frame_rows,
 )
+from .function_steps import column_step, filter_step, fitted_step
 from .geo import (
     GeoDistanceApplier,
     GeoDistanceCalculator,
@@ -249,6 +250,9 @@ __all__ = [
     "WinsorizeCalculator",
     "ZScoreApplier",
     "ZScoreCalculator",
+    "column_step",
+    "filter_step",
+    "fitted_step",
     "frame_rows",
     "validate_schema",
 ]

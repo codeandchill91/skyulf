@@ -9,6 +9,7 @@
     },
     "DummyEncoder": {},
     "EllipticEnvelope": {},
+    "FittedFunction": {},
     "GeneralBinning": {},
     "HashEncoder": {},
     "IQR": {},
@@ -127,6 +128,7 @@
   },
   "stateless_transformers": {
     "AliasReplacement": {},
+    "ColumnFunction": {},
     "DataSnapshot": {},
     "DatasetProfile": {},
     "DateFeatures": {},
@@ -138,6 +140,7 @@
     "LagFeatures": {},
     "ManualBounds": {},
     "RollingAggregate": {},
+    "RowFilterFunction": {},
     "SimpleTransformation": {},
     "TextCleaning": {},
     "ValueReplacement": {},

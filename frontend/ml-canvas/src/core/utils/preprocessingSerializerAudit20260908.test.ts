@@ -124,8 +124,8 @@ describe.each(['bundled', 'registry'])('preprocessing serializer audit with %s m
   });
 
   /** The inventory must account for every registration without silently dropping core-only IDs. */
-  it('covers all 62 registered IDs', () => {
-    expect(new Set(registeredCases.map(testCase => testCase.id)).size).toBe(62);
+  it('covers all 65 registered IDs', () => {
+    expect(new Set(registeredCases.map(testCase => testCase.id)).size).toBe(65);
   });
 
   /** Inspect emitted steps and gate decisions, including unsupported canvas spellings explicitly. */
