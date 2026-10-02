@@ -11,6 +11,7 @@
     "EllipticEnvelope": {},
     "FittedFunction": {},
     "GeneralBinning": {},
+    "GroupImputer": {},
     "HashEncoder": {},
     "IQR": {},
     "IterativeImputer": {},
@@ -128,6 +129,7 @@
   },
   "stateless_transformers": {
     "AliasReplacement": {},
+    "ClipValues": {},
     "ColumnFunction": {},
     "DataSnapshot": {},
     "DatasetProfile": {},

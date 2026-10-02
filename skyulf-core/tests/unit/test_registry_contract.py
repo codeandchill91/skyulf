@@ -98,10 +98,12 @@ _COLUMN_HINTS: dict[str, dict[str, Any]] = {
     "SimpleImputer": {"columns": _NUM, "strategy": "mean"},
     "KNNImputer": {"columns": _NUM, "n_neighbors": 3},
     "IterativeImputer": {"columns": _NUM},
+    "GroupImputer": {"columns": _NUM, "group_by": "cat_a", "strategy": "mean"},
     # Outliers (row-dropping)
     "IQR": {"columns": _NUM},
     "ZScore": {"columns": _NUM},
     "Winsorize": {"columns": _NUM},
+    "ClipValues": {"bounds": {"num_a": {"lower": -1.0, "upper": 1.0}, "num_b": {"upper": 6}}},
     "ManualBounds": {"columns": _NUM, "lower_bound": -10, "upper_bound": 10},
     "EllipticEnvelope": {"columns": ["num_a", "num_b"], "contamination": 0.1},
     # Bucketing

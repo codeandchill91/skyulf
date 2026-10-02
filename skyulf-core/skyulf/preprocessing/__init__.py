@@ -74,6 +74,8 @@ from .geo import (
     H3IndexCalculator,
 )
 from .imputation import (
+    GroupImputerApplier,
+    GroupImputerCalculator,
     IterativeImputerApplier,
     IterativeImputerCalculator,
     KNNImputerApplier,
@@ -88,6 +90,8 @@ from .inspection import (
     DataSnapshotCalculator,
 )
 from .outliers import (
+    ClipValuesApplier,
+    ClipValuesCalculator,
     EllipticEnvelopeApplier,
     EllipticEnvelopeCalculator,
     IQRApplier,
@@ -148,6 +152,8 @@ __all__ = [
     "BaseCalculator",
     "CastingApplier",
     "CastingCalculator",
+    "ClipValuesApplier",
+    "ClipValuesCalculator",
     "CorrelationThresholdApplier",
     "CorrelationThresholdCalculator",
     "CountVectorizerApplier",
@@ -179,6 +185,8 @@ __all__ = [
     "GeneralTransformationApplier",
     "GeneralTransformationCalculator",
     "GeoDistanceApplier",
+    "GroupImputerApplier",
+    "GroupImputerCalculator",
     "GeoDistanceCalculator",
     "H3IndexApplier",
     "H3IndexCalculator",
